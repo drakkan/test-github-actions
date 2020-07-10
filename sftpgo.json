@@ -1,0 +1,70 @@
+{
+  "sftpd": {
+    "bind_port": 2022,
+    "bind_address": "",
+    "idle_timeout": 15,
+    "max_auth_tries": 0,
+    "umask": "0022",
+    "banner": "",
+    "upload_mode": 0,
+    "actions": {
+      "execute_on": [],
+      "hook": ""
+    },
+    "host_keys": [],
+    "kex_algorithms": [],
+    "ciphers": [],
+    "macs": [],
+    "trusted_user_ca_keys": [],
+    "login_banner_file": "",
+    "setstat_mode": 0,
+    "enabled_ssh_commands": [
+      "md5sum",
+      "sha1sum",
+      "cd",
+      "pwd",
+      "scp"
+    ],
+    "keyboard_interactive_auth_hook": "",
+    "proxy_protocol": 0,
+    "proxy_allowed": []
+  },
+  "data_provider": {
+    "driver": "sqlite",
+    "name": "sftpgo.db",
+    "host": "",
+    "port": 5432,
+    "username": "",
+    "password": "",
+    "sslmode": 0,
+    "connection_string": "",
+    "sql_tables_prefix": "",
+    "manage_users": 1,
+    "track_quota": 2,
+    "pool_size": 0,
+    "users_base_dir": "",
+    "actions": {
+      "execute_on": [],
+      "hook": ""
+    },
+    "external_auth_hook": "",
+    "external_auth_scope": 0,
+    "credentials_path": "credentials",
+    "pre_login_hook": ""
+  },
+  "httpd": {
+    "bind_port": 8080,
+    "bind_address": "127.0.0.1",
+    "templates_path": "templates",
+    "static_files_path": "static",
+    "backups_path": "backups",
+    "auth_user_file": "",
+    "certificate_file": "",
+    "certificate_key_file": ""
+  },
+  "http": {
+    "timeout": 20,
+    "ca_certificates": [],
+    "skip_tls_verify": false
+  }
+}
