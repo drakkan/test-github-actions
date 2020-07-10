@@ -166,7 +166,7 @@ jobs:
           fi
           ./sftpgo gen completion bash > output/bash_completion/sftpgo-completion.bash
           ./sftpgo gen completion zsh > output/zsh_completion/_sftpgo
-          ./sftpgo gen man output/man/man1
+          ./sftpgo gen man -d output/man/man1
           gzip output/man/man1/*
           cp examples/rest-api-cli/sftpgo_api_cli.py output/examples/rest-api-cli/
           cd output
