@@ -73,7 +73,7 @@ jobs:
       - name: Prepare build artifact for Linux/macOS
         if: startsWith(matrix.os, 'windows-') != true
         run: |
-          mkdir output/{bash_completion,zsh_completion}
+          mkdir -p output/{bash_completion,zsh_completion}
           cp sftpgo output/
           cp sftpgo.json output/
           cp -r templates output/

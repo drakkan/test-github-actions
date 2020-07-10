@@ -162,7 +162,7 @@ jobs:
           then
             cp -r init/sftpgo.service output/init/
           else
-            cp -r init/com.github.drakkan.sftpgo.plist output/init
+            cp -r init/com.github.drakkan.sftpgo.plist output/init/
           fi
           ./sftpgo gen completion bash > output/bash_completion/sftpgo-completion.bash
           ./sftpgo gen completion zsh > output/zsh_completion/_sftpgo
