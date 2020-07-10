@@ -246,7 +246,7 @@ jobs:
           asset_name: sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_x86_64.exe
           asset_content_type: application/x-dosexec
 
-      - name: Upload Windows Portable Release
+      - name: Upload Portable Windows Release
         if: startsWith(matrix.os, 'windows-')
         uses: actions/upload-release-asset@v1
         env:
@@ -254,5 +254,5 @@ jobs:
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
           asset_path: ./sftpgo_portable_x86_64.zip
-          asset_name: sftpgo_portable_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_x86_64.zip
+          asset_name: sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_portable_x86_64.zip
           asset_content_type: application/zip
