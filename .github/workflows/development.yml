@@ -11,14 +11,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        go: [1.14]
+        go: [1.14.x]
         os: [ubuntu-latest, macos-latest]
         upload-coverage: [true]
         include:
-          - go: 1.13
+          - go: 1.13.x
             os: ubuntu-latest
             upload-coverage: false
-          - go: 1.14
+          - go: 1.14.x
             os: windows-latest
             upload-coverage: false
 
@@ -139,7 +139,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v2
         with:
-          go-version: 1.14
+          go-version: 1.14.x
 
       - name: Build
         run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
@@ -176,4 +176,4 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v1
         with:
-          version: v1.27
+          version: v1.29
