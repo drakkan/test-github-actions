@@ -286,6 +286,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
-          asset_path: ./pkgs/dist/rpm/sftpgo-${{ steps.build_linux_pkgs.outputs.PKG_VERSION }}-1.x86_64.rpm
-          asset_name: sftpgo-${{ steps.build_linux_pkgs.outputs.PKG_VERSION }}-1.x86_64.rpm
+          asset_path: ./pkgs/dist/rpm/sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-1.x86_64.rpm
+          asset_name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-1.x86_64.rpm
           asset_content_type: application/x-rpm
