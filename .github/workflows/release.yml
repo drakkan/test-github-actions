@@ -275,8 +275,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
-          asset_path: ./pkgs/dist/deb/sftpgo_${{ steps.build_linux_pkgs.outputs.PKG_VERSION }}-1_amd64.deb
-          asset_name: sftpgo_${{ steps.build_linux_pkgs.outputs.PKG_VERSION }}-1_amd64.deb
+          asset_path: ./pkgs/dist/deb/sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-1_amd64.deb
+          asset_name: sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-1_amd64.deb
           asset_content_type: application/vnd.debian.binary-package
 
       - name: Upload RPM Package
