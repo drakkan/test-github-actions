@@ -1,14 +1,20 @@
 #!/bin/bash
 
-mkdir dist
-cd ..
-LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
-NUM_COMMITS_FROM_TAG=$(git rev-list ${LATEST_TAG}.. --count)
-#COMMIT_HASH=$(git rev-parse --short HEAD)
-VERSION=$(echo "${LATEST_TAG}" | awk -F. -v OFS=. '{$NF++;print}')-dev.${NUM_COMMITS_FROM_TAG}
+NFPM_VERSION=1.8.0
 
-echo -n ${VERSION} > pkgs/dist/version
-cd pkgs/dist
+if [ -z ${SFTPGO_VERSION} ]
+then
+  LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
+  NUM_COMMITS_FROM_TAG=$(git rev-list ${LATEST_TAG}.. --count)
+  #COMMIT_HASH=$(git rev-parse --short HEAD)
+  VERSION=$(echo "${LATEST_TAG}" | awk -F. -v OFS=. '{$NF++;print}')-dev.${NUM_COMMITS_FROM_TAG}
+else
+  VERSION=${SFTPGO_VERSION}
+fi
+
+mkdir dist
+echo -n ${VERSION} > dist/version
+cd dist
 BASE_DIR="../.."
 
 echo "SFTPGO_HTTPD__TEMPLATES_PATH=/usr/share/sftpgo/templates" > sftpgo.env
@@ -92,8 +98,6 @@ rpm:
     ./sftpgo.json: "/etc/sftpgo/sftpgo.json"
 
 EOF
-
-NFPM_VERSION=1.8.0
 
 curl --retry 5 --retry-delay 2 --connect-timeout 10 -L -O \
   https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz
