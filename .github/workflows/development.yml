@@ -48,31 +48,6 @@ jobs:
       - name: Run test cases using SQLite provider
         run: go test -v -p 1 -timeout 10m ./... -coverprofile=coverage.txt -covermode=atomic
 
-      - name: Upload coverage to Codecov
-        if: ${{ matrix.upload-coverage }}
-        uses: codecov/codecov-action@v1
-        with:
-          file: ./coverage.txt
-          fail_ci_if_error: false
-
-      - name: Run test cases using bolt provider
-        run: |
-          go test -v -p 1 -timeout 2m ./config -covermode=atomic
-          go test -v -p 1 -timeout 2m ./common -covermode=atomic
-          go test -v -p 1 -timeout 3m ./httpd -covermode=atomic
-          go test -v -p 1 -timeout 8m ./sftpd -covermode=atomic
-          go test -v -p 1 -timeout 2m ./ftpd -covermode=atomic
-          go test -v -p 1 -timeout 2m ./webdavd -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: bolt
-          SFTPGO_DATA_PROVIDER__NAME: 'sftpgo_bolt.db'
-
-      - name: Run test cases using memory provider
-        run: go test -v -p 1 -timeout 10m ./... -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: memory
-          SFTPGO_DATA_PROVIDER__NAME: ''
-
       - name: Prepare build artifact for Linux/macOS
         if: startsWith(matrix.os, 'windows-') != true
         run: |
@@ -116,84 +91,18 @@ jobs:
           echo "::set-output name=pkg-version::${PKG_VERSION}"
 
       - name: Upload Debian Package
+        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-deb
           path: pkgs/dist/deb/*
 
       - name: Upload RPM Package
+        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-rpm
           path: pkgs/dist/rpm/*
-
-  test-postgresql-mysql:
-    name: Test with PostgreSQL/MySQL
-    runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:latest
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: sftpgo
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
-      mariadb:
-        image: mariadb:latest
-        env:
-          MYSQL_ROOT_PASSWORD: mysql
-          MYSQL_DATABASE: sftpgo
-          MYSQL_USER: sftpgo
-          MYSQL_PASSWORD: sftpgo
-        options: >-
-          --health-cmd "mysqladmin status -h 127.0.0.1 -P 3306 -u root -p$MYSQL_ROOT_PASSWORD"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 6
-        ports:
-          - 3307:3306
-
-    steps:
-      - uses: actions/checkout@v2
-
-      - name: Set up Go
-        uses: actions/setup-go@v2
-        with:
-          go-version: 1.15
-
-      - name: Build
-        run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
-
-      - name: Run tests using PostgreSQL provider
-        run: |
-          ./sftpgo initprovider
-          go test -v -p 1 -timeout 10m ./... -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: postgresql
-          SFTPGO_DATA_PROVIDER__NAME: sftpgo
-          SFTPGO_DATA_PROVIDER__HOST: localhost
-          SFTPGO_DATA_PROVIDER__PORT: 5432
-          SFTPGO_DATA_PROVIDER__USERNAME: postgres
-          SFTPGO_DATA_PROVIDER__PASSWORD: postgres
-
-      - name: Run tests using MySQL provider
-        run: |
-          ./sftpgo initprovider
-          go test -v -p 1 -timeout 10m ./... -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: mysql
-          SFTPGO_DATA_PROVIDER__NAME: sftpgo
-          SFTPGO_DATA_PROVIDER__HOST: localhost
-          SFTPGO_DATA_PROVIDER__PORT: 3307
-          SFTPGO_DATA_PROVIDER__USERNAME: sftpgo
-          SFTPGO_DATA_PROVIDER__PASSWORD: sftpgo
 
   golangci-lint:
     name: golangci-lint
@@ -203,4 +112,4 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v1
         with:
-          version: v1.30
+          version: v1.31
