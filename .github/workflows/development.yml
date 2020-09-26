@@ -94,14 +94,14 @@ jobs:
         if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         uses: actions/upload-artifact@v2
         with:
-          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-deb
+          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-x86_64-deb
           path: pkgs/dist/deb/*
 
       - name: Upload RPM Package
         if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         uses: actions/upload-artifact@v2
         with:
-          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-rpm
+          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-x86_64-rpm
           path: pkgs/dist/rpm/*
 
   golangci-lint:
