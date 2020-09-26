@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/dataprovider"
 	"github.com/drakkan/sftpgo/logger"
-	"github.com/drakkan/sftpgo/sftpd"
 	"github.com/drakkan/sftpgo/vfs"
 )
 
@@ -154,7 +154,7 @@ func restoreFolders(folders []vfs.BaseVirtualFolder, inputFile string, scanQuota
 			return err
 		}
 		if scanQuota >= 1 {
-			if sftpd.AddVFolderQuotaScan(folder.MappedPath) {
+			if common.QuotaScans.AddVFolderQuotaScan(folder.MappedPath) {
 				logger.Debug(logSender, "", "starting quota scan for restored folder: %#v", folder.MappedPath)
 				go doFolderQuotaScan(folder) //nolint:errcheck
 			}
@@ -175,6 +175,9 @@ func restoreUsers(users []dataprovider.User, inputFile string, mode, scanQuota i
 			err = dataprovider.UpdateUser(user)
 			user.Password = "[redacted]"
 			logger.Debug(logSender, "", "restoring existing user: %+v, dump file: %#v, error: %v", user, inputFile, err)
+			if mode == 2 && err == nil {
+				disconnectUser(user.Username)
+			}
 		} else {
 			err = dataprovider.AddUser(user)
 			user.Password = "[redacted]"
@@ -184,7 +187,7 @@ func restoreUsers(users []dataprovider.User, inputFile string, mode, scanQuota i
 			return err
 		}
 		if scanQuota == 1 || (scanQuota == 2 && user.HasQuotaRestrictions()) {
-			if sftpd.AddQuotaScan(user.Username) {
+			if common.QuotaScans.AddUserQuotaScan(user.Username) {
 				logger.Debug(logSender, "", "starting quota scan for restored user: %#v", user.Username)
 				go doQuotaScan(user) //nolint:errcheck
 			}

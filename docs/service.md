@@ -1,18 +1,31 @@
 # Running SFTPGo as a service
 
+Download a binary SFTPGo [release](https://github.com/drakkan/sftpgo/releases) or a build artifact for the [latest commit](https://github.com/drakkan/sftpgo/actions) or build SFTPGo yourself.
+
+Run the following instructions from the directory that contains the sftpgo binary and the accompanying files.
+
 ## Linux
 
 For Linux, a `systemd` sample [service](../init/sftpgo.service "systemd service") can be found inside the source tree.
 
-Here are some basic instructions to run SFTPGo as service, please run the following commands from the directory where you downloaded SFTPGo:
+Here are some basic instructions to run SFTPGo as service using a dedicated `sftpgo` system account, please run the following commands from the directory where you downloaded SFTPGo:
 
 ```bash
+# create the sftpgo user and group
+sudo groupadd --system sftpgo
+sudo useradd --system \
+  --gid sftpgo \
+  --no-create-home \
+  --home-dir /var/lib/sftpgo \
+  --shell /usr/sbin/nologin \
+  --comment "SFTPGo user" \
+  sftpgo
 # create the required directories
 sudo mkdir -p /etc/sftpgo \
   /var/lib/sftpgo \
   /usr/share/sftpgo
 
-# install sftpgo executable
+# install the sftpgo executable
 sudo install -Dm755 sftpgo /usr/bin/sftpgo
 # install the default configuration file, edit it if required
 sudo install -Dm644 sftpgo.json /etc/sftpgo/
@@ -23,11 +36,17 @@ sudo sh -c 'echo "SFTPGO_HTTPD__BACKUPS_PATH=/var/lib/sftpgo/backups" >> /etc/sf
 sudo sh -c 'echo "SFTPGO_DATA_PROVIDER__CREDENTIALS_PATH=/var/lib/sftpgo/credentials" >> /etc/sftpgo/sftpgo.env'
 # if you use a file based data provider such as sqlite or bolt consider to set the database path too, for example:
 #sudo sh -c 'echo "SFTPGO_DATA_PROVIDER__NAME=/var/lib/sftpgo/sftpgo.db" >> /etc/sftpgo/sftpgo.env'
+# also set the provider's PATH as env var to get initprovider to work with SQLite provider:
+#export SFTPGO_DATA_PROVIDER__NAME=/var/lib/sftpgo/sftpgo.db
 # install static files and templates for the web UI
 sudo cp -r static templates /usr/share/sftpgo/
+# set files and directory permissions
+sudo chown -R sftpgo:sftpgo /etc/sftpgo /var/lib/sftpgo
+sudo chmod 750 /etc/sftpgo /var/lib/sftpgo
+sudo chmod 640 /etc/sftpgo/sftpgo.json /etc/sftpgo/sftpgo.env
 # initialize the configured data provider
 # if you want to use MySQL or PostgreSQL you need to create the configured database before running the initprovider command
-sudo /usr/bin/sftpgo initprovider -c /etc/sftpgo/
+sudo -E su - sftpgo -m -s /bin/bash -c 'sftpgo initprovider -c /etc/sftpgo'
 # install the systemd service
 sudo install -Dm644 init/sftpgo.service /etc/systemd/system
 # start the service
@@ -39,7 +58,7 @@ sudo systemctl enable sftpgo
 # optional, install the REST API CLI. It requires python-requests to run
 sudo install -Dm755 examples/rest-api-cli/sftpgo_api_cli.py /usr/bin/sftpgo_api_cli
 # optional, create shell completion script, for example for bash
-sudo /usr/bin/sftpgo gen completion bash > /etc/bash_completion.d/sftpgo-completion.bash
+sudo sh -c '/usr/bin/sftpgo gen completion bash > /etc/bash_completion.d/sftpgo-completion.bash'
 # optional, create man pages
 sudo /usr/bin/sftpgo gen man -d /usr/share/man/man1
 ```

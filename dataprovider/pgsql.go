@@ -83,8 +83,8 @@ func (p PGSQLProvider) checkAvailability() error {
 	return sqlCommonCheckAvailability(p.dbHandle)
 }
 
-func (p PGSQLProvider) validateUserAndPass(username string, password string) (User, error) {
-	return sqlCommonValidateUserAndPass(username, password, p.dbHandle)
+func (p PGSQLProvider) validateUserAndPass(username, password, ip, protocol string) (User, error) {
+	return sqlCommonValidateUserAndPass(username, password, ip, protocol, p.dbHandle)
 }
 
 func (p PGSQLProvider) validateUserAndPubKey(username string, publicKey []byte) (User, string, error) {
@@ -171,6 +171,10 @@ func (p PGSQLProvider) reloadConfig() error {
 
 // initializeDatabase creates the initial database structure
 func (p PGSQLProvider) initializeDatabase() error {
+	dbVersion, err := sqlCommonGetDatabaseVersion(p.dbHandle, false)
+	if err == nil && dbVersion.Version > 0 {
+		return ErrNoInitRequired
+	}
 	sqlUsers := strings.Replace(pgsqlUsersTableSQL, "{{users}}", sqlTableUsers, 1)
 	tx, err := p.dbHandle.Begin()
 	if err != nil {
@@ -195,7 +199,7 @@ func (p PGSQLProvider) initializeDatabase() error {
 }
 
 func (p PGSQLProvider) migrateDatabase() error {
-	dbVersion, err := sqlCommonGetDatabaseVersion(p.dbHandle)
+	dbVersion, err := sqlCommonGetDatabaseVersion(p.dbHandle, true)
 	if err != nil {
 		return err
 	}

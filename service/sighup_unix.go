@@ -8,8 +8,10 @@ import (
 	"syscall"
 
 	"github.com/drakkan/sftpgo/dataprovider"
+	"github.com/drakkan/sftpgo/ftpd"
 	"github.com/drakkan/sftpgo/httpd"
 	"github.com/drakkan/sftpgo/logger"
+	"github.com/drakkan/sftpgo/webdavd"
 )
 
 func registerSigHup() {
@@ -25,6 +27,14 @@ func registerSigHup() {
 			err = httpd.ReloadTLSCertificate()
 			if err != nil {
 				logger.Warn(logSender, "", "error reloading TLS certificate: %v", err)
+			}
+			err = ftpd.ReloadTLSCertificate()
+			if err != nil {
+				logger.Warn(logSender, "", "error reloading FTPD TLS certificate: %v", err)
+			}
+			err = webdavd.ReloadTLSCertificate()
+			if err != nil {
+				logger.Warn(logSender, "", "error reloading WebDav TLS certificate: %v", err)
 			}
 		}
 	}()

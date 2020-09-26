@@ -71,6 +71,19 @@
     </div>
 
     <div class="form-group row">
+        <label for="idProtocols" class="col-sm-2 col-form-label">Denied protocols</label>
+        <div class="col-sm-10">
+            <select class="form-control" id="idProtocols" name="denied_protocols" multiple>
+                {{range $protocol := .ValidProtocols}}
+                <option value="{{$protocol}}"
+                    {{range $p := $.User.Filters.DeniedProtocols }}{{if eq $p $protocol}}selected{{end}}{{end}}>{{$protocol}}
+                </option>
+                {{end}}
+            </select>
+        </div>
+    </div>
+
+    <div class="form-group row">
         <label for="idLoginMethods" class="col-sm-2 col-form-label">Denied login methods</label>
         <div class="col-sm-10">
             <select class="form-control" id="idLoginMethods" name="ssh_login_methods" multiple>
@@ -153,6 +166,26 @@
     </div>
 
     <div class="form-group row">
+        <label for="idMaxUploadSize" class="col-sm-2 col-form-label">Max file upload size (bytes)</label>
+        <div class="col-sm-3">
+            <input type="number" class="form-control" id="idMaxUploadSize" name="max_upload_file_size" placeholder=""
+                value="{{.User.Filters.MaxUploadFileSize}}" min="0" aria-describedby="fqsHelpBlock">
+            <small id="fqsHelpBlock" class="form-text text-muted">
+                0 means no limit
+            </small>
+        </div>
+        <div class="col-sm-2"></div>
+        <label for="idMaxSessions" class="col-sm-2 col-form-label">Max sessions</label>
+        <div class="col-sm-3">
+            <input type="number" class="form-control" id="idMaxSessions" name="max_sessions" placeholder=""
+                value="{{.User.MaxSessions}}" min="0" aria-describedby="sessionsHelpBlock">
+            <small id="sessionsHelpBlock" class="form-text text-muted">
+                0 means no limit
+            </small>
+        </div>
+    </div>
+
+    <div class="form-group row">
         <label for="idUploadBandwidth" class="col-sm-2 col-form-label">Bandwidth UL (KB/s)</label>
         <div class="col-sm-3">
             <input type="number" class="form-control" id="idUploadBandwidth" name="upload_bandwidth" placeholder=""
@@ -173,23 +206,14 @@
     </div>
 
     <div class="form-group row">
-        <label for="idMaxSessions" class="col-sm-2 col-form-label">Max sessions</label>
-        <div class="col-sm-2">
-            <input type="number" class="form-control" id="idMaxSessions" name="max_sessions" placeholder=""
-                value="{{.User.MaxSessions}}" min="0" aria-describedby="sessionsHelpBlock">
-            <small id="sessionsHelpBlock" class="form-text text-muted">
-                0 means no limit
-            </small>
-        </div>
-        <div class="col-sm-1"></div>
-        <label for="idUID" class="col-sm-1 col-form-label">UID</label>
-        <div class="col-sm-2">
+        <label for="idUID" class="col-sm-2 col-form-label">UID</label>
+        <div class="col-sm-3">
             <input type="number" class="form-control" id="idUID" name="uid" placeholder="" value="{{.User.UID}}" min="0"
                 max="65535">
         </div>
-        <div class="col-sm-1"></div>
-        <label for="idGID" class="col-sm-1 col-form-label">GID</label>
-        <div class="col-sm-2">
+        <div class="col-sm-2"></div>
+        <label for="idGID" class="col-sm-2 col-form-label">GID</label>
+        <div class="col-sm-3">
             <input type="number" class="form-control" id="idGID" name="gid" placeholder="" value="{{.User.GID}}" min="0"
                 max="65535">
         </div>
@@ -375,6 +399,17 @@
         </div>
     </div>
 
+    {{if not .IsAdd}}
+    <div class="form-group">
+        <div class="form-check">
+            <input type="checkbox" class="form-check-input" id="idDisconnect" name="disconnect" aria-describedby="disconnectHelpBlock">
+            <label for="idDisconnect" class="form-check-label">Disconnect the user after the update</label>
+            <small id="disconnectHelpBlock" class="form-text text-muted">
+                This way you force the user to login again, if connected, and so to use the new configuration
+            </small>
+        </div>
+    </div>
+    {{end}}
 
     <input type="hidden" name="expiration_date" id="hidden_start_datetime" value="">
     <button type="submit" class="btn btn-primary float-right mt-3 mb-5 px-5 px-3">Submit</button>

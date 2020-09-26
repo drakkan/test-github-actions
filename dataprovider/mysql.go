@@ -84,8 +84,8 @@ func (p MySQLProvider) checkAvailability() error {
 	return sqlCommonCheckAvailability(p.dbHandle)
 }
 
-func (p MySQLProvider) validateUserAndPass(username string, password string) (User, error) {
-	return sqlCommonValidateUserAndPass(username, password, p.dbHandle)
+func (p MySQLProvider) validateUserAndPass(username, password, ip, protocol string) (User, error) {
+	return sqlCommonValidateUserAndPass(username, password, ip, protocol, p.dbHandle)
 }
 
 func (p MySQLProvider) validateUserAndPubKey(username string, publicKey []byte) (User, string, error) {
@@ -172,6 +172,10 @@ func (p MySQLProvider) reloadConfig() error {
 
 // initializeDatabase creates the initial database structure
 func (p MySQLProvider) initializeDatabase() error {
+	dbVersion, err := sqlCommonGetDatabaseVersion(p.dbHandle, false)
+	if err == nil && dbVersion.Version > 0 {
+		return ErrNoInitRequired
+	}
 	sqlUsers := strings.Replace(mysqlUsersTableSQL, "{{users}}", sqlTableUsers, 1)
 	tx, err := p.dbHandle.Begin()
 	if err != nil {
@@ -196,7 +200,7 @@ func (p MySQLProvider) initializeDatabase() error {
 }
 
 func (p MySQLProvider) migrateDatabase() error {
-	dbVersion, err := sqlCommonGetDatabaseVersion(p.dbHandle)
+	dbVersion, err := sqlCommonGetDatabaseVersion(p.dbHandle, true)
 	if err != nil {
 		return err
 	}

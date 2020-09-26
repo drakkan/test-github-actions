@@ -30,12 +30,17 @@ For each account, the following properties can be configured:
 - `download_bandwidth` maximum download bandwidth as KB/s, 0 means unlimited.
 - `allowed_ip`, List of IP/Mask allowed to login. Any IP address not contained in this list cannot login. IP/Mask must be in CIDR notation as defined in RFC 4632 and RFC 4291, for example "192.0.2.0/24" or "2001:db8::/32"
 - `denied_ip`, List of IP/Mask not allowed to login. If an IP address is both allowed and denied then login will be denied
-- `denied_login_methods`, List of login methods not allowed. To enable multi-step authentication you have to allow only multi-step login methods. The following login methods are supported:
+- `max_upload_file_size`, max allowed size, as bytes, for a single file upload. The upload will be aborted if/when the size of the file being sent exceeds this limit. 0 means unlimited. This restriction does not apply for SSH system commands such as `git` and `rsync`
+- `denied_login_methods`, List of login methods not allowed. To enable multi-step authentication you have to allow only multi-step login methods. If password login method is denied or no password is set then FTP and WebDAV users cannot login. The following login methods are supported:
   - `publickey`
   - `password`
   - `keyboard-interactive`
   - `publickey+password`
   - `publickey+keyboard-interactive`
+- `denied_protocols`, list of protocols not allowed. The following protocols are supported:
+  - `SSH`
+  - `FTP`
+  - `DAV`
 - `file_extensions`, list of struct. These restrictions do not apply to files listing for performance reasons, so a denied file cannot be downloaded/overwritten/renamed but it will still be listed in the list of files. Please note that these restrictions can be easily bypassed. Each struct contains the following fields:
   - `allowed_extensions`, list of, case insensitive, allowed files extension. Shell like expansion is not supported so you have to specify `.jpg` and not `*.jpg`. Any file that does not end with this suffix will be denied
   - `denied_extensions`, list of, case insensitive, denied files extension. Denied file extensions are evaluated before the allowed ones

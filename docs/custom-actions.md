@@ -1,6 +1,6 @@
 # Custom Actions
 
-The `actions` struct inside the "sftpd" configuration section allows to configure the actions for file operations and SSH commands.
+The `actions` struct inside the "common" configuration section allows to configure the actions for file operations and SSH commands.
 The `hook` can be defined as the absolute path of your program or an HTTP URL.
 
 The `upload` condition includes both uploads to new files and overwrite of existing files. If an upload is aborted for quota limits SFTPGo tries to remove the partial file, so if the notification reports a zero size file and a quota exceeded error the file has been deleted. The `ssh_cmd` condition will be triggered after a command is successfully executed via SSH. `scp` will trigger the `download` and `upload` conditions and not `ssh_cmd`.
@@ -27,6 +27,7 @@ The external program can also read the following environment variables:
 - `SFTPGO_ACTION_BUCKET`, non-empty for S3 and GCS backends
 - `SFTPGO_ACTION_ENDPOINT`, non-empty for S3 backend if configured
 - `SFTPGO_ACTION_STATUS`, integer. 0 means a generic error occurred. 1 means no error, 2 means quota exceeded error
+- `SFTPGO_ACTION_PROTOCOL`, string. Possible values are `SSH`, `SFTP`, `SCP`, `FTP`, `DAV`
 
 Previous global environment variables aren't cleared when the script is called.
 The program must finish within 30 seconds.
@@ -43,6 +44,7 @@ If the `hook` defines an HTTP URL then this URL will be invoked as HTTP POST. Th
 - `bucket`, not null for S3 and GCS backends
 - `endpoint`, not null for S3 backend if configured
 - `status`, integer. 0 means a generic error occurred. 1 means no error, 2 means quota exceeded error
+- `protocol`, string. Possible values are `SSH`, `FTP`, `DAV`
 
 The HTTP request will use the global configuration for HTTP clients.
 

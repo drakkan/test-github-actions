@@ -12,13 +12,15 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"github.com/drakkan/sftpgo/dataprovider"
+	"github.com/drakkan/sftpgo/ftpd"
 	"github.com/drakkan/sftpgo/httpd"
 	"github.com/drakkan/sftpgo/logger"
+	"github.com/drakkan/sftpgo/webdavd"
 )
 
 const (
 	serviceName     = "SFTPGo"
-	serviceDesc     = "Full featured and highly configurable SFTP server"
+	serviceDesc     = "Fully featured and highly configurable SFTP server with optional FTP/S and WebDAV support"
 	rotateLogCmd    = svc.Cmd(128)
 	acceptRotateLog = svc.Accepted(rotateLogCmd)
 )
@@ -92,6 +94,14 @@ loop:
 			err = httpd.ReloadTLSCertificate()
 			if err != nil {
 				logger.Warn(logSender, "", "error reloading TLS certificate: %v", err)
+			}
+			err = ftpd.ReloadTLSCertificate()
+			if err != nil {
+				logger.Warn(logSender, "", "error reloading FTPD TLS certificate: %v", err)
+			}
+			err = webdavd.ReloadTLSCertificate()
+			if err != nil {
+				logger.Warn(logSender, "", "error reloading WebDav TLS certificate: %v", err)
 			}
 		case rotateLogCmd:
 			logger.Debug(logSender, "", "Received log file rotation request")

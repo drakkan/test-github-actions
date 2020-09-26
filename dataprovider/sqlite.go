@@ -106,8 +106,8 @@ func (p SQLiteProvider) checkAvailability() error {
 	return sqlCommonCheckAvailability(p.dbHandle)
 }
 
-func (p SQLiteProvider) validateUserAndPass(username string, password string) (User, error) {
-	return sqlCommonValidateUserAndPass(username, password, p.dbHandle)
+func (p SQLiteProvider) validateUserAndPass(username, password, ip, protocol string) (User, error) {
+	return sqlCommonValidateUserAndPass(username, password, ip, protocol, p.dbHandle)
 }
 
 func (p SQLiteProvider) validateUserAndPubKey(username string, publicKey []byte) (User, string, error) {
@@ -194,6 +194,10 @@ func (p SQLiteProvider) reloadConfig() error {
 
 // initializeDatabase creates the initial database structure
 func (p SQLiteProvider) initializeDatabase() error {
+	dbVersion, err := sqlCommonGetDatabaseVersion(p.dbHandle, false)
+	if err == nil && dbVersion.Version > 0 {
+		return ErrNoInitRequired
+	}
 	sqlUsers := strings.Replace(sqliteUsersTableSQL, "{{users}}", sqlTableUsers, 1)
 	tx, err := p.dbHandle.Begin()
 	if err != nil {
@@ -218,7 +222,7 @@ func (p SQLiteProvider) initializeDatabase() error {
 }
 
 func (p SQLiteProvider) migrateDatabase() error {
-	dbVersion, err := sqlCommonGetDatabaseVersion(p.dbHandle)
+	dbVersion, err := sqlCommonGetDatabaseVersion(p.dbHandle, true)
 	if err != nil {
 		return err
 	}

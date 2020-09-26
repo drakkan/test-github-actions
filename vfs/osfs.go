@@ -49,17 +49,37 @@ func (fs OsFs) ConnectionID() string {
 }
 
 // Stat returns a FileInfo describing the named file
-func (OsFs) Stat(name string) (os.FileInfo, error) {
-	return os.Stat(name)
+func (fs OsFs) Stat(name string) (os.FileInfo, error) {
+	fi, err := os.Stat(name)
+	if err != nil {
+		return fi, err
+	}
+	for _, v := range fs.virtualFolders {
+		if v.MappedPath == name {
+			info := NewFileInfo(v.VirtualPath, true, fi.Size(), fi.ModTime(), false)
+			return info, nil
+		}
+	}
+	return fi, err
 }
 
 // Lstat returns a FileInfo describing the named file
-func (OsFs) Lstat(name string) (os.FileInfo, error) {
-	return os.Lstat(name)
+func (fs OsFs) Lstat(name string) (os.FileInfo, error) {
+	fi, err := os.Lstat(name)
+	if err != nil {
+		return fi, err
+	}
+	for _, v := range fs.virtualFolders {
+		if v.MappedPath == name {
+			info := NewFileInfo(v.VirtualPath, true, fi.Size(), fi.ModTime(), false)
+			return info, nil
+		}
+	}
+	return fi, err
 }
 
 // Open opens the named file for reading
-func (OsFs) Open(name string) (*os.File, *pipeat.PipeReaderAt, func(), error) {
+func (OsFs) Open(name string, offset int64) (*os.File, *pipeat.PipeReaderAt, func(), error) {
 	f, err := os.Open(name)
 	return f, nil, nil, err
 }
@@ -71,7 +91,7 @@ func (OsFs) Create(name string, flag int) (*os.File, *PipeWriter, func(), error)
 	if flag == 0 {
 		f, err = os.Create(name)
 	} else {
-		f, err = os.OpenFile(name, flag, 0666)
+		f, err = os.OpenFile(name, flag, os.ModePerm)
 	}
 	return f, nil, nil, err
 }
@@ -96,6 +116,16 @@ func (OsFs) Symlink(source, target string) error {
 	return os.Symlink(source, target)
 }
 
+// Readlink returns the destination of the named symbolic link
+// as absolute virtual path
+func (fs OsFs) Readlink(name string) (string, error) {
+	p, err := os.Readlink(name)
+	if err != nil {
+		return p, err
+	}
+	return fs.GetRelativePath(p), err
+}
+
 // Chown changes the numeric uid and gid of the named file.
 func (OsFs) Chown(name string, uid int, gid int) error {
 	return os.Chown(name, uid, gid)
@@ -109,6 +139,11 @@ func (OsFs) Chmod(name string, mode os.FileMode) error {
 // Chtimes changes the access and modification times of the named file
 func (OsFs) Chtimes(name string, atime, mtime time.Time) error {
 	return os.Chtimes(name, atime, mtime)
+}
+
+// Truncate changes the size of the named file
+func (OsFs) Truncate(name string, size int64) error {
+	return os.Truncate(name, size)
 }
 
 // ReadDir reads the directory named by dirname and returns
@@ -279,6 +314,11 @@ func (fs OsFs) GetDirSize(dirname string) (int, int64, error) {
 	return numFiles, size, err
 }
 
+// HasVirtualFolders returns true if folders are emulated
+func (OsFs) HasVirtualFolders() bool {
+	return false
+}
+
 // GetFsPaths returns the base path and filesystem path for the given sftpPath.
 // base path is the root dir or matching the virtual folder dir for the sftpPath.
 // file path is the filesystem path matching the sftpPath
@@ -287,7 +327,7 @@ func (fs *OsFs) GetFsPaths(sftpPath string) (string, string) {
 	virtualPath, mappedPath := fs.getMappedFolderForPath(sftpPath)
 	if len(mappedPath) > 0 {
 		basePath = mappedPath
-		sftpPath = strings.TrimPrefix(utils.CleanSFTPPath(sftpPath), virtualPath)
+		sftpPath = strings.TrimPrefix(utils.CleanPath(sftpPath), virtualPath)
 	}
 	r := filepath.Clean(filepath.Join(basePath, sftpPath))
 	return basePath, r
@@ -373,7 +413,15 @@ func (fs *OsFs) isSubDir(sub, rootPath string) error {
 		fsLog(fs, logger.LevelWarn, "invalid root path %#v: %v", rootPath, err)
 		return err
 	}
-	if !strings.HasPrefix(sub, parent) {
+	if parent == sub {
+		return nil
+	}
+	if len(sub) < len(parent) {
+		err = fmt.Errorf("path %#v is not inside: %#v", sub, parent)
+		fsLog(fs, logger.LevelWarn, "error: %v ", err)
+		return err
+	}
+	if !strings.HasPrefix(sub, parent+string(os.PathSeparator)) {
 		err = fmt.Errorf("path %#v is not inside: %#v", sub, parent)
 		fsLog(fs, logger.LevelWarn, "error: %v ", err)
 		return err

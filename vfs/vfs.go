@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/eikenb/pipeat"
-	"github.com/pkg/sftp"
 
 	"github.com/drakkan/sftpgo/logger"
 )
@@ -23,7 +22,7 @@ type Fs interface {
 	ConnectionID() string
 	Stat(name string) (os.FileInfo, error)
 	Lstat(name string) (os.FileInfo, error)
-	Open(name string) (*os.File, *pipeat.PipeReaderAt, func(), error)
+	Open(name string, offset int64) (*os.File, *pipeat.PipeReaderAt, func(), error)
 	Create(name string, flag int) (*os.File, *PipeWriter, func(), error)
 	Rename(source, target string) error
 	Remove(name string, isDir bool) error
@@ -32,7 +31,9 @@ type Fs interface {
 	Chown(name string, uid int, gid int) error
 	Chmod(name string, mode os.FileMode) error
 	Chtimes(name string, atime, mtime time.Time) error
+	Truncate(name string, size int64) error
 	ReadDir(dirname string) ([]os.FileInfo, error)
+	Readlink(name string) (string, error)
 	IsUploadResumeSupported() bool
 	IsAtomicUploadSupported() bool
 	CheckRootPath(username string, uid int, gid int) bool
@@ -45,6 +46,12 @@ type Fs interface {
 	GetRelativePath(name string) string
 	Walk(root string, walkFn filepath.WalkFunc) error
 	Join(elem ...string) string
+	HasVirtualFolders() bool
+}
+
+// MimeTyper defines an optional interface to get the content type
+type MimeTyper interface {
+	GetMimeType(name string) (string, error)
 }
 
 var errUnsupported = errors.New("Not supported")
@@ -154,6 +161,11 @@ func (p *PipeWriter) WriteAt(data []byte, off int64) (int, error) {
 	return p.writer.WriteAt(data, off)
 }
 
+// Write is a wrapper for pipeat Write
+func (p *PipeWriter) Write(data []byte) (int, error) {
+	return p.writer.Write(data)
+}
+
 // IsDirectory checks if a path exists and is a directory
 func IsDirectory(fs Fs, path string) (bool, error) {
 	fileInfo, err := fs.Stat(path)
@@ -161,18 +173,6 @@ func IsDirectory(fs Fs, path string) (bool, error) {
 		return false, err
 	}
 	return fileInfo.IsDir(), err
-}
-
-// GetSFTPError returns an sftp error from a filesystem error
-func GetSFTPError(fs Fs, err error) error {
-	if fs.IsNotExist(err) {
-		return sftp.ErrSSHFxNoSuchFile
-	} else if fs.IsPermission(err) {
-		return sftp.ErrSSHFxPermissionDenied
-	} else if err != nil {
-		return sftp.ErrSSHFxFailure
-	}
-	return nil
 }
 
 // IsLocalOsFs returns true if fs is the local filesystem implementation

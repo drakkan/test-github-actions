@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 
 	"github.com/rs/zerolog"
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
@@ -60,9 +59,9 @@ func InitLogger(logFilePath string, logMaxSize int, logMaxBackups int, logMaxAge
 		logger = zerolog.New(rollingLogger)
 		EnableConsoleLogger(level)
 	} else {
-		logger = zerolog.New(logSyncWrapper{
+		logger = zerolog.New(&logSyncWrapper{
 			output: os.Stdout,
-			lock:   new(sync.Mutex)})
+		})
 		consoleLogger = zerolog.Nop()
 	}
 	logger = logger.Level(level)
@@ -162,7 +161,8 @@ func TransferLog(operation string, path string, elapsed int64, size int64, user 
 }
 
 // CommandLog logs an SFTP/SCP/SSH command
-func CommandLog(command, path, target, user, fileMode, connectionID, protocol string, uid, gid int, atime, mtime, sshCommand string) {
+func CommandLog(command, path, target, user, fileMode, connectionID, protocol string, uid, gid int, atime, mtime,
+	sshCommand string, size int64) {
 	logger.Info().
 		Timestamp().
 		Str("sender", command).
@@ -174,6 +174,7 @@ func CommandLog(command, path, target, user, fileMode, connectionID, protocol st
 		Int("gid", gid).
 		Str("access_time", atime).
 		Str("modification_time", atime).
+		Int64("size", size).
 		Str("ssh_command", sshCommand).
 		Str("connection_id", connectionID).
 		Str("protocol", protocol).
@@ -184,13 +185,14 @@ func CommandLog(command, path, target, user, fileMode, connectionID, protocol st
 // A connection can fail for an authentication error or other errors such as
 // a client abort or a time out if the login does not happen in two minutes.
 // These logs are useful for better integration with Fail2ban and similar tools.
-func ConnectionFailedLog(user, ip, loginType, errorString string) {
+func ConnectionFailedLog(user, ip, loginType, protocol, errorString string) {
 	logger.Debug().
 		Timestamp().
 		Str("sender", "connection_failed").
 		Str("client_ip", ip).
 		Str("username", user).
 		Str("login_type", loginType).
+		Str("protocol", protocol).
 		Str("error", errorString).
 		Msg("")
 }

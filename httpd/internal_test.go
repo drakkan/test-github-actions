@@ -17,8 +17,8 @@ import (
 	"github.com/go-chi/chi"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/dataprovider"
-	"github.com/drakkan/sftpgo/sftpd"
 	"github.com/drakkan/sftpgo/utils"
 	"github.com/drakkan/sftpgo/vfs"
 )
@@ -165,11 +165,24 @@ func TestCompareUserFilters(t *testing.T) {
 	actual.Filters.DeniedLoginMethods = []string{dataprovider.SSHLoginMethodPublicKey}
 	err = checkUser(expected, actual)
 	assert.Error(t, err)
-	expected.Filters.DeniedLoginMethods = []string{dataprovider.SSHLoginMethodPassword}
+	expected.Filters.DeniedLoginMethods = []string{dataprovider.LoginMethodPassword}
 	err = checkUser(expected, actual)
 	assert.Error(t, err)
 	expected.Filters.DeniedLoginMethods = []string{}
 	actual.Filters.DeniedLoginMethods = []string{}
+	actual.Filters.DeniedProtocols = []string{common.ProtocolFTP}
+	err = checkUser(expected, actual)
+	assert.Error(t, err)
+	expected.Filters.DeniedProtocols = []string{common.ProtocolWebDAV}
+	err = checkUser(expected, actual)
+	assert.Error(t, err)
+	expected.Filters.DeniedProtocols = []string{}
+	actual.Filters.DeniedProtocols = []string{}
+	expected.Filters.MaxUploadFileSize = 0
+	actual.Filters.MaxUploadFileSize = 100
+	err = checkUser(expected, actual)
+	assert.Error(t, err)
+	actual.Filters.MaxUploadFileSize = 0
 	expected.Filters.FileExtensions = append(expected.Filters.FileExtensions, dataprovider.ExtensionsFilter{
 		Path:              "/",
 		AllowedExtensions: []string{".jpg", ".png"},
@@ -361,7 +374,7 @@ func TestApiCallsWithBadURL(t *testing.T) {
 		MappedPath: os.TempDir(),
 	}
 	u := dataprovider.User{}
-	_, _, err := UpdateUser(u, http.StatusBadRequest)
+	_, _, err := UpdateUser(u, http.StatusBadRequest, "")
 	assert.Error(t, err)
 	_, err = RemoveUser(u, http.StatusNotFound)
 	assert.Error(t, err)
@@ -392,7 +405,7 @@ func TestApiCallToNotListeningServer(t *testing.T) {
 	u := dataprovider.User{}
 	_, _, err := AddUser(u, http.StatusBadRequest)
 	assert.Error(t, err)
-	_, _, err = UpdateUser(u, http.StatusNotFound)
+	_, _, err = UpdateUser(u, http.StatusNotFound, "")
 	assert.Error(t, err)
 	_, err = RemoveUser(u, http.StatusNotFound)
 	assert.Error(t, err)
@@ -441,7 +454,7 @@ func TestBasicAuth(t *testing.T) {
 	oldAuthPassword := authPassword
 	authUserFile := filepath.Join(os.TempDir(), "http_users.txt")
 	authUserData := []byte("test1:$2y$05$bcHSED7aO1cfLto6ZdDBOOKzlwftslVhtpIkRhAtSa4GuLmk5mola\n")
-	err := ioutil.WriteFile(authUserFile, authUserData, 0666)
+	err := ioutil.WriteFile(authUserFile, authUserData, os.ModePerm)
 	assert.NoError(t, err)
 	httpAuth, _ = newBasicAuthProvider(authUserFile)
 	_, _, err = GetVersion(http.StatusUnauthorized)
@@ -453,8 +466,17 @@ func TestBasicAuth(t *testing.T) {
 	resp, _ := sendHTTPRequest(http.MethodGet, buildURLRelativeToBase(metricsPath), nil, "")
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	authUserData = append(authUserData, []byte("test2:$1$OtSSTL8b$bmaCqEksI1e7rnZSjsIDR1\n")...)
+	err = ioutil.WriteFile(authUserFile, authUserData, os.ModePerm)
+	assert.NoError(t, err)
+	SetBaseURLAndCredentials(httpBaseURL, "test2", "password2")
+	_, _, err = GetVersion(http.StatusOK)
+	assert.NoError(t, err)
+	SetBaseURLAndCredentials(httpBaseURL, "test2", "wrong_password")
+	_, _, err = GetVersion(http.StatusOK)
+	assert.Error(t, err)
 	authUserData = append(authUserData, []byte("test2:$apr1$gLnIkRIf$Xr/6aJfmIrihP4b2N2tcs/\n")...)
-	err = ioutil.WriteFile(authUserFile, authUserData, 0666)
+	err = ioutil.WriteFile(authUserFile, authUserData, os.ModePerm)
 	assert.NoError(t, err)
 	SetBaseURLAndCredentials(httpBaseURL, "test2", "password2")
 	_, _, err = GetVersion(http.StatusOK)
@@ -463,31 +485,31 @@ func TestBasicAuth(t *testing.T) {
 	_, _, err = GetVersion(http.StatusOK)
 	assert.Error(t, err)
 	authUserData = append(authUserData, []byte("test3:$apr1$gLnIkRIf$Xr/6$aJfmIr$ihP4b2N2tcs/\n")...)
-	err = ioutil.WriteFile(authUserFile, authUserData, 0666)
+	err = ioutil.WriteFile(authUserFile, authUserData, os.ModePerm)
 	assert.NoError(t, err)
 	SetBaseURLAndCredentials(httpBaseURL, "test3", "wrong_password")
 	_, _, err = GetVersion(http.StatusUnauthorized)
 	assert.NoError(t, err)
 	authUserData = append(authUserData, []byte("test4:$invalid$gLnIkRIf$Xr/6$aJfmIr$ihP4b2N2tcs/\n")...)
-	err = ioutil.WriteFile(authUserFile, authUserData, 0666)
+	err = ioutil.WriteFile(authUserFile, authUserData, os.ModePerm)
 	assert.NoError(t, err)
 	SetBaseURLAndCredentials(httpBaseURL, "test3", "password2")
 	_, _, err = GetVersion(http.StatusUnauthorized)
 	assert.NoError(t, err)
 	if runtime.GOOS != "windows" {
 		authUserData = append(authUserData, []byte("test5:$apr1$gLnIkRIf$Xr/6aJfmIrihP4b2N2tcs/\n")...)
-		err = ioutil.WriteFile(authUserFile, authUserData, 0666)
+		err = ioutil.WriteFile(authUserFile, authUserData, os.ModePerm)
 		assert.NoError(t, err)
 		err = os.Chmod(authUserFile, 0001)
 		assert.NoError(t, err)
 		SetBaseURLAndCredentials(httpBaseURL, "test5", "password2")
 		_, _, err = GetVersion(http.StatusUnauthorized)
 		assert.NoError(t, err)
-		err = os.Chmod(authUserFile, 0666)
+		err = os.Chmod(authUserFile, os.ModePerm)
 		assert.NoError(t, err)
 	}
 	authUserData = append(authUserData, []byte("\"foo\"bar\"\r\n")...)
-	err = ioutil.WriteFile(authUserFile, authUserData, 0666)
+	err = ioutil.WriteFile(authUserFile, authUserData, os.ModePerm)
 	assert.NoError(t, err)
 	SetBaseURLAndCredentials(httpBaseURL, "test2", "password2")
 	_, _, err = GetVersion(http.StatusUnauthorized)
@@ -526,7 +548,7 @@ func TestQuotaScanInvalidFs(t *testing.T) {
 			Provider: 1,
 		},
 	}
-	sftpd.AddQuotaScan(user.Username)
+	common.QuotaScans.AddUserQuotaScan(user.Username)
 	err := doQuotaScan(user)
 	assert.Error(t, err)
 }

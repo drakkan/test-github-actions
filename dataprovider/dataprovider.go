@@ -30,9 +30,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GehirnInc/crypt"
+	"github.com/GehirnInc/crypt/apr1_crypt"
+	"github.com/GehirnInc/crypt/md5_crypt"
+	"github.com/GehirnInc/crypt/sha512_crypt"
 	"github.com/alexedwards/argon2id"
 	"github.com/go-chi/render"
-	unixcrypt "github.com/nathanaelle/password/v2"
 	"github.com/rs/xid"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/pbkdf2"
@@ -88,14 +91,23 @@ var (
 	ValidPerms = []string{PermAny, PermListItems, PermDownload, PermUpload, PermOverwrite, PermRename, PermDelete,
 		PermCreateDirs, PermCreateSymlinks, PermChmod, PermChown, PermChtimes}
 	// ValidSSHLoginMethods defines all the valid SSH login methods
-	ValidSSHLoginMethods = []string{SSHLoginMethodPublicKey, SSHLoginMethodPassword, SSHLoginMethodKeyboardInteractive,
+	ValidSSHLoginMethods = []string{SSHLoginMethodPublicKey, LoginMethodPassword, SSHLoginMethodKeyboardInteractive,
 		SSHLoginMethodKeyAndPassword, SSHLoginMethodKeyAndKeyboardInt}
 	// SSHMultiStepsLoginMethods defines the supported Multi-Step Authentications
 	SSHMultiStepsLoginMethods = []string{SSHLoginMethodKeyAndPassword, SSHLoginMethodKeyAndKeyboardInt}
-	config                    Config
-	provider                  Provider
-	sqlPlaceholders           []string
-	hashPwdPrefixes           = []string{argonPwdPrefix, bcryptPwdPrefix, pbkdf2SHA1Prefix, pbkdf2SHA256Prefix,
+	// ErrNoAuthTryed defines the error for connection closed before authentication
+	ErrNoAuthTryed = errors.New("no auth tryed")
+	// ValidProtocols defines all the valid protcols
+	ValidProtocols = []string{"SSH", "FTP", "DAV"}
+	// ErrNoInitRequired defines the error returned by InitProvider if no inizialization is required
+	ErrNoInitRequired = errors.New("Data provider initialization is not required")
+	// ErrInvalidCredentials defines the error to return if the supplied credentials are invalid
+	ErrInvalidCredentials = errors.New("Invalid credentials")
+	webDAVUsersCache      sync.Map
+	config                Config
+	provider              Provider
+	sqlPlaceholders       []string
+	hashPwdPrefixes       = []string{argonPwdPrefix, bcryptPwdPrefix, pbkdf2SHA1Prefix, pbkdf2SHA256Prefix,
 		pbkdf2SHA512Prefix, pbkdf2SHA256B64SaltPrefix, md5cryptPwdPrefix, md5cryptApr1PwdPrefix, sha512cryptPwdPrefix}
 	pbkdfPwdPrefixes        = []string{pbkdf2SHA1Prefix, pbkdf2SHA256Prefix, pbkdf2SHA512Prefix, pbkdf2SHA256B64SaltPrefix}
 	pbkdfPwdB64SaltPrefixes = []string{pbkdf2SHA256B64SaltPrefix}
@@ -103,28 +115,34 @@ var (
 	logSender               = "dataProvider"
 	availabilityTicker      *time.Ticker
 	availabilityTickerDone  chan bool
-	errWrongPassword        = errors.New("password does not match")
-	errNoInitRequired       = errors.New("initialization is not required for this data provider")
 	credentialsDirPath      string
 	sqlTableUsers           = "users"
 	sqlTableFolders         = "folders"
 	sqlTableFoldersMapping  = "folders_mapping"
 	sqlTableSchemaVersion   = "schema_version"
+	argon2Params            *argon2id.Params
 )
 
 type schemaVersion struct {
 	Version int
 }
 
-// Actions to execute on user create, update, delete.
-// An external command can be executed and/or an HTTP notification can be fired
-type Actions struct {
+// Argon2Options defines the options for argon2 password hashing
+type Argon2Options struct {
+	Memory      uint32 `json:"memory" mapstructure:"memory"`
+	Iterations  uint32 `json:"iterations" mapstructure:"iterations"`
+	Parallelism uint8  `json:"parallelism" mapstructure:"parallelism"`
+}
+
+// PasswordHashing defines the configuration for password hashing
+type PasswordHashing struct {
+	Argon2Options Argon2Options `json:"argon2_options" mapstructure:"argon2_options"`
+}
+
+// UserActions defines the action to execute on user create, update, delete.
+type UserActions struct {
 	// Valid values are add, update, delete. Empty slice to disable
 	ExecuteOn []string `json:"execute_on" mapstructure:"execute_on"`
-	// Deprecated: please use Hook
-	Command string `json:"command" mapstructure:"command"`
-	// Deprecated: please use Hook
-	HTTPNotificationURL string `json:"http_notification_url" mapstructure:"http_notification_url"`
 	// Absolute path to an external program or an HTTP URL
 	Hook string `json:"hook" mapstructure:"hook"`
 }
@@ -175,42 +193,11 @@ type Config struct {
 	UsersBaseDir string `json:"users_base_dir" mapstructure:"users_base_dir"`
 	// Actions to execute on user add, update, delete.
 	// Update action will not be fired for internal updates such as the last login or the user quota fields.
-	Actions Actions `json:"actions" mapstructure:"actions"`
-	// Deprecated: please use ExternalAuthHook
-	ExternalAuthProgram string `json:"external_auth_program" mapstructure:"external_auth_program"`
+	Actions UserActions `json:"actions" mapstructure:"actions"`
 	// Absolute path to an external program or an HTTP URL to invoke for users authentication.
 	// Leave empty to use builtin authentication.
-	// The external program can read the following environment variables to get info about the user trying
-	// to authenticate:
-	//
-	// - SFTPGO_AUTHD_USERNAME
-	// - SFTPGO_AUTHD_PASSWORD, not empty for password authentication
-	// - SFTPGO_AUTHD_PUBLIC_KEY, not empty for public key authentication
-	// - SFTPGO_AUTHD_KEYBOARD_INTERACTIVE, not empty for keyboard interactive authentication
-	//
-	// The content of these variables is _not_ quoted. They may contain special characters. They are under the
-	// control of a possibly malicious remote user.
-	//
-	// The program must respond on the standard output with a valid SFTPGo user serialized as JSON if the
-	// authentication succeed or a user with an empty username if the authentication fails.
-	// If the hook is an HTTP URL then it will be invoked as HTTP POST.
-	// The request body will contain a JSON serialized struct with the following fields:
-	//
-	// - username
-	// - password, not empty for password authentication
-	// - public_key, not empty for public key authentication
-	// - keyboard_interactive, not empty for keyboard interactive authentication
-	//
-	// If authentication succeed the HTTP response code must be 200 and the response body a valid SFTPGo user
-	// serialized as JSON. If the authentication fails the HTTP response code must be != 200 or the response body
-	// must be empty.
-	//
 	// If the authentication succeed the user will be automatically added/updated inside the defined data provider.
 	// Actions defined for user added/updated will not be executed in this case.
-	// The external hook should check authentication only, if there are login restrictions such as user
-	// disabled, expired, login allowed only from specific IP addresses it is enough to populate the matching user
-	// fields and these conditions will be checked in the same way as for builtin users.
-	// The external auth program must finish within 30 seconds.
 	// This method is slower than built-in authentication methods, but it's very flexible as anyone can
 	// easily write his own authentication hooks.
 	ExternalAuthHook string `json:"external_auth_hook" mapstructure:"external_auth_hook"`
@@ -227,30 +214,9 @@ type Config struct {
 	// Google Cloud Storage credentials. It can be a path relative to the config dir or an
 	// absolute path
 	CredentialsPath string `json:"credentials_path" mapstructure:"credentials_path"`
-	// Deprecated: please use PreLoginHook
-	PreLoginProgram string `json:"pre_login_program" mapstructure:"pre_login_program"`
 	// Absolute path to an external program or an HTTP URL to invoke just before the user login.
 	// This program/URL allows to modify or create the user trying to login.
 	// It is useful if you have users with dynamic fields to update just before the login.
-	// The external program can read the following environment variables:
-	//
-	// - SFTPGO_LOGIND_USER, it contains the user trying to login serialized as JSON
-	// - SFTPGO_LOGIND_METHOD, possible values are: "password", "publickey" and "keyboard-interactive"
-	//
-	// The program must write on its standard output an empty string if no user update is needed
-	// or a valid SFTPGo user serialized as JSON.
-	//
-	// If the hook is an HTTP URL then it will be invoked as HTTP POST.
-	// The login method is added to the query string, for example "<http_url>?login_method=password".
-	// The request body will contain the user trying to login serialized as JSON.
-	// If no modification is needed the HTTP response code must be 204, otherwise the response code
-	// must be 200 and the response body a valid SFTPGo user serialized as JSON.
-	//
-	// The JSON response can include only the fields to update instead of the full user,
-	// for example if you want to disable the user you can return a response like this:
-	//
-	// {"status":0}
-	//
 	// Please note that if you want to create a new user, the pre-login hook response must
 	// include all the mandatory user fields.
 	//
@@ -260,6 +226,31 @@ type Config struct {
 	// PreLoginHook and ExternalAuthHook are mutally exclusive.
 	// Leave empty to disable.
 	PreLoginHook string `json:"pre_login_hook" mapstructure:"pre_login_hook"`
+	// Absolute path to an external program or an HTTP URL to invoke after the user login.
+	// Based on the configured scope you can choose if notify failed or successful logins
+	// or both
+	PostLoginHook string `json:"post_login_hook" mapstructure:"post_login_hook"`
+	// PostLoginScope defines the scope for the post-login hook.
+	// - 0 means notify both failed and successful logins
+	// - 1 means notify failed logins
+	// - 2 means notify successful logins
+	PostLoginScope int `json:"post_login_scope" mapstructure:"post_login_scope"`
+	// Absolute path to an external program or an HTTP URL to invoke just before password
+	// authentication. This hook allows you to externally check the provided password,
+	// its main use case is to allow to easily support things like password+OTP for protocols
+	// without keyboard interactive support such as FTP and WebDAV. You can ask your users
+	// to login using a string consisting of a fixed password and a One Time Token, you
+	// can verify the token inside the hook and ask to SFTPGo to verify the fixed part.
+	CheckPasswordHook string `json:"check_password_hook" mapstructure:"check_password_hook"`
+	// CheckPasswordScope defines the scope for the check password hook.
+	// - 0 means all protocols
+	// - 1 means SSH
+	// - 2 means FTP
+	// - 4 means WebDAV
+	// you can combine the scopes, for example 6 means FTP and WebDAV
+	CheckPasswordScope int `json:"check_password_scope" mapstructure:"check_password_scope"`
+	// PasswordHashing defines the configuration for password hashing
+	PasswordHashing PasswordHashing `json:"password_hashing" mapstructure:"password_hashing"`
 }
 
 // BackupData defines the structure for the backup/restore files
@@ -271,6 +262,7 @@ type BackupData struct {
 type keyboardAuthHookRequest struct {
 	RequestID string   `json:"request_id"`
 	Username  string   `json:"username,omitempty"`
+	IP        string   `json:"ip,omitempty"`
 	Password  string   `json:"password,omitempty"`
 	Answers   []string `json:"answers,omitempty"`
 	Questions []string `json:"questions,omitempty"`
@@ -282,6 +274,21 @@ type keyboardAuthHookResponse struct {
 	Echos       []bool   `json:"echos"`
 	AuthResult  int      `json:"auth_result"`
 	CheckPwd    int      `json:"check_password"`
+}
+
+type checkPasswordRequest struct {
+	Username string `json:"username"`
+	IP       string `json:"ip"`
+	Password string `json:"password"`
+	Protocol string `json:"protocol"`
+}
+
+type checkPasswordResponse struct {
+	// 0 KO, 1 OK, 2 partial success, -1 not executed
+	Status int `json:"status"`
+	// for status = 2 this is the password to check against the one stored
+	// inside the SFTPGo data provider
+	ToVerify string `json:"to_verify"`
 }
 
 type virtualFoldersCompact struct {
@@ -334,7 +341,7 @@ func GetQuotaTracking() int {
 
 // Provider defines the interface that data providers must implement.
 type Provider interface {
-	validateUserAndPass(username string, password string) (User, error)
+	validateUserAndPass(username, password, ip, protocol string) (User, error)
 	validateUserAndPubKey(username string, pubKey []byte) (User, string, error)
 	updateQuota(username string, filesAdd int, sizeAdd int64, reset bool) error
 	getUsedQuota(username string) (int, int64, error)
@@ -360,10 +367,6 @@ type Provider interface {
 	migrateDatabase() error
 }
 
-func init() {
-	availabilityTicker = time.NewTicker(30 * time.Second)
-}
-
 // Initialize the data provider.
 // An error is returned if the configured driver is invalid or if the data provider cannot be initialized
 func Initialize(cnf Config, basePath string) error {
@@ -385,31 +388,43 @@ func Initialize(cnf Config, basePath string) error {
 		providerLog(logger.LevelWarn, "database migration error: %v", err)
 		return err
 	}
+	argon2Params = &argon2id.Params{
+		Memory:      cnf.PasswordHashing.Argon2Options.Memory,
+		Iterations:  cnf.PasswordHashing.Argon2Options.Iterations,
+		Parallelism: cnf.PasswordHashing.Argon2Options.Parallelism,
+		SaltLength:  16,
+		KeyLength:   32,
+	}
 	startAvailabilityTimer()
 	return nil
 }
 
 func validateHooks() error {
+	var hooks []string
 	if len(config.PreLoginHook) > 0 && !strings.HasPrefix(config.PreLoginHook, "http") {
-		if !filepath.IsAbs(config.PreLoginHook) {
-			return fmt.Errorf("invalid pre-login hook: %#v must be an absolute path", config.PreLoginHook)
-		}
-		_, err := os.Stat(config.PreLoginHook)
-		if err != nil {
-			providerLog(logger.LevelWarn, "invalid pre-login hook: %v", err)
-			return err
-		}
+		hooks = append(hooks, config.PreLoginHook)
 	}
 	if len(config.ExternalAuthHook) > 0 && !strings.HasPrefix(config.ExternalAuthHook, "http") {
-		if !filepath.IsAbs(config.ExternalAuthHook) {
-			return fmt.Errorf("invalid external auth hook: %#v must be an absolute path", config.ExternalAuthHook)
+		hooks = append(hooks, config.ExternalAuthHook)
+	}
+	if len(config.PostLoginHook) > 0 && !strings.HasPrefix(config.PostLoginHook, "http") {
+		hooks = append(hooks, config.PostLoginHook)
+	}
+	if len(config.CheckPasswordHook) > 0 && !strings.HasPrefix(config.CheckPasswordHook, "http") {
+		hooks = append(hooks, config.CheckPasswordHook)
+	}
+
+	for _, hook := range hooks {
+		if !filepath.IsAbs(hook) {
+			return fmt.Errorf("invalid hook: %#v must be an absolute path", hook)
 		}
-		_, err := os.Stat(config.ExternalAuthHook)
+		_, err := os.Stat(hook)
 		if err != nil {
-			providerLog(logger.LevelWarn, "invalid external auth hook: %v", err)
+			providerLog(logger.LevelWarn, "invalid hook: %v", err)
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -435,7 +450,7 @@ func InitializeDatabase(cnf Config, basePath string) error {
 	config = cnf
 
 	if config.Driver == BoltDataProviderName || config.Driver == MemoryDataProviderName {
-		return errNoInitRequired
+		return ErrNoInitRequired
 	}
 	err := createProvider(basePath)
 	if err != nil {
@@ -445,35 +460,35 @@ func InitializeDatabase(cnf Config, basePath string) error {
 }
 
 // CheckUserAndPass retrieves the SFTP user with the given username and password if a match is found or an error
-func CheckUserAndPass(username string, password string) (User, error) {
+func CheckUserAndPass(username, password, ip, protocol string) (User, error) {
 	if len(config.ExternalAuthHook) > 0 && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&1 != 0) {
-		user, err := doExternalAuth(username, password, nil, "")
+		user, err := doExternalAuth(username, password, nil, "", ip, protocol)
 		if err != nil {
 			return user, err
 		}
-		return checkUserAndPass(user, password)
+		return checkUserAndPass(user, password, ip, protocol)
 	}
 	if len(config.PreLoginHook) > 0 {
-		user, err := executePreLoginHook(username, SSHLoginMethodPassword)
+		user, err := executePreLoginHook(username, LoginMethodPassword, ip, protocol)
 		if err != nil {
 			return user, err
 		}
-		return checkUserAndPass(user, password)
+		return checkUserAndPass(user, password, ip, protocol)
 	}
-	return provider.validateUserAndPass(username, password)
+	return provider.validateUserAndPass(username, password, ip, protocol)
 }
 
 // CheckUserAndPubKey retrieves the SFTP user with the given username and public key if a match is found or an error
-func CheckUserAndPubKey(username string, pubKey []byte) (User, string, error) {
+func CheckUserAndPubKey(username string, pubKey []byte, ip, protocol string) (User, string, error) {
 	if len(config.ExternalAuthHook) > 0 && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&2 != 0) {
-		user, err := doExternalAuth(username, "", pubKey, "")
+		user, err := doExternalAuth(username, "", pubKey, "", ip, protocol)
 		if err != nil {
 			return user, "", err
 		}
 		return checkUserAndPubKey(user, pubKey)
 	}
 	if len(config.PreLoginHook) > 0 {
-		user, err := executePreLoginHook(username, SSHLoginMethodPublicKey)
+		user, err := executePreLoginHook(username, SSHLoginMethodPublicKey, ip, protocol)
 		if err != nil {
 			return user, "", err
 		}
@@ -484,20 +499,20 @@ func CheckUserAndPubKey(username string, pubKey []byte) (User, string, error) {
 
 // CheckKeyboardInteractiveAuth checks the keyboard interactive authentication and returns
 // the authenticated user or an error
-func CheckKeyboardInteractiveAuth(username, authHook string, client ssh.KeyboardInteractiveChallenge) (User, error) {
+func CheckKeyboardInteractiveAuth(username, authHook string, client ssh.KeyboardInteractiveChallenge, ip, protocol string) (User, error) {
 	var user User
 	var err error
 	if len(config.ExternalAuthHook) > 0 && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&4 != 0) {
-		user, err = doExternalAuth(username, "", nil, "1")
+		user, err = doExternalAuth(username, "", nil, "1", ip, protocol)
 	} else if len(config.PreLoginHook) > 0 {
-		user, err = executePreLoginHook(username, SSHLoginMethodKeyboardInteractive)
+		user, err = executePreLoginHook(username, SSHLoginMethodKeyboardInteractive, ip, protocol)
 	} else {
 		user, err = provider.userExists(username)
 	}
 	if err != nil {
 		return user, err
 	}
-	return doKeyboardInteractiveAuth(user, authHook, client)
+	return doKeyboardInteractiveAuth(user, authHook, client, ip, protocol)
 }
 
 // UpdateLastLogin updates the last login fields for the given SFTP user
@@ -519,6 +534,9 @@ func UpdateUserQuota(user User, filesAdd int, sizeAdd int64, reset bool) error {
 	if config.ManageUsers == 0 {
 		return &MethodDisabledError{err: manageUsersDisabledError}
 	}
+	if filesAdd == 0 && sizeAdd == 0 && !reset {
+		return nil
+	}
 	return provider.updateQuota(user.Username, filesAdd, sizeAdd, reset)
 }
 
@@ -530,6 +548,9 @@ func UpdateVirtualFolderQuota(vfolder vfs.BaseVirtualFolder, filesAdd int, sizeA
 	}
 	if config.ManageUsers == 0 {
 		return &MethodDisabledError{err: manageUsersDisabledError}
+	}
+	if filesAdd == 0 && sizeAdd == 0 && !reset {
+		return nil
 	}
 	return provider.updateFolderQuota(vfolder.MappedPath, filesAdd, sizeAdd, reset)
 }
@@ -555,7 +576,7 @@ func UserExists(username string) (User, error) {
 	return provider.userExists(username)
 }
 
-// AddUser adds a new SFTP user.
+// AddUser adds a new SFTPGo user.
 // ManageUsers configuration must be set to 1 to enable this method
 func AddUser(user User) error {
 	if config.ManageUsers == 0 {
@@ -568,7 +589,7 @@ func AddUser(user User) error {
 	return err
 }
 
-// UpdateUser updates an existing SFTP user.
+// UpdateUser updates an existing SFTPGo user.
 // ManageUsers configuration must be set to 1 to enable this method
 func UpdateUser(user User) error {
 	if config.ManageUsers == 0 {
@@ -576,12 +597,13 @@ func UpdateUser(user User) error {
 	}
 	err := provider.updateUser(user)
 	if err == nil {
+		RemoveCachedWebDAVUser(user.Username)
 		go executeAction(operationUpdate, user)
 	}
 	return err
 }
 
-// DeleteUser deletes an existing SFTP user.
+// DeleteUser deletes an existing SFTPGo user.
 // ManageUsers configuration must be set to 1 to enable this method
 func DeleteUser(user User) error {
 	if config.ManageUsers == 0 {
@@ -589,6 +611,7 @@ func DeleteUser(user User) error {
 	}
 	err := provider.deleteUser(user)
 	if err == nil {
+		RemoveCachedWebDAVUser(user.Username)
 		go executeAction(operationDelete, user)
 	}
 	return err
@@ -664,8 +687,11 @@ func GetProviderStatus() error {
 // This method is used in test cases.
 // Closing an uninitialized provider is not supported
 func Close() error {
-	availabilityTicker.Stop()
-	availabilityTickerDone <- true
+	if availabilityTicker != nil {
+		availabilityTicker.Stop()
+		availabilityTickerDone <- true
+		availabilityTicker = nil
+	}
 	return provider.close()
 }
 
@@ -889,6 +915,9 @@ func validateFilters(user *User) error {
 	if len(user.Filters.DeniedLoginMethods) == 0 {
 		user.Filters.DeniedLoginMethods = []string{}
 	}
+	if len(user.Filters.DeniedProtocols) == 0 {
+		user.Filters.DeniedProtocols = []string{}
+	}
 	for _, IPMask := range user.Filters.DeniedIP {
 		_, _, err := net.ParseCIDR(IPMask)
 		if err != nil {
@@ -909,10 +938,15 @@ func validateFilters(user *User) error {
 			return &ValidationError{err: fmt.Sprintf("invalid login method: %#v", loginMethod)}
 		}
 	}
-	if err := validateFiltersFileExtensions(user); err != nil {
-		return err
+	if len(user.Filters.DeniedProtocols) >= len(ValidProtocols) {
+		return &ValidationError{err: "invalid denied_protocols"}
 	}
-	return nil
+	for _, p := range user.Filters.DeniedProtocols {
+		if !utils.IsStringInSlice(p, ValidProtocols) {
+			return &ValidationError{err: fmt.Sprintf("invalid protocol: %#v", p)}
+		}
+	}
+	return validateFiltersFileExtensions(user)
 }
 
 func saveGCSCredentials(user *User) error {
@@ -965,10 +999,13 @@ func validateFilesystemConfig(user *User) error {
 }
 
 func validateBaseParams(user *User) error {
-	if len(user.Username) == 0 || len(user.HomeDir) == 0 {
-		return &ValidationError{err: "mandatory parameters missing"}
+	if user.Username == "" {
+		return &ValidationError{err: "username is mandatory"}
 	}
-	if len(user.Password) == 0 && len(user.PublicKeys) == 0 {
+	if user.HomeDir == "" {
+		return &ValidationError{err: "home_dir is mandatory"}
+	}
+	if user.Password == "" && len(user.PublicKeys) == 0 {
 		return &ValidationError{err: "please set a password or at least a public_key"}
 	}
 	if !filepath.IsAbs(user.HomeDir) {
@@ -979,7 +1016,7 @@ func validateBaseParams(user *User) error {
 
 func createUserPasswordHash(user *User) error {
 	if len(user.Password) > 0 && !utils.IsStringPrefixInSlice(user.Password, hashPwdPrefixes) {
-		pwd, err := argon2id.CreateHash(user.Password, argon2id.DefaultParams)
+		pwd, err := argon2id.CreateHash(user.Password, argon2Params)
 		if err != nil {
 			return err
 		}
@@ -1040,7 +1077,36 @@ func checkLoginConditions(user User) error {
 	return nil
 }
 
-func checkUserAndPass(user User, password string) (User, error) {
+func isPasswordOK(user *User, password string) (bool, error) {
+	match := false
+	var err error
+	if strings.HasPrefix(user.Password, argonPwdPrefix) {
+		match, err = argon2id.ComparePasswordAndHash(password, user.Password)
+		if err != nil {
+			providerLog(logger.LevelWarn, "error comparing password with argon hash: %v", err)
+			return match, err
+		}
+	} else if strings.HasPrefix(user.Password, bcryptPwdPrefix) {
+		if err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
+			providerLog(logger.LevelWarn, "error comparing password with bcrypt hash: %v", err)
+			return match, err
+		}
+		match = true
+	} else if utils.IsStringPrefixInSlice(user.Password, pbkdfPwdPrefixes) {
+		match, err = comparePbkdf2PasswordAndHash(password, user.Password)
+		if err != nil {
+			return match, err
+		}
+	} else if utils.IsStringPrefixInSlice(user.Password, unixPwdPrefixes) {
+		match, err = compareUnixPasswordAndHash(user, password)
+		if err != nil {
+			return match, err
+		}
+	}
+	return match, err
+}
+
+func checkUserAndPass(user User, password, ip, protocol string) (User, error) {
 	err := checkLoginConditions(user)
 	if err != nil {
 		return user, err
@@ -1048,32 +1114,28 @@ func checkUserAndPass(user User, password string) (User, error) {
 	if len(user.Password) == 0 {
 		return user, errors.New("Credentials cannot be null or empty")
 	}
-	match := false
-	if strings.HasPrefix(user.Password, argonPwdPrefix) {
-		match, err = argon2id.ComparePasswordAndHash(password, user.Password)
-		if err != nil {
-			providerLog(logger.LevelWarn, "error comparing password with argon hash: %v", err)
-			return user, err
-		}
-	} else if strings.HasPrefix(user.Password, bcryptPwdPrefix) {
-		if err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
-			providerLog(logger.LevelWarn, "error comparing password with bcrypt hash: %v", err)
-			return user, err
-		}
-		match = true
-	} else if utils.IsStringPrefixInSlice(user.Password, pbkdfPwdPrefixes) {
-		match, err = comparePbkdf2PasswordAndHash(password, user.Password)
-		if err != nil {
-			return user, err
-		}
-	} else if utils.IsStringPrefixInSlice(user.Password, unixPwdPrefixes) {
-		match, err = compareUnixPasswordAndHash(user, password)
-		if err != nil {
-			return user, err
-		}
+	hookResponse, err := executeCheckPasswordHook(user.Username, password, ip, protocol)
+	if err != nil {
+		providerLog(logger.LevelDebug, "error executing check password hook: %v", err)
+		return user, errors.New("Unable to check credentials")
 	}
+	switch hookResponse.Status {
+	case -1:
+		// no hook configured
+	case 1:
+		providerLog(logger.LevelDebug, "password accepted by check password hook")
+		return user, nil
+	case 2:
+		providerLog(logger.LevelDebug, "partial success from check password hook")
+		password = hookResponse.ToVerify
+	default:
+		providerLog(logger.LevelDebug, "password rejected by check password hook, status: %v", hookResponse.Status)
+		return user, ErrInvalidCredentials
+	}
+
+	match, err := isPasswordOK(&user, password)
 	if !match {
-		err = errors.New("Invalid credentials")
+		err = ErrInvalidCredentials
 	}
 	return user, err
 }
@@ -1084,7 +1146,7 @@ func checkUserAndPubKey(user User, pubKey []byte) (User, string, error) {
 		return user, "", err
 	}
 	if len(user.PublicKeys) == 0 {
-		return user, "", errors.New("Invalid credentials")
+		return user, "", ErrInvalidCredentials
 	}
 	for i, k := range user.PublicKeys {
 		storedPubKey, comment, _, _, err := ssh.ParseAuthorizedKey([]byte(k))
@@ -1102,38 +1164,24 @@ func checkUserAndPubKey(user User, pubKey []byte) (User, string, error) {
 			return user, fmt.Sprintf("%v:%v%v", ssh.FingerprintSHA256(storedPubKey), comment, certInfo), nil
 		}
 	}
-	return user, "", errors.New("Invalid credentials")
+	return user, "", ErrInvalidCredentials
 }
 
-func compareUnixPasswordAndHash(user User, password string) (bool, error) {
-	match := false
-	var err error
+func compareUnixPasswordAndHash(user *User, password string) (bool, error) {
+	var crypter crypt.Crypter
 	if strings.HasPrefix(user.Password, sha512cryptPwdPrefix) {
-		crypter, ok := unixcrypt.SHA512.CrypterFound(user.Password)
-		if !ok {
-			err = errors.New("cannot found matching SHA512 crypter")
-			providerLog(logger.LevelWarn, "error comparing password with SHA512 crypt hash: %v", err)
-			return match, err
-		}
-		if !crypter.Verify([]byte(password)) {
-			return match, errWrongPassword
-		}
-		match = true
-	} else if strings.HasPrefix(user.Password, md5cryptPwdPrefix) || strings.HasPrefix(user.Password, md5cryptApr1PwdPrefix) {
-		crypter, ok := unixcrypt.MD5.CrypterFound(user.Password)
-		if !ok {
-			err = errors.New("cannot found matching MD5 crypter")
-			providerLog(logger.LevelWarn, "error comparing password with MD5 crypt hash: %v", err)
-			return match, err
-		}
-		if !crypter.Verify([]byte(password)) {
-			return match, errWrongPassword
-		}
-		match = true
+		crypter = sha512_crypt.New()
+	} else if strings.HasPrefix(user.Password, md5cryptPwdPrefix) {
+		crypter = md5_crypt.New()
+	} else if strings.HasPrefix(user.Password, md5cryptApr1PwdPrefix) {
+		crypter = apr1_crypt.New()
 	} else {
-		err = errors.New("unix crypt: invalid or unsupported hash format")
+		return false, errors.New("unix crypt: invalid or unsupported hash format")
 	}
-	return match, err
+	if err := crypter.Verify(user.Password, []byte(password)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func comparePbkdf2PasswordAndHash(password, hashedPassword string) (bool, error) {
@@ -1224,6 +1272,7 @@ func getSSLMode() string {
 }
 
 func startAvailabilityTimer() {
+	availabilityTicker = time.NewTicker(30 * time.Second)
 	availabilityTickerDone = make(chan bool)
 	checkDataprovider()
 	go func() {
@@ -1312,7 +1361,7 @@ func sendKeyboardAuthHTTPReq(url *url.URL, request keyboardAuthHookRequest) (key
 	return response, err
 }
 
-func executeKeyboardInteractiveHTTPHook(user User, authHook string, client ssh.KeyboardInteractiveChallenge) (int, error) {
+func executeKeyboardInteractiveHTTPHook(user User, authHook string, client ssh.KeyboardInteractiveChallenge, ip, protocol string) (int, error) {
 	authResult := 0
 	var url *url.URL
 	url, err := url.Parse(authHook)
@@ -1323,6 +1372,7 @@ func executeKeyboardInteractiveHTTPHook(user User, authHook string, client ssh.K
 	requestID := xid.New().String()
 	req := keyboardAuthHookRequest{
 		Username:  user.Username,
+		IP:        ip,
 		Password:  user.Password,
 		RequestID: requestID,
 	}
@@ -1338,7 +1388,7 @@ func executeKeyboardInteractiveHTTPHook(user User, authHook string, client ssh.K
 		if err = validateKeyboardAuthResponse(response); err != nil {
 			return authResult, err
 		}
-		answers, err := getKeyboardInteractiveAnswers(client, response, user)
+		answers, err := getKeyboardInteractiveAnswers(client, response, user, ip, protocol)
 		if err != nil {
 			return authResult, err
 		}
@@ -1353,7 +1403,7 @@ func executeKeyboardInteractiveHTTPHook(user User, authHook string, client ssh.K
 }
 
 func getKeyboardInteractiveAnswers(client ssh.KeyboardInteractiveChallenge, response keyboardAuthHookResponse,
-	user User) ([]string, error) {
+	user User, ip, protocol string) ([]string, error) {
 	questions := response.Questions
 	answers, err := client(user.Username, response.Instruction, questions, response.Echos)
 	if err != nil {
@@ -1366,7 +1416,7 @@ func getKeyboardInteractiveAnswers(client ssh.KeyboardInteractiveChallenge, resp
 		return answers, err
 	}
 	if len(answers) == 1 && response.CheckPwd > 0 {
-		_, err = checkUserAndPass(user, answers[0])
+		_, err = checkUserAndPass(user, answers[0], ip, protocol)
 		providerLog(logger.LevelInfo, "interactive auth hook requested password validation for user %#v, validation error: %v",
 			user.Username, err)
 		if err != nil {
@@ -1378,8 +1428,8 @@ func getKeyboardInteractiveAnswers(client ssh.KeyboardInteractiveChallenge, resp
 }
 
 func handleProgramInteractiveQuestions(client ssh.KeyboardInteractiveChallenge, response keyboardAuthHookResponse,
-	user User, stdin io.WriteCloser) error {
-	answers, err := getKeyboardInteractiveAnswers(client, response, user)
+	user User, stdin io.WriteCloser, ip, protocol string) error {
+	answers, err := getKeyboardInteractiveAnswers(client, response, user, ip, protocol)
 	if err != nil {
 		return err
 	}
@@ -1397,13 +1447,14 @@ func handleProgramInteractiveQuestions(client ssh.KeyboardInteractiveChallenge, 
 	return nil
 }
 
-func executeKeyboardInteractiveProgram(user User, authHook string, client ssh.KeyboardInteractiveChallenge) (int, error) {
+func executeKeyboardInteractiveProgram(user User, authHook string, client ssh.KeyboardInteractiveChallenge, ip, protocol string) (int, error) {
 	authResult := 0
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, authHook)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("SFTPGO_AUTHD_USERNAME=%v", user.Username),
+		fmt.Sprintf("SFTPGO_AUTHD_IP=%v", ip),
 		fmt.Sprintf("SFTPGO_AUTHD_PASSWORD=%v", user.Password))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1436,7 +1487,7 @@ func executeKeyboardInteractiveProgram(user User, authHook string, client ssh.Ke
 			break
 		}
 		go func() {
-			err := handleProgramInteractiveQuestions(client, response, user, stdin)
+			err := handleProgramInteractiveQuestions(client, response, user, stdin, ip, protocol)
 			if err != nil {
 				once.Do(func() { terminateInteractiveAuthProgram(cmd, false) })
 			}
@@ -1454,13 +1505,13 @@ func executeKeyboardInteractiveProgram(user User, authHook string, client ssh.Ke
 	return authResult, err
 }
 
-func doKeyboardInteractiveAuth(user User, authHook string, client ssh.KeyboardInteractiveChallenge) (User, error) {
+func doKeyboardInteractiveAuth(user User, authHook string, client ssh.KeyboardInteractiveChallenge, ip, protocol string) (User, error) {
 	var authResult int
 	var err error
 	if strings.HasPrefix(authHook, "http") {
-		authResult, err = executeKeyboardInteractiveHTTPHook(user, authHook, client)
+		authResult, err = executeKeyboardInteractiveHTTPHook(user, authHook, client, ip, protocol)
 	} else {
-		authResult, err = executeKeyboardInteractiveProgram(user, authHook, client)
+		authResult, err = executeKeyboardInteractiveProgram(user, authHook, client, ip, protocol)
 	}
 	if err != nil {
 		return user, err
@@ -1475,7 +1526,85 @@ func doKeyboardInteractiveAuth(user User, authHook string, client ssh.KeyboardIn
 	return user, nil
 }
 
-func getPreLoginHookResponse(loginMethod string, userAsJSON []byte) ([]byte, error) {
+func isCheckPasswordHookDefined(protocol string) bool {
+	if len(config.CheckPasswordHook) == 0 {
+		return false
+	}
+	if config.CheckPasswordScope == 0 {
+		return true
+	}
+	switch protocol {
+	case "SSH":
+		return config.CheckPasswordScope&1 != 0
+	case "FTP":
+		return config.CheckPasswordScope&2 != 0
+	case "DAV":
+		return config.CheckPasswordScope&4 != 0
+	default:
+		return false
+	}
+}
+
+func getPasswordHookResponse(username, password, ip, protocol string) ([]byte, error) {
+	if strings.HasPrefix(config.CheckPasswordHook, "http") {
+		var result []byte
+		var url *url.URL
+		url, err := url.Parse(config.CheckPasswordHook)
+		if err != nil {
+			providerLog(logger.LevelWarn, "invalid url for check password hook %#v, error: %v", config.CheckPasswordHook, err)
+			return result, err
+		}
+		req := checkPasswordRequest{
+			Username: username,
+			Password: password,
+			IP:       ip,
+			Protocol: protocol,
+		}
+		reqAsJSON, err := json.Marshal(req)
+		if err != nil {
+			return result, err
+		}
+		httpClient := httpclient.GetHTTPClient()
+		resp, err := httpClient.Post(url.String(), "application/json", bytes.NewBuffer(reqAsJSON))
+		if err != nil {
+			providerLog(logger.LevelWarn, "error getting check password hook response: %v", err)
+			return result, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return result, fmt.Errorf("wrong http status code from chek password hook: %v, expected 200", resp.StatusCode)
+		}
+		return ioutil.ReadAll(resp.Body)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, config.CheckPasswordHook)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("SFTPGO_AUTHD_USERNAME=%v", username),
+		fmt.Sprintf("SFTPGO_AUTHD_PASSWORD=%v", password),
+		fmt.Sprintf("SFTPGO_AUTHD_IP=%v", ip),
+		fmt.Sprintf("SFTPGO_AUTHD_PROTOCOL=%v", protocol),
+	)
+	return cmd.Output()
+}
+
+func executeCheckPasswordHook(username, password, ip, protocol string) (checkPasswordResponse, error) {
+	var response checkPasswordResponse
+
+	if !isCheckPasswordHookDefined(protocol) {
+		response.Status = -1
+		return response, nil
+	}
+
+	out, err := getPasswordHookResponse(username, password, ip, protocol)
+	if err != nil {
+		return response, err
+	}
+	err = json.Unmarshal(out, &response)
+	return response, err
+}
+
+func getPreLoginHookResponse(loginMethod, ip, protocol string, userAsJSON []byte) ([]byte, error) {
 	if strings.HasPrefix(config.PreLoginHook, "http") {
 		var url *url.URL
 		var result []byte
@@ -1486,6 +1615,8 @@ func getPreLoginHookResponse(loginMethod string, userAsJSON []byte) ([]byte, err
 		}
 		q := url.Query()
 		q.Add("login_method", loginMethod)
+		q.Add("ip", ip)
+		q.Add("protocol", protocol)
 		url.RawQuery = q.Encode()
 		httpClient := httpclient.GetHTTPClient()
 		resp, err := httpClient.Post(url.String(), "application/json", bytes.NewBuffer(userAsJSON))
@@ -1508,11 +1639,13 @@ func getPreLoginHookResponse(loginMethod string, userAsJSON []byte) ([]byte, err
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("SFTPGO_LOGIND_USER=%v", string(userAsJSON)),
 		fmt.Sprintf("SFTPGO_LOGIND_METHOD=%v", loginMethod),
+		fmt.Sprintf("SFTPGO_LOGIND_IP=%v", ip),
+		fmt.Sprintf("SFTPGO_LOGIND_PROTOCOL=%v", protocol),
 	)
 	return cmd.Output()
 }
 
-func executePreLoginHook(username, loginMethod string) (User, error) {
+func executePreLoginHook(username, loginMethod, ip, protocol string) (User, error) {
 	u, err := provider.userExists(username)
 	if err != nil {
 		if _, ok := err.(*RecordNotFoundError); !ok {
@@ -1527,7 +1660,7 @@ func executePreLoginHook(username, loginMethod string) (User, error) {
 	if err != nil {
 		return u, err
 	}
-	out, err := getPreLoginHookResponse(loginMethod, userAsJSON)
+	out, err := getPreLoginHookResponse(loginMethod, ip, protocol, userAsJSON)
 	if err != nil {
 		return u, fmt.Errorf("Pre-login hook error: %v", err)
 	}
@@ -1566,7 +1699,70 @@ func executePreLoginHook(username, loginMethod string) (User, error) {
 	return provider.userExists(username)
 }
 
-func getExternalAuthResponse(username, password, pkey, keyboardInteractive string) ([]byte, error) {
+// ExecutePostLoginHook executes the post login hook if defined
+func ExecutePostLoginHook(username, loginMethod, ip, protocol string, err error) {
+	if len(config.PostLoginHook) == 0 {
+		return
+	}
+	if config.PostLoginScope == 1 && err == nil {
+		return
+	}
+	if config.PostLoginScope == 2 && err != nil {
+		return
+	}
+
+	go func(username, loginMethod, ip, protocol string, err error) {
+		status := 0
+		if err == nil {
+			status = 1
+		}
+		if strings.HasPrefix(config.PostLoginHook, "http") {
+			var url *url.URL
+			url, err := url.Parse(config.PostLoginHook)
+			if err != nil {
+				providerLog(logger.LevelDebug, "Invalid post-login hook %#v", config.PostLoginHook)
+				return
+			}
+			postReq := make(map[string]interface{})
+			postReq["username"] = username
+			postReq["login_method"] = loginMethod
+			postReq["ip"] = ip
+			postReq["protocol"] = protocol
+			postReq["status"] = status
+
+			postAsJSON, err := json.Marshal(postReq)
+			if err != nil {
+				providerLog(logger.LevelWarn, "error serializing post login request: %v", err)
+				return
+			}
+			startTime := time.Now()
+			respCode := 0
+			httpClient := httpclient.GetHTTPClient()
+			resp, err := httpClient.Post(url.String(), "application/json", bytes.NewBuffer(postAsJSON))
+			if err == nil {
+				respCode = resp.StatusCode
+				resp.Body.Close()
+			}
+			providerLog(logger.LevelDebug, "post login hook executed, response code: %v, elapsed: %v err: %v",
+				respCode, time.Since(startTime), err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, config.PostLoginHook)
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("SFTPGO_LOGIND_USER=%v", username),
+			fmt.Sprintf("SFTPGO_LOGIND_IP=%v", ip),
+			fmt.Sprintf("SFTPGO_LOGIND_METHOD=%v", loginMethod),
+			fmt.Sprintf("SFTPGO_LOGIND_STATUS=%v", status),
+			fmt.Sprintf("SFTPGO_LOGIND_PROTOCOL=%v", protocol))
+		startTime := time.Now()
+		err = cmd.Run()
+		providerLog(logger.LevelDebug, "post login hook executed, elapsed %v err: %v", time.Since(startTime), err)
+	}(username, loginMethod, ip, protocol, err)
+}
+
+func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol string) ([]byte, error) {
 	if strings.HasPrefix(config.ExternalAuthHook, "http") {
 		var url *url.URL
 		var result []byte
@@ -1578,8 +1774,10 @@ func getExternalAuthResponse(username, password, pkey, keyboardInteractive strin
 		httpClient := httpclient.GetHTTPClient()
 		authRequest := make(map[string]string)
 		authRequest["username"] = username
+		authRequest["ip"] = ip
 		authRequest["password"] = password
 		authRequest["public_key"] = pkey
+		authRequest["protocol"] = protocol
 		authRequest["keyboard_interactive"] = keyboardInteractive
 		authRequestAsJSON, err := json.Marshal(authRequest)
 		if err != nil {
@@ -1602,13 +1800,15 @@ func getExternalAuthResponse(username, password, pkey, keyboardInteractive strin
 	cmd := exec.CommandContext(ctx, config.ExternalAuthHook)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("SFTPGO_AUTHD_USERNAME=%v", username),
+		fmt.Sprintf("SFTPGO_AUTHD_IP=%v", ip),
 		fmt.Sprintf("SFTPGO_AUTHD_PASSWORD=%v", password),
 		fmt.Sprintf("SFTPGO_AUTHD_PUBLIC_KEY=%v", pkey),
+		fmt.Sprintf("SFTPGO_AUTHD_PROTOCOL=%v", protocol),
 		fmt.Sprintf("SFTPGO_AUTHD_KEYBOARD_INTERACTIVE=%v", keyboardInteractive))
 	return cmd.Output()
 }
 
-func doExternalAuth(username, password string, pubKey []byte, keyboardInteractive string) (User, error) {
+func doExternalAuth(username, password string, pubKey []byte, keyboardInteractive, ip, protocol string) (User, error) {
 	var user User
 	pkey := ""
 	if len(pubKey) > 0 {
@@ -1618,7 +1818,7 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 		}
 		pkey = string(ssh.MarshalAuthorizedKey(k))
 	}
-	out, err := getExternalAuthResponse(username, password, pkey, keyboardInteractive)
+	out, err := getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol)
 	if err != nil {
 		return user, fmt.Errorf("External auth error: %v", err)
 	}
@@ -1627,7 +1827,7 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 		return user, fmt.Errorf("Invalid external auth response: %v", err)
 	}
 	if len(user.Username) == 0 {
-		return user, errors.New("Invalid credentials")
+		return user, ErrInvalidCredentials
 	}
 	if len(password) > 0 {
 		user.Password = password
@@ -1741,5 +1941,49 @@ func updateVFoldersQuotaAfterRestore(foldersToScan []string) {
 		}
 		err = UpdateVirtualFolderQuota(vfolder, numFiles, size, true)
 		providerLog(logger.LevelDebug, "quota updated for virtual folder %#v, error: %v", vfolder.MappedPath, err)
+	}
+}
+
+// CacheWebDAVUser add a user to the WebDAV cache
+func CacheWebDAVUser(cachedUser CachedUser, maxSize int) {
+	if maxSize > 0 {
+		var cacheSize int
+		var userToRemove string
+		var expirationTime time.Time
+
+		webDAVUsersCache.Range(func(k, v interface{}) bool {
+			cacheSize++
+			if len(userToRemove) == 0 {
+				userToRemove = k.(string)
+				expirationTime = v.(CachedUser).Expiration
+				return true
+			}
+			expireTime := v.(CachedUser).Expiration
+			if !expireTime.IsZero() && expireTime.Before(expirationTime) {
+				userToRemove = k.(string)
+				expirationTime = expireTime
+			}
+			return true
+		})
+
+		if cacheSize >= maxSize {
+			RemoveCachedWebDAVUser(userToRemove)
+		}
+	}
+
+	if len(cachedUser.User.Username) > 0 {
+		webDAVUsersCache.Store(cachedUser.User.Username, cachedUser)
+	}
+}
+
+// GetCachedWebDAVUser returns a previously cached WebDAV user
+func GetCachedWebDAVUser(username string) (interface{}, bool) {
+	return webDAVUsersCache.Load(username)
+}
+
+// RemoveCachedWebDAVUser removes a cached WebDAV user
+func RemoveCachedWebDAVUser(username string) {
+	if len(username) > 0 {
+		webDAVUsersCache.Delete(username)
 	}
 }

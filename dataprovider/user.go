@@ -46,10 +46,11 @@ const (
 	PermChtimes = "chtimes"
 )
 
-// Available SSH login methods
+// Available login methods
 const (
+	LoginMethodNoAuthTryed            = "no_auth_tryed"
+	LoginMethodPassword               = "password"
 	SSHLoginMethodPublicKey           = "publickey"
-	SSHLoginMethodPassword            = "password"
 	SSHLoginMethodKeyboardInteractive = "keyboard-interactive"
 	SSHLoginMethodKeyAndPassword      = "publickey+password"
 	SSHLoginMethodKeyAndKeyboardInt   = "publickey+keyboard-interactive"
@@ -58,6 +59,21 @@ const (
 var (
 	errNoMatchingVirtualFolder = errors.New("no matching virtual folder found")
 )
+
+// CachedUser adds fields useful for caching to a SFTPGo user
+type CachedUser struct {
+	User       User
+	Expiration time.Time
+	Password   string
+}
+
+// IsExpired returns true if the cached user is expired
+func (c CachedUser) IsExpired() bool {
+	if c.Expiration.IsZero() {
+		return false
+	}
+	return c.Expiration.Before(time.Now())
+}
 
 // ExtensionsFilter defines filters based on file extensions.
 // These restrictions do not apply to files listing for performance reasons, so
@@ -93,9 +109,14 @@ type UserFilters struct {
 	// these login methods are not allowed.
 	// If null or empty any available login method is allowed
 	DeniedLoginMethods []string `json:"denied_login_methods,omitempty"`
+	// these protocols are not allowed.
+	// If null or empty any available protocol is allowed
+	DeniedProtocols []string `json:"denied_protocols,omitempty"`
 	// filters based on file extensions.
 	// Please note that these restrictions can be easily bypassed.
 	FileExtensions []ExtensionsFilter `json:"file_extensions,omitempty"`
+	// max size allowed for a single upload, 0 means unlimited
+	MaxUploadFileSize int64 `json:"max_upload_file_size,omitempty"`
 }
 
 // Filesystem defines cloud storage filesystem details
@@ -106,7 +127,7 @@ type Filesystem struct {
 	GCSConfig vfs.GCSFsConfig `json:"gcsconfig,omitempty"`
 }
 
-// User defines an SFTP user
+// User defines a SFTPGo user
 type User struct {
 	// Database unique identifier
 	ID int64 `json:"id"`
@@ -221,7 +242,7 @@ func (u *User) AddVirtualDirs(list []os.FileInfo, sftpPath string) []os.FileInfo
 	}
 	for _, v := range u.VirtualFolders {
 		if path.Dir(v.VirtualPath) == sftpPath {
-			fi := vfs.NewFileInfo(path.Base(v.VirtualPath), true, 0, time.Time{})
+			fi := vfs.NewFileInfo(v.VirtualPath, true, 0, time.Now(), false)
 			found := false
 			for index, f := range list {
 				if f.Name() == fi.Name() {
@@ -345,7 +366,7 @@ func (u *User) IsLoginMethodAllowed(loginMethod string, partialSuccessMethods []
 		return true
 	}
 	if len(partialSuccessMethods) == 1 {
-		for _, method := range u.GetNextAuthMethods(partialSuccessMethods) {
+		for _, method := range u.GetNextAuthMethods(partialSuccessMethods, true) {
 			if method == loginMethod {
 				return true
 			}
@@ -359,7 +380,7 @@ func (u *User) IsLoginMethodAllowed(loginMethod string, partialSuccessMethods []
 
 // GetNextAuthMethods returns the list of authentications methods that
 // can continue for multi-step authentication
-func (u *User) GetNextAuthMethods(partialSuccessMethods []string) []string {
+func (u *User) GetNextAuthMethods(partialSuccessMethods []string, isPasswordAuthEnabled bool) []string {
 	var methods []string
 	if len(partialSuccessMethods) != 1 {
 		return methods
@@ -368,8 +389,8 @@ func (u *User) GetNextAuthMethods(partialSuccessMethods []string) []string {
 		return methods
 	}
 	for _, method := range u.GetAllowedLoginMethods() {
-		if method == SSHLoginMethodKeyAndPassword {
-			methods = append(methods, SSHLoginMethodPassword)
+		if method == SSHLoginMethodKeyAndPassword && isPasswordAuthEnabled {
+			methods = append(methods, LoginMethodPassword)
 		}
 		if method == SSHLoginMethodKeyAndKeyboardInt {
 			methods = append(methods, SSHLoginMethodKeyboardInteractive)
@@ -663,6 +684,7 @@ func (u *User) getACopy() User {
 		permissions[k] = perms
 	}
 	filters := UserFilters{}
+	filters.MaxUploadFileSize = u.Filters.MaxUploadFileSize
 	filters.AllowedIP = make([]string, len(u.Filters.AllowedIP))
 	copy(filters.AllowedIP, u.Filters.AllowedIP)
 	filters.DeniedIP = make([]string, len(u.Filters.DeniedIP))
@@ -671,6 +693,8 @@ func (u *User) getACopy() User {
 	copy(filters.DeniedLoginMethods, u.Filters.DeniedLoginMethods)
 	filters.FileExtensions = make([]ExtensionsFilter, len(u.Filters.FileExtensions))
 	copy(filters.FileExtensions, u.Filters.FileExtensions)
+	filters.DeniedProtocols = make([]string, len(u.Filters.DeniedProtocols))
+	copy(filters.DeniedProtocols, u.Filters.DeniedProtocols)
 	fsConfig := Filesystem{
 		Provider: u.FsConfig.Provider,
 		S3Config: vfs.S3FsConfig{

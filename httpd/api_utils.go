@@ -18,9 +18,9 @@ import (
 
 	"github.com/go-chi/render"
 
+	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/dataprovider"
 	"github.com/drakkan/sftpgo/httpclient"
-	"github.com/drakkan/sftpgo/sftpd"
 	"github.com/drakkan/sftpgo/utils"
 	"github.com/drakkan/sftpgo/version"
 	"github.com/drakkan/sftpgo/vfs"
@@ -67,9 +67,8 @@ func sendAPIResponse(w http.ResponseWriter, r *http.Request, err error, message 
 		errorString = err.Error()
 	}
 	resp := apiResponse{
-		Error:      errorString,
-		Message:    message,
-		HTTPStatus: code,
+		Error:   errorString,
+		Message: message,
 	}
 	ctx := context.WithValue(r.Context(), render.StatusCtxKey, code)
 	render.JSON(w, r.WithContext(ctx), resp)
@@ -119,12 +118,15 @@ func AddUser(user dataprovider.User, expectedStatusCode int) (dataprovider.User,
 }
 
 // UpdateUser updates an existing user and checks the received HTTP Status code against expectedStatusCode.
-func UpdateUser(user dataprovider.User, expectedStatusCode int) (dataprovider.User, []byte, error) {
+func UpdateUser(user dataprovider.User, expectedStatusCode int, disconnect string) (dataprovider.User, []byte, error) {
 	var newUser dataprovider.User
 	var body []byte
+	url, err := addDisconnectQueryParam(buildURLRelativeToBase(userPath, strconv.FormatInt(user.ID, 10)), disconnect)
+	if err != nil {
+		return user, body, err
+	}
 	userAsJSON, _ := json.Marshal(user)
-	resp, err := sendHTTPRequest(http.MethodPut, buildURLRelativeToBase(userPath, strconv.FormatInt(user.ID, 10)),
-		bytes.NewBuffer(userAsJSON), "application/json")
+	resp, err := sendHTTPRequest(http.MethodPut, url.String(), bytes.NewBuffer(userAsJSON), "application/json")
 	if err != nil {
 		return user, body, err
 	}
@@ -204,8 +206,8 @@ func GetUsers(limit, offset int64, username string, expectedStatusCode int) ([]d
 }
 
 // GetQuotaScans gets active quota scans for users and checks the received HTTP Status code against expectedStatusCode.
-func GetQuotaScans(expectedStatusCode int) ([]sftpd.ActiveQuotaScan, []byte, error) {
-	var quotaScans []sftpd.ActiveQuotaScan
+func GetQuotaScans(expectedStatusCode int) ([]common.ActiveQuotaScan, []byte, error) {
+	var quotaScans []common.ActiveQuotaScan
 	var body []byte
 	resp, err := sendHTTPRequest(http.MethodGet, buildURLRelativeToBase(quotaScanPath), nil, "")
 	if err != nil {
@@ -252,8 +254,8 @@ func UpdateQuotaUsage(user dataprovider.User, mode string, expectedStatusCode in
 }
 
 // GetConnections returns status and stats for active SFTP/SCP connections
-func GetConnections(expectedStatusCode int) ([]sftpd.ConnectionStatus, []byte, error) {
-	var connections []sftpd.ConnectionStatus
+func GetConnections(expectedStatusCode int) ([]common.ConnectionStatus, []byte, error) {
+	var connections []common.ConnectionStatus
 	var body []byte
 	resp, err := sendHTTPRequest(http.MethodGet, buildURLRelativeToBase(activeConnectionsPath), nil, "")
 	if err != nil {
@@ -360,8 +362,8 @@ func GetFolders(limit int64, offset int64, mappedPath string, expectedStatusCode
 }
 
 // GetFoldersQuotaScans gets active quota scans for folders and checks the received HTTP Status code against expectedStatusCode.
-func GetFoldersQuotaScans(expectedStatusCode int) ([]sftpd.ActiveVirtualFolderQuotaScan, []byte, error) {
-	var quotaScans []sftpd.ActiveVirtualFolderQuotaScan
+func GetFoldersQuotaScans(expectedStatusCode int) ([]common.ActiveVirtualFolderQuotaScan, []byte, error) {
+	var quotaScans []common.ActiveVirtualFolderQuotaScan
 	var body []byte
 	resp, err := sendHTTPRequest(http.MethodGet, buildURLRelativeToBase(quotaScanVFolderPath), nil, "")
 	if err != nil {
@@ -708,6 +710,12 @@ func compareUserFilters(expected *dataprovider.User, actual *dataprovider.User) 
 	if len(expected.Filters.DeniedLoginMethods) != len(actual.Filters.DeniedLoginMethods) {
 		return errors.New("Denied login methods mismatch")
 	}
+	if len(expected.Filters.DeniedProtocols) != len(actual.Filters.DeniedProtocols) {
+		return errors.New("Denied protocols mismatch")
+	}
+	if expected.Filters.MaxUploadFileSize != actual.Filters.MaxUploadFileSize {
+		return errors.New("Max upload file size mismatch")
+	}
 	for _, IPMask := range expected.Filters.AllowedIP {
 		if !utils.IsStringInSlice(IPMask, actual.Filters.AllowedIP) {
 			return errors.New("AllowedIP contents mismatch")
@@ -721,6 +729,11 @@ func compareUserFilters(expected *dataprovider.User, actual *dataprovider.User) 
 	for _, method := range expected.Filters.DeniedLoginMethods {
 		if !utils.IsStringInSlice(method, actual.Filters.DeniedLoginMethods) {
 			return errors.New("Denied login methods contents mismatch")
+		}
+	}
+	for _, protocol := range expected.Filters.DeniedProtocols {
+		if !utils.IsStringInSlice(protocol, actual.Filters.DeniedProtocols) {
+			return errors.New("Denied protocols contents mismatch")
 		}
 	}
 	if err := compareUserFileExtensionsFilters(expected, actual); err != nil {
@@ -824,6 +837,19 @@ func addModeQueryParam(rawurl, mode string) (*url.URL, error) {
 	q := url.Query()
 	if len(mode) > 0 {
 		q.Add("mode", mode)
+	}
+	url.RawQuery = q.Encode()
+	return url, err
+}
+
+func addDisconnectQueryParam(rawurl, disconnect string) (*url.URL, error) {
+	url, err := url.Parse(rawurl)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Query()
+	if len(disconnect) > 0 {
+		q.Add("disconnect", disconnect)
 	}
 	url.RawQuery = q.Encode()
 	return url, err

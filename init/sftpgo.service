@@ -1,10 +1,10 @@
 [Unit]
-Description=SFTPGo SFTP Server
+Description=SFTPGo Server
 After=network.target
 
 [Service]
-User=root
-Group=root
+User=sftpgo
+Group=sftpgo
 Type=simple
 WorkingDirectory=/etc/sftpgo
 Environment=SFTPGO_CONFIG_DIR=/etc/sftpgo/
@@ -13,6 +13,7 @@ EnvironmentFile=-/etc/sftpgo/sftpgo.env
 ExecStart=/usr/bin/sftpgo serve
 ExecReload=/bin/kill -s HUP $MAINPID
 KillMode=mixed
+PrivateTmp=true
 Restart=always
 RestartSec=10s
 

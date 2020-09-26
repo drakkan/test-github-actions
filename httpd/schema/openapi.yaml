@@ -1,8 +1,8 @@
-openapi: 3.0.1
+openapi: 3.0.3
 info:
   title: SFTPGo
   description: 'SFTPGo REST API'
-  version: 1.9.1
+  version: 2.0.0
 
 servers:
 - url: /api/v1
@@ -21,39 +21,15 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref : '#/components/schemas/VersionInfo'
+                $ref : '#/components/schemas/VersionInfo'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /providerstatus:
     get:
       tags:
@@ -68,39 +44,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
-                status: 200
                 message: "Alive"
-                error: ""
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Provider Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /connection:
     get:
       tags:
@@ -117,35 +69,13 @@ paths:
                 items:
                   $ref : '#/components/schemas/ConnectionStatus'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /connection/{connectionID}:
     delete:
       tags:
@@ -167,59 +97,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
-                status: 200
                 message: "Connection closed"
-                error: ""
-        400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         404:
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 404
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/NotFound'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /quota_scan:
     get:
       tags:
@@ -236,35 +124,13 @@ paths:
                 items:
                   $ref : '#/components/schemas/QuotaScan'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
     post:
       tags:
       - quota
@@ -278,76 +144,28 @@ paths:
             schema:
               $ref : '#/components/schemas/User'
       responses:
-        201:
+        202:
           description: successful operation
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
-                status: 201
                 message: "Scan started"
-                error: ""
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         404:
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 404
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/NotFound'
         409:
-          description: Another scan is already in progress for this user
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 409
-                message: "Another scan is already in progress"
-                error: "Error description if any"
+          $ref: '#/components/responses/Conflict'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /quota_update:
     put:
       tags:
@@ -383,69 +201,21 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
-                status: 200
                 message: "Quota updated"
-                error: ""
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         404:
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 404
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/NotFound'
         409:
-          description: A quota scan is in progress for this user
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 409
-                message: "A quota scan is in progress"
-                error: "Error description if any"
+          $ref: '#/components/responses/Conflict'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /folder_quota_update:
     put:
       tags:
@@ -481,69 +251,21 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
-                status: 200
                 message: "Quota updated"
-                error: ""
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         404:
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 404
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/NotFound'
         409:
-          description: A quota scan is in progress for this folder
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 409
-                message: "A quota scan is in progress"
-                error: "Error description if any"
+          $ref: '#/components/responses/Conflict'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /folder_quota_scan:
     get:
       tags:
@@ -560,35 +282,13 @@ paths:
                 items:
                   $ref : '#/components/schemas/FolderQuotaScan'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
     post:
       tags:
       - quota
@@ -602,76 +302,28 @@ paths:
             schema:
               $ref : '#/components/schemas/BaseVirtualFolder'
       responses:
-        201:
+        202:
           description: successful operation
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
-                status: 201
                 message: "Scan started"
-                error: ""
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         404:
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 404
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/NotFound'
         409:
-          description: Another scan is already in progress for this user
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 409
-                message: "Another scan is already in progress"
-                error: "Error description if any"
+          $ref: '#/components/responses/Conflict'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /folder:
     get:
       tags:
@@ -721,45 +373,15 @@ paths:
                 items:
                   $ref : '#/components/schemas/BaseVirtualFolder'
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
     post:
       tags:
       - folders
@@ -780,45 +402,15 @@ paths:
               schema:
                 $ref : '#/components/schemas/BaseVirtualFolder'
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
     delete:
       tags:
       - folders
@@ -839,59 +431,19 @@ paths:
               schema:
                 $ref : '#/components/schemas/ApiResponse'
               example:
-                status: 200
                 message: "Folder deleted"
-                error: ""
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         404:
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 404
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/NotFound'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /user:
     get:
       tags:
@@ -942,45 +494,15 @@ paths:
                 items:
                   $ref : '#/components/schemas/User'
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
     post:
       tags:
       - users
@@ -1000,45 +522,15 @@ paths:
               schema:
                 $ref : '#/components/schemas/User'
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /user/{userID}:
     get:
       tags:
@@ -1062,55 +554,17 @@ paths:
               schema:
                 $ref : '#/components/schemas/User'
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         404:
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 404
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/NotFound'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
     put:
       tags:
       - users
@@ -1124,6 +578,17 @@ paths:
         schema:
           type: integer
           format: int32
+      - in: query
+        name: disconnect
+        schema:
+          type: integer
+          enum:
+            - 0
+            - 1
+        description: >
+          Disconnect:
+            * `0` The user will not be disconnected and it will continue to use the old configuration until connected. This is the default
+            * `1` The user will be disconnected after a successful update. It must login again and so it will be forced to use the new configuration
       requestBody:
         required: true
         content:
@@ -1138,59 +603,19 @@ paths:
               schema:
                 $ref : '#/components/schemas/ApiResponse'
               example:
-                status: 200
                 message: "User updated"
-                error: ""
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         404:
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 404
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/NotFound'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
     delete:
       tags:
       - users
@@ -1212,59 +637,19 @@ paths:
               schema:
                 $ref : '#/components/schemas/ApiResponse'
               example:
-                status: 200
                 message: "User deleted"
-                error: ""
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         404:
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 404
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/NotFound'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /dumpdata:
     get:
       tags:
@@ -1298,49 +683,17 @@ paths:
               schema:
                 $ref : '#/components/schemas/ApiResponse'
               example:
-                status: 200
                 message: "Data saved"
-                error: ""
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
   /loaddata:
     get:
       tags:
@@ -1376,10 +729,12 @@ paths:
             enum:
               - 0
               - 1
+              - 2
             description: >
               Mode:
                 * `0` New users are added, existing users are updated. This is the default
                 * `1` New users are added, existing users are not modified
+                * `2` New users are added, existing users are updated and, if connected, they are disconnected and so forced to use the new configuration
       responses:
         200:
           description: successful operation
@@ -1388,50 +743,61 @@ paths:
               schema:
                 $ref : '#/components/schemas/ApiResponse'
               example:
-                status: 200
                 message: "Data restored"
-                error: ""
         400:
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 400
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/BadRequest'
         401:
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 401
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Unauthorized'
         403:
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 403
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/Forbidden'
         500:
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: 500
-                message: ""
-                error: "Error description if any"
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
 components:
+  responses:
+    BadRequest:
+      description: Bad Request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+    NotFound:
+      description: Not Found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+    InternalServerError:
+      description: Internal Server Error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+    DefaultResponse:
+      description: Unexpected Error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
   schemas:
     Permission:
       type: string
@@ -1479,12 +845,20 @@ components:
         - 'keyboard-interactive'
         - 'publickey+password'
         - 'publickey+keyboard-interactive'
+      description: >
+        To enable multi-step authentication you have to allow only multi-step login methods. If password login method is denied or no password is set then FTP and WebDAV users cannot login
+    SupportedProtocols:
+      type: string
+      enum:
+        - 'SSH'
+        - 'FTP'
+        - 'DAV'
     ExtensionsFilter:
       type: object
       properties:
         path:
           type: string
-          description: SFTP/SCP path, if no other specific filter is defined, the filter apply for sub directories too. For example if filters are defined for the paths "/" and "/sub" then the filters for "/" are applied for any file outside the "/sub" directory
+          description: exposed SFTPGo path, if no other specific filter is defined, the filter apply for sub directories too. For example if filters are defined for the paths "/" and "/sub" then the filters for "/" are applied for any file outside the "/sub" directory
         allowed_extensions:
           type: array
           items:
@@ -1522,12 +896,23 @@ components:
             $ref: '#/components/schemas/LoginMethods'
           nullable: true
           description: if null or empty any available login method is allowed
+        denied_protocols:
+          type: array
+          items:
+            $ref: '#/components/schemas/SupportedProtocols'
+          nullable: true
+          description: if null or empty any available protocol is allowed
         file_extensions:
           type: array
           items:
             $ref: '#/components/schemas/ExtensionsFilter'
           nullable: true
           description: filters based on file extensions. These restrictions do not apply to files listing for performance reasons, so a denied file cannot be downloaded/overwritten/renamed but it will still be listed in the list of files. Please note that these restrictions can be easily bypassed
+        max_upload_file_size:
+          type: integer
+          format: int64
+          nullable: true
+          description: maximum allowed size, as bytes, for a single file upload. The upload will be aborted if/when the size of the file being sent exceeds this limit. 0 means unlimited. This restriction does not apply for SSH system commands such as `git` and `rsync`
       description: Additional restrictions
     S3Config:
       type: object
@@ -1558,7 +943,7 @@ components:
           description: the number of parts to upload in parallel. If this value is set to zero, the default value (2) will be used
         key_prefix:
           type: string
-          description: key_prefix is similar to a chroot directory for a local filesystem. If specified the SFTP user will only see contents that starts with this prefix and so you can restrict access to a specific virtual folder. The prefix, if not empty, must not start with "/" and must end with "/". If empty the whole bucket contents will be available
+          description: key_prefix is similar to a chroot directory for a local filesystem. If specified the user will only see contents that starts with this prefix and so you can restrict access to a specific virtual folder. The prefix, if not empty, must not start with "/" and must end with "/". If empty the whole bucket contents will be available
           example: folder/subfolder/
       required:
         - bucket
@@ -1589,7 +974,7 @@ components:
           type: string
         key_prefix:
           type: string
-          description: key_prefix is similar to a chroot directory for a local filesystem. If specified the SFTP user will only see contents that starts with this prefix and so you can restrict access to a specific virtual folder. The prefix, if not empty, must not start with "/" and must end with "/". If empty the whole bucket contents will be available
+          description: key_prefix is similar to a chroot directory for a local filesystem. If specified the user will only see contents that starts with this prefix and so you can restrict access to a specific virtual folder. The prefix, if not empty, must not start with "/" and must end with "/". If empty the whole bucket contents will be available
           example: folder/subfolder/
       required:
         - bucket
@@ -1653,14 +1038,14 @@ components:
             quota_size:
               type: integer
               format: int64
-              description: Quota as size in bytes. 0 menas unlimited, -1 means included in user quota. Please note that quota is updated if files are added/removed via SFTP/SCP otherwise a quota scan is needed
+              description: Quota as size in bytes. 0 menas unlimited, -1 means included in user quota. Please note that quota is updated if files are added/removed via SFTPGo otherwise a quota scan or a manual quota update is needed
             quota_files:
               type: integer
               format: int32
-              description: Quota as number of files. 0 menas unlimited, , -1 means included in user quota. Please note that quota is updated if files are added/removed via SFTP/SCP otherwise a quota scan is needed
+              description: Quota as number of files. 0 menas unlimited, , -1 means included in user quota. Please note that quota is updated if files are added/removed via SFTPGo otherwise a quota scan or a manual quota update is needed
           required:
             - virtual_path
-      description: A virtual folder is a mapping between a SFTP/SCP virtual path and a filesystem path outside the user home directory. The specified paths must be absolute and the virtual path cannot be "/", it must be a sub directory. The parent directory for the specified virtual path must exist. SFTPGo will try to automatically create any missing parent directory for the configured virtual folders at user login.
+      description: A virtual folder is a mapping between a SFTPGo virtual path and a filesystem path outside the user home directory. The specified paths must be absolute and the virtual path cannot be "/", it must be a sub directory. The parent directory for the specified virtual path must exist. SFTPGo will try to automatically create any missing parent directory for the configured virtual folders at user login.
     User:
       type: object
       properties:
@@ -1702,19 +1087,19 @@ components:
           items:
             $ref: '#/components/schemas/VirtualFolder'
           nullable: true
-          description: mapping between virtual SFTP/SCP paths and filesystem paths outside the user home directory. Supported for local filesystem only. If one or more of the specified folders are not inside the dataprovider they will be automatically created. You have to create the folder on the filesystem yourself
+          description: mapping between virtual SFTPGo paths and filesystem paths outside the user home directory. Supported for local filesystem only. If one or more of the specified folders are not inside the dataprovider they will be automatically created. You have to create the folder on the filesystem yourself
         uid:
           type: integer
           format: int32
           minimum: 0
           maximum: 65535
-          description: if you run sftpgo as root user the created files and directories will be assigned to this uid. 0 means no change, the owner will be the user that runs sftpgo. Ignored on windows
+          description: if you run SFTPGo as root user, the created files and directories will be assigned to this uid. 0 means no change, the owner will be the user that runs SFTPGo. Ignored on windows
         gid:
           type: integer
           format: int32
           minimum: 0
           maximum: 65535
-          description: if you run sftpgo as root user the created files and directories will be assigned to this gid. 0 means no change, the group will be the one of the user that runs sftpgo. Ignored on windows
+          description: if you run SFTPGo as root user, the created files and directories will be assigned to this gid. 0 means no change, the group will be the one of the user that runs SFTPGo. Ignored on windows
         max_sessions:
           type: integer
           format: int32
@@ -1722,11 +1107,11 @@ components:
         quota_size:
           type: integer
           format: int64
-          description: Quota as size in bytes. 0 menas unlimited. Please note that quota is updated if files are added/removed via SFTP/SCP otherwise a quota scan is needed
+          description: Quota as size in bytes. 0 menas unlimited. Please note that quota is updated if files are added/removed via SFTPGo otherwise a quota scan or a manual quota update is needed
         quota_files:
           type: integer
           format: int32
-          description: Quota as number of files. 0 menas unlimited. Please note that quota is updated if files are added/removed via SFTP/SCP otherwise a quota scan is needed
+          description: Quota as number of files. 0 menas unlimited. Please note that quota is updated if files are added/removed via SFTPGo otherwise a quota scan or a manual quota update is needed
         permissions:
           type: object
           items:
@@ -1778,10 +1163,6 @@ components:
           type: integer
           format: int64
           description: bytes transferred
-        last_activity:
-          type: integer
-          format: int64
-          description: last transfer activity as unix timestamp in milliseconds
     ConnectionStatus:
       type: object
       properties:
@@ -1793,6 +1174,7 @@ components:
           description: unique connection identifier
         client_version:
           type: string
+          nullable: true
           description: client version
         remote_address:
           type: string
@@ -1801,9 +1183,10 @@ components:
           type: integer
           format: int64
           description: connection time as unix timestamp in milliseconds
-        ssh_command:
+        command:
           type: string
-          description: SSH command. This is not empty for protocol SSH
+          nullable: true
+          description: SSH command or WebDAV method
         last_activity:
           type: integer
           format: int64
@@ -1814,8 +1197,11 @@ components:
             - SFTP
             - SCP
             - SSH
+            - FTP
+            - DAV
         active_transfers:
           type: array
+          nullable: true
           items:
             $ref : '#/components/schemas/Transfer'
     QuotaScan:
@@ -1841,17 +1227,9 @@ components:
     ApiResponse:
       type: object
       properties:
-        status:
-          type: integer
-          format: int32
-          minimum: 200
-          maximum: 509
-          example: 200
-          description: HTTP Status code, for example 200 OK, 400 Bad request and so on
         message:
           type: string
-          nullable: true
-          description: additional message if any
+          description: message, can be empty
         error:
           type: string
           nullable: true
@@ -1869,7 +1247,7 @@ components:
           type: array
           items:
             type: string
-          description: Features for the current build. Available features are "portable", "bolt", "mysql", "sqlite", "pgsql", "s3", "gcs". If a feature is available it has a "+" prefix, otherwise a "-" prefix
+          description: Features for the current build. Available features are "portable", "bolt", "mysql", "sqlite", "pgsql", "s3", "gcs", "metrics". If a feature is available it has a "+" prefix, otherwise a "-" prefix
   securitySchemes:
     BasicAuth:
       type: http

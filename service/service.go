@@ -6,6 +6,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/config"
 	"github.com/drakkan/sftpgo/dataprovider"
 	"github.com/drakkan/sftpgo/logger"
@@ -64,6 +65,9 @@ func (s *Service) Start() error {
 			logger.Error(logSender, "", "error loading configuration: %v", err)
 		}
 	}
+
+	common.Initialize(config.GetCommonConfig())
+
 	providerConf := config.GetProviderConf()
 
 	err := dataprovider.Initialize(providerConf, s.ConfigDir)
@@ -73,12 +77,6 @@ func (s *Service) Start() error {
 		return err
 	}
 
-	httpConfig := config.GetHTTPConfig()
-	httpConfig.Initialize(s.ConfigDir)
-
-	sftpdConf := config.GetSFTPDConfig()
-	httpdConf := config.GetHTTPDConfig()
-
 	if s.PortableMode == 1 {
 		// create the user for portable mode
 		err = dataprovider.AddUser(s.PortableUser)
@@ -87,6 +85,20 @@ func (s *Service) Start() error {
 			return err
 		}
 	}
+
+	httpConfig := config.GetHTTPConfig()
+	httpConfig.Initialize(s.ConfigDir)
+
+	s.startServices()
+
+	return nil
+}
+
+func (s *Service) startServices() {
+	sftpdConf := config.GetSFTPDConfig()
+	ftpdConf := config.GetFTPDConfig()
+	httpdConf := config.GetHTTPDConfig()
+	webDavDConf := config.GetWebDAVDConfig()
 
 	go func() {
 		logger.Debug(logSender, "", "initializing SFTP server with config %+v", sftpdConf)
@@ -113,7 +125,30 @@ func (s *Service) Start() error {
 			logger.DebugToConsole("HTTP server not started, disabled in config file")
 		}
 	}
-	return nil
+	if ftpdConf.BindPort > 0 {
+		go func() {
+			if err := ftpdConf.Initialize(s.ConfigDir); err != nil {
+				logger.Error(logSender, "", "could not start FTP server: %v", err)
+				logger.ErrorToConsole("could not start FTP server: %v", err)
+				s.Error = err
+			}
+			s.Shutdown <- true
+		}()
+	} else {
+		logger.Debug(logSender, "", "FTP server not started, disabled in config file")
+	}
+	if webDavDConf.BindPort > 0 {
+		go func() {
+			if err := webDavDConf.Initialize(s.ConfigDir); err != nil {
+				logger.Error(logSender, "", "could not start WebDAV server: %v", err)
+				logger.ErrorToConsole("could not start WebDAV server: %v", err)
+				s.Error = err
+			}
+			s.Shutdown <- true
+		}()
+	} else {
+		logger.Debug(logSender, "", "WevDAV server not started, disabled in config file")
+	}
 }
 
 // Wait blocks until the service exits

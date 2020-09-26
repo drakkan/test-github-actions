@@ -44,7 +44,7 @@ Let's see a sample usage for each REST API.
 Command:
 
 ```console
-python sftpgo_api_cli.py add-user test_username --password "test_pwd" --home-dir="/tmp/test_home_dir" --uid 33 --gid 1000 --max-sessions 2 --quota-size 0 --quota-files 3 --permissions "list" "download" "upload" "delete" "rename" "create_dirs" "overwrite" --subdirs-permissions "/dir1::list,download" "/dir2::*" --upload-bandwidth 100 --download-bandwidth 60 --status 0 --expiration-date 2019-01-01 --allowed-ip "192.168.1.1/32" --fs S3 --s3-bucket test --s3-region eu-west-1 --s3-access-key accesskey --s3-access-secret secret --s3-endpoint "http://127.0.0.1:9000" --s3-storage-class Standard --s3-key-prefix "vfolder/" --s3-upload-part-size 10 --s3-upload-concurrency 4 --denied-login-methods "password" "keyboard-interactive" --allowed-extensions "/dir1::.jpg,.png" "/dir2::.rar,.png" --denied-extensions "/dir3::.zip,.rar"
+python sftpgo_api_cli.py add-user test_username --password "test_pwd" --home-dir="/tmp/test_home_dir" --uid 33 --gid 1000 --max-sessions 2 --quota-size 0 --quota-files 3 --permissions "list" "download" "upload" "delete" "rename" "create_dirs" "overwrite" --subdirs-permissions "/dir1::list,download" "/dir2::*" --upload-bandwidth 100 --download-bandwidth 60 --status 0 --expiration-date 2019-01-01 --allowed-ip "192.168.1.1/32" --fs S3 --s3-bucket test --s3-region eu-west-1 --s3-access-key accesskey --s3-access-secret secret --s3-endpoint "http://127.0.0.1:9000" --s3-storage-class Standard --s3-key-prefix "vfolder/" --s3-upload-part-size 10 --s3-upload-concurrency 4 --denied-login-methods "password" "keyboard-interactive" --allowed-extensions "/dir1::.jpg,.png" "/dir2::.rar,.png" --denied-extensions "/dir3::.zip,.rar" --denied-protocols DAV FTP
 ```
 
 Output:
@@ -75,6 +75,10 @@ Output:
     "denied_login_methods": [
       "password",
       "keyboard-interactive"
+    ],
+    "denied_protocols": [
+      "DAV",
+      "FTP"
     ],
     "file_extensions": [
       {
@@ -140,7 +144,7 @@ Output:
 Command:
 
 ```console
-python sftpgo_api_cli.py update-user 9576 test_username --password "test_pwd" --home-dir="/tmp/test_home_dir" --uid 0 --gid 33 --max-sessions 3 --quota-size 0 --quota-files 4 --permissions "*" --subdirs-permissions "/dir1::list,download,create_symlinks" --upload-bandwidth 90 --download-bandwidth 80 --status 1 --expiration-date "" --allowed-ip "" --denied-ip "192.168.1.0/24" --denied-login-methods "" --fs local --virtual-folders "/vdir1::/tmp/mapped1::-1::-1" "/vdir2::/tmp/mapped2::100::104857600" --allowed-extensions "" --denied-extensions ""
+python sftpgo_api_cli.py update-user 9576 test_username --password "test_pwd" --home-dir="/tmp/test_home_dir" --uid 0 --gid 33 --max-sessions 3 --quota-size 0 --quota-files 4 --permissions "*" --subdirs-permissions "/dir1::list,download,create_symlinks" --upload-bandwidth 90 --download-bandwidth 80 --status 1 --expiration-date "" --allowed-ip "" --denied-ip "192.168.1.0/24" --denied-login-methods "" --fs local --virtual-folders "/vdir1::/tmp/mapped1::-1::-1" "/vdir2::/tmp/mapped2::100::104857600" --allowed-extensions "" --denied-extensions "" --max-upload-file-size 104857600 --denied-protocols ""
 ```
 
 Output:
@@ -152,6 +156,8 @@ Output:
   "status": 200
 }
 ```
+
+You can set the argument `--disconnect` to `1` to disconnect the user, if connected, after a successful update and so force it to login again and to use the new configuration. If this parameter is not specified the user will continue to use the old configuration as long as he is logged in.
 
 ## Get user by id
 
@@ -175,7 +181,31 @@ Output:
   "filters": {
     "denied_ip": [
       "192.168.1.0/24"
-    ]
+    ],
+    "file_extensions": [
+      {
+        "allowed_extensions": [
+          ".jpg",
+          ".png"
+        ],
+        "path": "/dir1"
+      },
+      {
+        "allowed_extensions": [
+          ".rar",
+          ".png"
+        ],
+        "path": "/dir2"
+      },
+      {
+        "denied_extensions": [
+          ".zip",
+          ".rar"
+        ],
+        "path": "/dir3"
+      }
+    ],
+    "max_upload_file_size": 104857600
   },
   "gid": 33,
   "home_dir": "/tmp/test_home_dir",
@@ -306,7 +336,6 @@ Output:
   {
     "active_transfers": [
       {
-        "last_activity": 1577197485561,
         "operation_type": "upload",
         "path": "/test_upload.tar.gz",
         "size": 1540096,
@@ -319,7 +348,6 @@ Output:
     "last_activity": 1577197485561,
     "protocol": "SFTP",
     "remote_address": "127.0.0.1:43714",
-    "ssh_command": "",
     "username": "test_username"
   }
 ]

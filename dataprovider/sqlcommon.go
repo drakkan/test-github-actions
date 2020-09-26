@@ -46,7 +46,7 @@ func getUserByUsername(username string, dbHandle sqlQuerier) (User, error) {
 	return getUserWithVirtualFolders(user, dbHandle)
 }
 
-func sqlCommonValidateUserAndPass(username string, password string, dbHandle *sql.DB) (User, error) {
+func sqlCommonValidateUserAndPass(username, password, ip, protocol string, dbHandle *sql.DB) (User, error) {
 	var user User
 	if len(password) == 0 {
 		return user, errors.New("Credentials cannot be null or empty")
@@ -56,7 +56,7 @@ func sqlCommonValidateUserAndPass(username string, password string, dbHandle *sq
 		providerLog(logger.LevelWarn, "error authenticating user: %v, error: %v", username, err)
 		return user, err
 	}
-	return checkUserAndPass(user, password)
+	return checkUserAndPass(user, password, ip, protocol)
 }
 
 func sqlCommonValidateUserAndPubKey(username string, pubKey []byte, dbHandle *sql.DB) (User, string, error) {
@@ -766,7 +766,7 @@ func sqlCommonRollbackTransaction(tx *sql.Tx) {
 	}
 }
 
-func sqlCommonGetDatabaseVersion(dbHandle *sql.DB) (schemaVersion, error) {
+func sqlCommonGetDatabaseVersion(dbHandle *sql.DB, showInitWarn bool) (schemaVersion, error) {
 	var result schemaVersion
 	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
 	defer cancel()
@@ -774,7 +774,7 @@ func sqlCommonGetDatabaseVersion(dbHandle *sql.DB) (schemaVersion, error) {
 	stmt, err := dbHandle.PrepareContext(ctx, q)
 	if err != nil {
 		providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
-		if strings.Contains(err.Error(), sqlTableSchemaVersion) {
+		if showInitWarn && strings.Contains(err.Error(), sqlTableSchemaVersion) {
 			logger.WarnToConsole("database query error, did you forgot to run the \"initprovider\" command?")
 		}
 		return result, err

@@ -9,7 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	unixcrypt "github.com/nathanaelle/password/v2"
+	"github.com/GehirnInc/crypt/apr1_crypt"
+	"github.com/GehirnInc/crypt/md5_crypt"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/drakkan/sftpgo/logger"
@@ -20,11 +21,12 @@ const (
 	authenticationHeader = "WWW-Authenticate"
 	authenticationRealm  = "SFTPGo Web"
 	unauthResponse       = "Unauthorized"
+	md5CryptPwdPrefix    = "$1$"
+	apr1CryptPwdPrefix   = "$apr1$"
 )
 
 var (
-	md5CryptPwdPrefixes = []string{"$1$", "$apr1$"}
-	bcryptPwdPrefixes   = []string{"$2a$", "$2$", "$2x$", "$2y$", "$2b$"}
+	bcryptPwdPrefixes = []string{"$2a$", "$2$", "$2x$", "$2y$", "$2b$"}
 )
 
 type httpAuthProvider interface {
@@ -33,10 +35,10 @@ type httpAuthProvider interface {
 }
 
 type basicAuthProvider struct {
-	Path  string
+	Path string
+	sync.RWMutex
 	Info  os.FileInfo
 	Users map[string]string
-	lock  *sync.RWMutex
 }
 
 func newBasicAuthProvider(authUserFile string) (httpAuthProvider, error) {
@@ -44,7 +46,6 @@ func newBasicAuthProvider(authUserFile string) (httpAuthProvider, error) {
 		Path:  authUserFile,
 		Info:  nil,
 		Users: make(map[string]string),
-		lock:  new(sync.RWMutex),
 	}
 	return &basicAuthProvider, basicAuthProvider.loadUsers()
 }
@@ -54,8 +55,8 @@ func (p *basicAuthProvider) isEnabled() bool {
 }
 
 func (p *basicAuthProvider) isReloadNeeded(info os.FileInfo) bool {
-	p.lock.RLock()
-	defer p.lock.RUnlock()
+	p.RLock()
+	defer p.RUnlock()
 	return p.Info == nil || p.Info.ModTime() != info.ModTime() || p.Info.Size() != info.Size()
 }
 
@@ -84,8 +85,8 @@ func (p *basicAuthProvider) loadUsers() error {
 			logger.Debug(logSender, "", "unable to parse basic auth users file: %v", err)
 			return err
 		}
-		p.lock.Lock()
-		defer p.lock.Unlock()
+		p.Lock()
+		defer p.Unlock()
 		p.Users = make(map[string]string)
 		for _, record := range records {
 			if len(record) == 2 {
@@ -103,8 +104,8 @@ func (p *basicAuthProvider) getHashedPassword(username string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	p.lock.RLock()
-	defer p.lock.RUnlock()
+	p.RLock()
+	defer p.RUnlock()
 	pwd, ok := p.Users[username]
 	return pwd, ok
 }
@@ -137,14 +138,15 @@ func validateCredentials(r *http.Request) bool {
 			err := bcrypt.CompareHashAndPassword([]byte(hashedPwd), []byte(password))
 			return err == nil
 		}
-		if utils.IsStringPrefixInSlice(hashedPwd, md5CryptPwdPrefixes) {
-			crypter, ok := unixcrypt.MD5.CrypterFound(hashedPwd)
-			if !ok {
-				err := errors.New("cannot found matching MD5 crypter")
-				logger.Debug(logSender, "", "error comparing password with MD5 crypt hash: %v", err)
-				return false
-			}
-			return crypter.Verify([]byte(password))
+		if strings.HasPrefix(hashedPwd, md5CryptPwdPrefix) {
+			crypter := md5_crypt.New()
+			err := crypter.Verify(hashedPwd, []byte(password))
+			return err == nil
+		}
+		if strings.HasPrefix(hashedPwd, apr1CryptPwdPrefix) {
+			crypter := apr1_crypt.New()
+			err := crypter.Verify(hashedPwd, []byte(password))
+			return err == nil
 		}
 	}
 	return false

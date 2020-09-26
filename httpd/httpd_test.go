@@ -28,11 +28,11 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/config"
 	"github.com/drakkan/sftpgo/dataprovider"
 	"github.com/drakkan/sftpgo/httpd"
 	"github.com/drakkan/sftpgo/logger"
-	"github.com/drakkan/sftpgo/sftpd"
 	"github.com/drakkan/sftpgo/utils"
 	"github.com/drakkan/sftpgo/vfs"
 )
@@ -41,7 +41,6 @@ const (
 	defaultUsername           = "test_user"
 	defaultPassword           = "test_password"
 	testPubKey                = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC03jj0D+djk7pxIf/0OhrxrchJTRZklofJ1NoIu4752Sq02mdXmarMVsqJ1cAjV5LBVy3D1F5U6XW4rppkXeVtd04Pxb09ehtH0pRRPaoHHlALiJt8CoMpbKYMA8b3KXPPriGxgGomvtU2T2RMURSwOZbMtpsugfjYSWenyYX+VORYhylWnSXL961LTyC21ehd6d6QnW9G7E5hYMITMY9TuQZz3bROYzXiTsgN0+g6Hn7exFQp50p45StUMfV/SftCMdCxlxuyGny2CrN/vfjO7xxOo2uv7q1qm10Q46KPWJQv+pgZ/OfL+EDjy07n5QVSKHlbx+2nT4Q0EgOSQaCTYwn3YjtABfIxWwgAFdyj6YlPulCL22qU4MYhDcA6PSBwDdf8hvxBfvsiHdM+JcSHvv8/VeJhk6CmnZxGY0fxBupov27z3yEO8nAg8k+6PaUiW1MSUfuGMF/ktB8LOstXsEPXSszuyXiOv4DaryOXUiSn7bmRqKcEFlJusO6aZP0= nicola@p1"
-	logSender                 = "APITesting"
 	userPath                  = "/api/v1/user"
 	folderPath                = "/api/v1/folder"
 	activeConnectionsPath     = "/api/v1/connection"
@@ -93,6 +92,28 @@ var (
 	providerDriverName string
 )
 
+type fakeConnection struct {
+	*common.BaseConnection
+	command string
+}
+
+func (c *fakeConnection) Disconnect() error {
+	common.Connections.Remove(c.GetID())
+	return nil
+}
+
+func (c *fakeConnection) GetClientVersion() string {
+	return ""
+}
+
+func (c *fakeConnection) GetCommand() string {
+	return c.command
+}
+
+func (c *fakeConnection) GetRemoteAddress() string {
+	return ""
+}
+
 func TestMain(m *testing.M) {
 	homeBasePath = os.TempDir()
 	logfilePath := filepath.Join(configDir, "sftpgo_api_test.log")
@@ -108,6 +129,8 @@ func TestMain(m *testing.M) {
 	providerDriverName = providerConf.Driver
 	os.RemoveAll(credentialsPath) //nolint:errcheck
 	logger.InfoToConsole("Starting HTTPD tests, provider: %v", providerConf.Driver)
+
+	common.Initialize(config.GetCommonConfig())
 
 	err = dataprovider.Initialize(providerConf, configDir)
 	if err != nil {
@@ -126,13 +149,14 @@ func TestMain(m *testing.M) {
 	httpdConf.BackupsPath = backupsPath
 	err = os.MkdirAll(backupsPath, os.ModePerm)
 	if err != nil {
-		logger.WarnToConsole("error creating backups path: %v", err)
+		logger.ErrorToConsole("error creating backups path: %v", err)
 		os.Exit(1)
 	}
 
 	go func() {
 		if err := httpdConf.Initialize(configDir, true); err != nil {
 			logger.ErrorToConsole("could not start HTTP server: %v", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -140,14 +164,14 @@ func TestMain(m *testing.M) {
 	// now start an https server
 	certPath := filepath.Join(os.TempDir(), "test.crt")
 	keyPath := filepath.Join(os.TempDir(), "test.key")
-	err = ioutil.WriteFile(certPath, []byte(httpsCert), 0666)
+	err = ioutil.WriteFile(certPath, []byte(httpsCert), os.ModePerm)
 	if err != nil {
-		logger.WarnToConsole("error writing HTTPS certificate: %v", err)
+		logger.ErrorToConsole("error writing HTTPS certificate: %v", err)
 		os.Exit(1)
 	}
-	err = ioutil.WriteFile(keyPath, []byte(httpsKey), 0666)
+	err = ioutil.WriteFile(keyPath, []byte(httpsKey), os.ModePerm)
 	if err != nil {
-		logger.WarnToConsole("error writing HTTPS private key: %v", err)
+		logger.ErrorToConsole("error writing HTTPS private key: %v", err)
 		os.Exit(1)
 	}
 	httpdConf.BindPort = 8443
@@ -156,14 +180,15 @@ func TestMain(m *testing.M) {
 
 	go func() {
 		if err := httpdConf.Initialize(configDir, true); err != nil {
-			logger.Error(logSender, "", "could not start HTTPS server: %v", err)
+			logger.ErrorToConsole("could not start HTTPS server: %v", err)
+			os.Exit(1)
 		}
 	}()
 	waitTCPListening(fmt.Sprintf("%s:%d", httpdConf.BindAddress, httpdConf.BindPort))
 	httpd.ReloadTLSCertificate() //nolint:errcheck
 
 	testServer = httptest.NewServer(httpd.GetHTTPRouter())
-	defer testServer.Close() //nolint:errcheck
+	defer testServer.Close()
 
 	exitCode := m.Run()
 	os.Remove(logfilePath)        //nolint:errcheck
@@ -218,7 +243,7 @@ func TestBasicUserHandling(t *testing.T) {
 	user.UploadBandwidth = 128
 	user.DownloadBandwidth = 64
 	user.ExpirationDate = utils.GetTimeAsMsSinceEpoch(time.Now())
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	users, _, err := httpd.GetUsers(0, 0, defaultUsername, http.StatusOK)
 	assert.NoError(t, err)
@@ -236,10 +261,10 @@ func TestUserStatus(t *testing.T) {
 	user, _, err := httpd.AddUser(u, http.StatusOK)
 	assert.NoError(t, err)
 	user.Status = 2
-	_, _, err = httpd.UpdateUser(user, http.StatusBadRequest)
+	_, _, err = httpd.UpdateUser(user, http.StatusBadRequest, "")
 	assert.NoError(t, err)
 	user.Status = 1
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	_, err = httpd.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -347,6 +372,13 @@ func TestAddUserInvalidFilters(t *testing.T) {
 			DeniedExtensions:  []string{".jpg"},
 		},
 	}
+	_, _, err = httpd.AddUser(u, http.StatusBadRequest)
+	assert.NoError(t, err)
+	u.Filters.FileExtensions = nil
+	u.Filters.DeniedProtocols = []string{"invalid"}
+	_, _, err = httpd.AddUser(u, http.StatusBadRequest)
+	assert.NoError(t, err)
+	u.Filters.DeniedProtocols = dataprovider.ValidProtocols
 	_, _, err = httpd.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
 }
@@ -592,10 +624,10 @@ func TestUserPublicKey(t *testing.T) {
 	user, _, err := httpd.AddUser(u, http.StatusOK)
 	assert.NoError(t, err)
 	user.PublicKeys = []string{validPubKey, invalidPubKey}
-	_, _, err = httpd.UpdateUser(user, http.StatusBadRequest)
+	_, _, err = httpd.UpdateUser(user, http.StatusBadRequest, "")
 	assert.NoError(t, err)
 	user.PublicKeys = []string{validPubKey, validPubKey, validPubKey}
-	_, _, err = httpd.UpdateUser(user, http.StatusOK)
+	_, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	_, err = httpd.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -619,12 +651,14 @@ func TestUpdateUser(t *testing.T) {
 	user.Permissions["/subdir"] = []string{dataprovider.PermListItems, dataprovider.PermUpload}
 	user.Filters.AllowedIP = []string{"192.168.1.0/24", "192.168.2.0/24"}
 	user.Filters.DeniedIP = []string{"192.168.3.0/24", "192.168.4.0/24"}
-	user.Filters.DeniedLoginMethods = []string{dataprovider.SSHLoginMethodPassword}
+	user.Filters.DeniedLoginMethods = []string{dataprovider.LoginMethodPassword}
+	user.Filters.DeniedProtocols = []string{common.ProtocolWebDAV}
 	user.Filters.FileExtensions = append(user.Filters.FileExtensions, dataprovider.ExtensionsFilter{
 		Path:              "/subdir",
 		AllowedExtensions: []string{".zip", ".rar"},
 		DeniedExtensions:  []string{".jpg", ".png"},
 	})
+	user.Filters.MaxUploadFileSize = 4096
 	user.UploadBandwidth = 1024
 	user.DownloadBandwidth = 512
 	user.VirtualFolders = nil
@@ -644,10 +678,16 @@ func TestUpdateUser(t *testing.T) {
 		QuotaSize:   123,
 		QuotaFiles:  2,
 	})
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	_, _, err = httpd.UpdateUser(user, http.StatusBadRequest, "invalid")
+	assert.NoError(t, err)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "0")
+	assert.NoError(t, err)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "1")
 	assert.NoError(t, err)
 	user.Permissions["/subdir"] = []string{}
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	assert.Len(t, user.Permissions["/subdir"], 0)
 	assert.Len(t, user.VirtualFolders, 2)
@@ -710,7 +750,7 @@ func TestUpdateUserQuotaUsage(t *testing.T) {
 	assert.Equal(t, usedQuotaFiles, user.UsedQuotaFiles)
 	assert.Equal(t, usedQuotaSize, user.UsedQuotaSize)
 	user.QuotaFiles = 100
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	_, err = httpd.UpdateQuotaUsage(u, "add", http.StatusOK)
 	assert.NoError(t, err)
@@ -802,7 +842,7 @@ func TestUserFolderMapping(t *testing.T) {
 		QuotaSize:   0,
 		QuotaFiles:  0,
 	})
-	user2, _, err = httpd.UpdateUser(user2, http.StatusOK)
+	user2, _, err = httpd.UpdateUser(user2, http.StatusOK, "")
 	assert.NoError(t, err)
 	folders, _, err = httpd.GetFolders(0, 0, mappedPath2, http.StatusOK)
 	assert.NoError(t, err)
@@ -827,7 +867,7 @@ func TestUserFolderMapping(t *testing.T) {
 		},
 		VirtualPath: "/vdir1",
 	})
-	user2, _, err = httpd.UpdateUser(user2, http.StatusOK)
+	user2, _, err = httpd.UpdateUser(user2, http.StatusOK, "")
 	assert.NoError(t, err)
 	folders, _, err = httpd.GetFolders(0, 0, mappedPath2, http.StatusOK)
 	assert.NoError(t, err)
@@ -888,7 +928,7 @@ func TestUserS3Config(t *testing.T) {
 	user.FsConfig.S3Config.AccessSecret = "Server-Access-Secret"
 	user.FsConfig.S3Config.Endpoint = "http://127.0.0.1:9000"
 	user.FsConfig.S3Config.UploadPartSize = 8
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	_, err = httpd.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -905,7 +945,7 @@ func TestUserS3Config(t *testing.T) {
 	user.FsConfig.S3Config.Endpoint = "http://localhost:9000"
 	user.FsConfig.S3Config.KeyPrefix = "somedir/subdir" //nolint:goconst
 	user.FsConfig.S3Config.UploadConcurrency = 5
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	user.FsConfig.Provider = 0
 	user.FsConfig.S3Config.Bucket = ""
@@ -916,7 +956,7 @@ func TestUserS3Config(t *testing.T) {
 	user.FsConfig.S3Config.KeyPrefix = ""
 	user.FsConfig.S3Config.UploadPartSize = 0
 	user.FsConfig.S3Config.UploadConcurrency = 0
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	// test user without access key and access secret (shared config state)
 	user.FsConfig.Provider = 1
@@ -928,7 +968,7 @@ func TestUserS3Config(t *testing.T) {
 	user.FsConfig.S3Config.KeyPrefix = "somedir/subdir"
 	user.FsConfig.S3Config.UploadPartSize = 6
 	user.FsConfig.S3Config.UploadConcurrency = 4
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	_, err = httpd.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -944,7 +984,7 @@ func TestUserGCSConfig(t *testing.T) {
 	user.FsConfig.Provider = 2
 	user.FsConfig.GCSConfig.Bucket = "test"
 	user.FsConfig.GCSConfig.Credentials = base64.StdEncoding.EncodeToString([]byte("fake credentials"))
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	_, err = httpd.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -959,7 +999,7 @@ func TestUserGCSConfig(t *testing.T) {
 	assert.NoError(t, err)
 	user.FsConfig.GCSConfig.Credentials = ""
 	user.FsConfig.GCSConfig.AutomaticCredentials = 1
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	user.FsConfig.Provider = 1
 	user.FsConfig.S3Config.Bucket = "test1"
@@ -968,12 +1008,12 @@ func TestUserGCSConfig(t *testing.T) {
 	user.FsConfig.S3Config.AccessSecret = "secret"
 	user.FsConfig.S3Config.Endpoint = "http://localhost:9000"
 	user.FsConfig.S3Config.KeyPrefix = "somedir/subdir"
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	user.FsConfig.Provider = 2
 	user.FsConfig.GCSConfig.Bucket = "test1"
 	user.FsConfig.GCSConfig.Credentials = base64.StdEncoding.EncodeToString([]byte("fake credentials"))
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 
 	_, err = httpd.RemoveUser(user, http.StatusOK)
@@ -987,7 +1027,7 @@ func TestUpdateUserNoCredentials(t *testing.T) {
 	user.PublicKeys = []string{}
 	// password and public key will be omitted from json serialization if empty and so they will remain unchanged
 	// and no validation error will be raised
-	_, _, err = httpd.UpdateUser(user, http.StatusOK)
+	_, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	_, err = httpd.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -997,7 +1037,7 @@ func TestUpdateUserEmptyHomeDir(t *testing.T) {
 	user, _, err := httpd.AddUser(getTestUser(), http.StatusOK)
 	assert.NoError(t, err)
 	user.HomeDir = ""
-	_, _, err = httpd.UpdateUser(user, http.StatusBadRequest)
+	_, _, err = httpd.UpdateUser(user, http.StatusBadRequest, "")
 	assert.NoError(t, err)
 	_, err = httpd.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -1007,14 +1047,14 @@ func TestUpdateUserInvalidHomeDir(t *testing.T) {
 	user, _, err := httpd.AddUser(getTestUser(), http.StatusOK)
 	assert.NoError(t, err)
 	user.HomeDir = "relative_path"
-	_, _, err = httpd.UpdateUser(user, http.StatusBadRequest)
+	_, _, err = httpd.UpdateUser(user, http.StatusBadRequest, "")
 	assert.NoError(t, err)
 	_, err = httpd.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 }
 
 func TestUpdateNonExistentUser(t *testing.T) {
-	_, _, err := httpd.UpdateUser(getTestUser(), http.StatusNotFound)
+	_, _, err := httpd.UpdateUser(getTestUser(), http.StatusNotFound, "")
 	assert.NoError(t, err)
 }
 
@@ -1077,7 +1117,7 @@ func TestGetQuotaScans(t *testing.T) {
 func TestStartQuotaScan(t *testing.T) {
 	user, _, err := httpd.AddUser(getTestUser(), http.StatusOK)
 	assert.NoError(t, err)
-	_, err = httpd.StartQuotaScan(user, http.StatusCreated)
+	_, err = httpd.StartQuotaScan(user, http.StatusAccepted)
 	assert.NoError(t, err)
 	_, err = httpd.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -1086,7 +1126,7 @@ func TestStartQuotaScan(t *testing.T) {
 	}
 	_, _, err = httpd.AddFolder(folder, http.StatusOK)
 	assert.NoError(t, err)
-	_, err = httpd.StartFolderQuotaScan(folder, http.StatusCreated)
+	_, err = httpd.StartFolderQuotaScan(folder, http.StatusAccepted)
 	assert.NoError(t, err)
 	for {
 		quotaScan, _, err := httpd.GetFoldersQuotaScans(http.StatusOK)
@@ -1170,6 +1210,43 @@ func TestGetConnections(t *testing.T) {
 func TestCloseActiveConnection(t *testing.T) {
 	_, err := httpd.CloseConnection("non_existent_id", http.StatusNotFound)
 	assert.NoError(t, err)
+	user := getTestUser()
+	c := common.NewBaseConnection("connID", common.ProtocolSFTP, user, nil)
+	fakeConn := &fakeConnection{
+		BaseConnection: c,
+	}
+	common.Connections.Add(fakeConn)
+	_, err = httpd.CloseConnection(c.GetID(), http.StatusOK)
+	assert.NoError(t, err)
+	assert.Len(t, common.Connections.GetStats(), 0)
+}
+
+func TestCloseConnectionAfterUserUpdateDelete(t *testing.T) {
+	user, _, err := httpd.AddUser(getTestUser(), http.StatusOK)
+	assert.NoError(t, err)
+	c := common.NewBaseConnection("connID", common.ProtocolFTP, user, nil)
+	fakeConn := &fakeConnection{
+		BaseConnection: c,
+	}
+	common.Connections.Add(fakeConn)
+	c1 := common.NewBaseConnection("connID1", common.ProtocolSFTP, user, nil)
+	fakeConn1 := &fakeConnection{
+		BaseConnection: c1,
+	}
+	common.Connections.Add(fakeConn1)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "0")
+	assert.NoError(t, err)
+	assert.Len(t, common.Connections.GetStats(), 2)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "1")
+	assert.NoError(t, err)
+	assert.Len(t, common.Connections.GetStats(), 0)
+
+	common.Connections.Add(fakeConn)
+	common.Connections.Add(fakeConn1)
+	assert.Len(t, common.Connections.GetStats(), 2)
+	_, err = httpd.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	assert.Len(t, common.Connections.GetStats(), 0)
 }
 
 func TestUserBaseDir(t *testing.T) {
@@ -1252,7 +1329,7 @@ func TestProviderErrors(t *testing.T) {
 	assert.NoError(t, err)
 	_, _, err = httpd.GetUsers(1, 0, defaultUsername, http.StatusInternalServerError)
 	assert.NoError(t, err)
-	_, _, err = httpd.UpdateUser(dataprovider.User{}, http.StatusInternalServerError)
+	_, _, err = httpd.UpdateUser(dataprovider.User{}, http.StatusInternalServerError, "")
 	assert.NoError(t, err)
 	_, err = httpd.RemoveUser(dataprovider.User{}, http.StatusInternalServerError)
 	assert.NoError(t, err)
@@ -1271,14 +1348,14 @@ func TestProviderErrors(t *testing.T) {
 	backupContent, err := json.Marshal(backupData)
 	assert.NoError(t, err)
 	backupFilePath := filepath.Join(backupsPath, "backup.json")
-	err = ioutil.WriteFile(backupFilePath, backupContent, 0666)
+	err = ioutil.WriteFile(backupFilePath, backupContent, os.ModePerm)
 	assert.NoError(t, err)
 	_, _, err = httpd.Loaddata(backupFilePath, "", "", http.StatusInternalServerError)
 	assert.NoError(t, err)
 	backupData.Folders = append(backupData.Folders, vfs.BaseVirtualFolder{MappedPath: os.TempDir()})
 	backupContent, err = json.Marshal(backupData)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(backupFilePath, backupContent, 0666)
+	err = ioutil.WriteFile(backupFilePath, backupContent, os.ModePerm)
 	assert.NoError(t, err)
 	_, _, err = httpd.Loaddata(backupFilePath, "", "", http.StatusInternalServerError)
 	assert.NoError(t, err)
@@ -1419,7 +1496,7 @@ func TestLoaddata(t *testing.T) {
 	backupContent, err := json.Marshal(backupData)
 	assert.NoError(t, err)
 	backupFilePath := filepath.Join(backupsPath, "backup.json")
-	err = ioutil.WriteFile(backupFilePath, backupContent, 0666)
+	err = ioutil.WriteFile(backupFilePath, backupContent, os.ModePerm)
 	assert.NoError(t, err)
 	_, _, err = httpd.Loaddata(backupFilePath, "a", "", http.StatusBadRequest)
 	assert.NoError(t, err)
@@ -1486,7 +1563,7 @@ func TestLoaddataMode(t *testing.T) {
 	backupData.Users = append(backupData.Users, user)
 	backupContent, _ := json.Marshal(backupData)
 	backupFilePath := filepath.Join(backupsPath, "backup.json")
-	err := ioutil.WriteFile(backupFilePath, backupContent, 0666)
+	err := ioutil.WriteFile(backupFilePath, backupContent, os.ModePerm)
 	assert.NoError(t, err)
 	_, _, err = httpd.Loaddata(backupFilePath, "0", "0", http.StatusOK)
 	assert.NoError(t, err)
@@ -1496,15 +1573,31 @@ func TestLoaddataMode(t *testing.T) {
 	user = users[0]
 	oldUploadBandwidth := user.UploadBandwidth
 	user.UploadBandwidth = oldUploadBandwidth + 128
-	user, _, err = httpd.UpdateUser(user, http.StatusOK)
+	user, _, err = httpd.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	_, _, err = httpd.Loaddata(backupFilePath, "0", "1", http.StatusOK)
 	assert.NoError(t, err)
+
+	c := common.NewBaseConnection("connID", common.ProtocolFTP, user, nil)
+	fakeConn := &fakeConnection{
+		BaseConnection: c,
+	}
+	common.Connections.Add(fakeConn)
+	assert.Len(t, common.Connections.GetStats(), 1)
 	users, _, err = httpd.GetUsers(1, 0, user.Username, http.StatusOK)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(users))
 	user = users[0]
 	assert.NotEqual(t, oldUploadBandwidth, user.UploadBandwidth)
+	_, _, err = httpd.Loaddata(backupFilePath, "0", "2", http.StatusOK)
+	assert.NoError(t, err)
+	// mode 2 will update the user and close the previous connection
+	assert.Len(t, common.Connections.GetStats(), 0)
+	users, _, err = httpd.GetUsers(1, 0, user.Username, http.StatusOK)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(users))
+	user = users[0]
+	assert.Equal(t, oldUploadBandwidth, user.UploadBandwidth)
 	_, err = httpd.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.Remove(backupFilePath)
@@ -1673,11 +1766,11 @@ func TestUpdateUserQuotaUsageMock(t *testing.T) {
 	req, _ = http.NewRequest(http.MethodPut, updateUsedQuotaPath, bytes.NewBuffer([]byte("string")))
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusBadRequest, rr.Code)
-	assert.True(t, sftpd.AddQuotaScan(user.Username))
+	assert.True(t, common.QuotaScans.AddUserQuotaScan(user.Username))
 	req, _ = http.NewRequest(http.MethodPut, updateUsedQuotaPath, bytes.NewBuffer(userAsJSON))
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusConflict, rr.Code)
-	assert.NoError(t, sftpd.RemoveQuotaScan(user.Username))
+	assert.True(t, common.QuotaScans.RemoveUserQuotaScan(user.Username))
 	req, _ = http.NewRequest(http.MethodDelete, userPath+"/"+strconv.FormatInt(user.ID, 10), nil)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr.Code)
@@ -1854,20 +1947,19 @@ func TestStartQuotaScanMock(t *testing.T) {
 	}
 	// simulate a duplicate quota scan
 	userAsJSON = getUserAsJSON(t, user)
-	sftpd.AddQuotaScan(user.Username)
+	common.QuotaScans.AddUserQuotaScan(user.Username)
 	req, _ = http.NewRequest(http.MethodPost, quotaScanPath, bytes.NewBuffer(userAsJSON))
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusConflict, rr.Code)
-	err = sftpd.RemoveQuotaScan(user.Username)
-	assert.NoError(t, err)
+	assert.True(t, common.QuotaScans.RemoveUserQuotaScan(user.Username))
 
 	userAsJSON = getUserAsJSON(t, user)
 	req, _ = http.NewRequest(http.MethodPost, quotaScanPath, bytes.NewBuffer(userAsJSON))
 	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusCreated, rr.Code)
+	checkResponseCode(t, http.StatusAccepted, rr.Code)
 
 	for {
-		var scans []sftpd.ActiveQuotaScan
+		var scans []common.ActiveQuotaScan
 		req, _ = http.NewRequest(http.MethodGet, quotaScanPath, nil)
 		rr = executeRequest(req)
 		checkResponseCode(t, http.StatusOK, rr.Code)
@@ -1887,10 +1979,10 @@ func TestStartQuotaScanMock(t *testing.T) {
 	}
 	req, _ = http.NewRequest(http.MethodPost, quotaScanPath, bytes.NewBuffer(userAsJSON))
 	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusCreated, rr.Code)
+	checkResponseCode(t, http.StatusAccepted, rr.Code)
 
 	for {
-		var scans []sftpd.ActiveQuotaScan
+		var scans []common.ActiveQuotaScan
 		req, _ = http.NewRequest(http.MethodGet, quotaScanPath, nil)
 		rr = executeRequest(req)
 		checkResponseCode(t, http.StatusOK, rr.Code)
@@ -1954,11 +2046,11 @@ func TestUpdateFolderQuotaUsageMock(t *testing.T) {
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusBadRequest, rr.Code)
 
-	assert.True(t, sftpd.AddVFolderQuotaScan(mappedPath))
+	assert.True(t, common.QuotaScans.AddVFolderQuotaScan(mappedPath))
 	req, _ = http.NewRequest(http.MethodPut, updateFolderUsedQuotaPath, bytes.NewBuffer(folderAsJSON))
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusConflict, rr.Code)
-	assert.NoError(t, sftpd.RemoveVFolderQuotaScan(mappedPath))
+	assert.True(t, common.QuotaScans.RemoveVFolderQuotaScan(mappedPath))
 
 	url, err = url.Parse(folderPath)
 	assert.NoError(t, err)
@@ -1986,12 +2078,11 @@ func TestStartFolderQuotaScanMock(t *testing.T) {
 		assert.NoError(t, err)
 	}
 	// simulate a duplicate quota scan
-	sftpd.AddVFolderQuotaScan(mappedPath)
+	common.QuotaScans.AddVFolderQuotaScan(mappedPath)
 	req, _ = http.NewRequest(http.MethodPost, quotaScanVFolderPath, bytes.NewBuffer(folderAsJSON))
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusConflict, rr.Code)
-	err = sftpd.RemoveVFolderQuotaScan(mappedPath)
-	assert.NoError(t, err)
+	assert.True(t, common.QuotaScans.RemoveVFolderQuotaScan(mappedPath))
 	// and now a real quota scan
 	_, err = os.Stat(mappedPath)
 	if err != nil && os.IsNotExist(err) {
@@ -2000,8 +2091,8 @@ func TestStartFolderQuotaScanMock(t *testing.T) {
 	}
 	req, _ = http.NewRequest(http.MethodPost, quotaScanVFolderPath, bytes.NewBuffer(folderAsJSON))
 	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusCreated, rr.Code)
-	var scans []sftpd.ActiveVirtualFolderQuotaScan
+	checkResponseCode(t, http.StatusAccepted, rr.Code)
+	var scans []common.ActiveVirtualFolderQuotaScan
 	for {
 		req, _ = http.NewRequest(http.MethodGet, quotaScanVFolderPath, nil)
 		rr = executeRequest(req)
@@ -2328,6 +2419,14 @@ func TestWebUserAddMock(t *testing.T) {
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr.Code)
 	form.Set("denied_ip", "")
+	// test invalid max file upload size
+	form.Set("max_upload_file_size", "a")
+	b, contentType, _ = getMultipartFormData(form, "", "")
+	req, _ = http.NewRequest(http.MethodPost, webUserPath, &b)
+	req.Header.Set("Content-Type", contentType)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr.Code)
+	form.Set("max_upload_file_size", "1000")
 	b, contentType, _ = getMultipartFormData(form, "", "")
 	req, _ = http.NewRequest(http.MethodPost, webUserPath, &b)
 	req.Header.Set("Content-Type", contentType)
@@ -2350,6 +2449,7 @@ func TestWebUserAddMock(t *testing.T) {
 	assert.Equal(t, user.UID, newUser.UID)
 	assert.Equal(t, user.UploadBandwidth, newUser.UploadBandwidth)
 	assert.Equal(t, user.DownloadBandwidth, newUser.DownloadBandwidth)
+	assert.Equal(t, int64(1000), newUser.Filters.MaxUploadFileSize)
 	assert.True(t, utils.IsStringInSlice(testPubKey, newUser.PublicKeys))
 	if val, ok := newUser.Permissions["/subdir"]; ok {
 		assert.True(t, utils.IsStringInSlice(dataprovider.PermListItems, val))
@@ -2409,6 +2509,9 @@ func TestWebUserUpdateMock(t *testing.T) {
 	form.Set("denied_ip", " 10.0.0.2/32 ")
 	form.Set("denied_extensions", "/dir1::.zip")
 	form.Set("ssh_login_methods", dataprovider.SSHLoginMethodKeyboardInteractive)
+	form.Set("denied_protocols", common.ProtocolFTP)
+	form.Set("max_upload_file_size", "100")
+	form.Set("disconnect", "1")
 	b, contentType, _ := getMultipartFormData(form, "", "")
 	req, _ = http.NewRequest(http.MethodPost, webUserPath+"/"+strconv.FormatInt(user.ID, 10), &b)
 	req.Header.Set("Content-Type", contentType)
@@ -2428,6 +2531,7 @@ func TestWebUserUpdateMock(t *testing.T) {
 	assert.Equal(t, user.QuotaSize, updateUser.QuotaSize)
 	assert.Equal(t, user.UID, updateUser.UID)
 	assert.Equal(t, user.GID, updateUser.GID)
+	assert.Equal(t, int64(100), updateUser.Filters.MaxUploadFileSize)
 
 	if val, ok := updateUser.Permissions["/otherdir"]; ok {
 		assert.True(t, utils.IsStringInSlice(dataprovider.PermListItems, val))
@@ -2438,7 +2542,7 @@ func TestWebUserUpdateMock(t *testing.T) {
 	assert.True(t, utils.IsStringInSlice("192.168.1.3/32", updateUser.Filters.AllowedIP))
 	assert.True(t, utils.IsStringInSlice("10.0.0.2/32", updateUser.Filters.DeniedIP))
 	assert.True(t, utils.IsStringInSlice(dataprovider.SSHLoginMethodKeyboardInteractive, updateUser.Filters.DeniedLoginMethods))
-	assert.True(t, utils.IsStringInSlice(dataprovider.SSHLoginMethodKeyboardInteractive, updateUser.Filters.DeniedLoginMethods))
+	assert.True(t, utils.IsStringInSlice(common.ProtocolFTP, updateUser.Filters.DeniedProtocols))
 	assert.True(t, utils.IsStringInSlice(".zip", updateUser.Filters.FileExtensions[0].DeniedExtensions))
 	req, err = http.NewRequest(http.MethodDelete, userPath+"/"+strconv.FormatInt(user.ID, 10), nil)
 	assert.NoError(t, err)
@@ -2490,6 +2594,7 @@ func TestWebUserS3Mock(t *testing.T) {
 	form.Set("s3_key_prefix", user.FsConfig.S3Config.KeyPrefix)
 	form.Set("allowed_extensions", "/dir1::.jpg,.png")
 	form.Set("denied_extensions", "/dir2::.zip")
+	form.Set("max_upload_file_size", "0")
 	// test invalid s3_upload_part_size
 	form.Set("s3_upload_part_size", "a")
 	b, contentType, _ := getMultipartFormData(form, "", "")
@@ -2575,6 +2680,7 @@ func TestWebUserGCSMock(t *testing.T) {
 	form.Set("gcs_storage_class", user.FsConfig.GCSConfig.StorageClass)
 	form.Set("gcs_key_prefix", user.FsConfig.GCSConfig.KeyPrefix)
 	form.Set("allowed_extensions", "/dir1::.jpg,.png")
+	form.Set("max_upload_file_size", "0")
 	b, contentType, _ := getMultipartFormData(form, "", "")
 	req, _ = http.NewRequest(http.MethodPost, webUserPath+"/"+strconv.FormatInt(user.ID, 10), &b)
 	req.Header.Set("Content-Type", contentType)
@@ -2772,7 +2878,7 @@ func waitTCPListening(address string) {
 			continue
 		}
 		logger.InfoToConsole("tcp server %v now listening\n", address)
-		defer conn.Close()
+		conn.Close()
 		break
 	}
 }
@@ -2820,7 +2926,7 @@ func createTestFile(path string, size int64) error {
 			return err
 		}
 	}
-	return ioutil.WriteFile(path, content, 0666)
+	return ioutil.WriteFile(path, content, os.ModePerm)
 }
 
 func getMultipartFormData(values url.Values, fileFieldName, filePath string) (bytes.Buffer, string, error) {
