@@ -99,8 +99,8 @@ var (
 	ErrNoAuthTryed = errors.New("no auth tryed")
 	// ValidProtocols defines all the valid protcols
 	ValidProtocols = []string{"SSH", "FTP", "DAV"}
-	// ErrNoInitRequired defines the error returned by InitProvider if no inizialization is required
-	ErrNoInitRequired = errors.New("Data provider initialization is not required")
+	// ErrNoInitRequired defines the error returned by InitProvider if no inizialization/update is required
+	ErrNoInitRequired = errors.New("The data provider is already up to date")
 	// ErrInvalidCredentials defines the error to return if the supplied credentials are invalid
 	ErrInvalidCredentials = errors.New("Invalid credentials")
 	webDAVUsersCache      sync.Map
@@ -202,7 +202,7 @@ type Config struct {
 	// easily write his own authentication hooks.
 	ExternalAuthHook string `json:"external_auth_hook" mapstructure:"external_auth_hook"`
 	// ExternalAuthScope defines the scope for the external authentication hook.
-	// - 0 means all supported authetication scopes, the external hook will be executed for password,
+	// - 0 means all supported authentication scopes, the external hook will be executed for password,
 	//     public key and keyboard interactive authentication
 	// - 1 means passwords only
 	// - 2 means public keys only
@@ -251,6 +251,10 @@ type Config struct {
 	CheckPasswordScope int `json:"check_password_scope" mapstructure:"check_password_scope"`
 	// PasswordHashing defines the configuration for password hashing
 	PasswordHashing PasswordHashing `json:"password_hashing" mapstructure:"password_hashing"`
+	// Defines how the database will be initialized/updated:
+	// - 0 means automatically
+	// - 1 means manually using the initprovider sub-command
+	UpdateMode int `json:"update_mode" mapstructure:"update_mode"`
 }
 
 // BackupData defines the structure for the backup/restore files
@@ -383,10 +387,23 @@ func Initialize(cnf Config, basePath string) error {
 	if err != nil {
 		return err
 	}
-	err = provider.migrateDatabase()
-	if err != nil {
-		providerLog(logger.LevelWarn, "database migration error: %v", err)
-		return err
+	if cnf.UpdateMode == 0 {
+		err = provider.initializeDatabase()
+		if err != nil && err != ErrNoInitRequired {
+			logger.WarnToConsole("Unable to initialize data provider: %v", err)
+			providerLog(logger.LevelWarn, "Unable to initialize data provider: %v", err)
+			return err
+		}
+		if err == nil {
+			logger.DebugToConsole("Data provider successfully initialized")
+		}
+		err = provider.migrateDatabase()
+		if err != nil && err != ErrNoInitRequired {
+			providerLog(logger.LevelWarn, "database migration error: %v", err)
+			return err
+		}
+	} else {
+		providerLog(logger.LevelInfo, "database initialization/migration skipped, manual mode is configured")
 	}
 	argon2Params = &argon2id.Params{
 		Memory:      cnf.PasswordHashing.Argon2Options.Memory,
@@ -449,14 +466,15 @@ func validateSQLTablesPrefix() error {
 func InitializeDatabase(cnf Config, basePath string) error {
 	config = cnf
 
-	if config.Driver == BoltDataProviderName || config.Driver == MemoryDataProviderName {
-		return ErrNoInitRequired
-	}
 	err := createProvider(basePath)
 	if err != nil {
 		return err
 	}
-	return provider.initializeDatabase()
+	err = provider.initializeDatabase()
+	if err != nil && err != ErrNoInitRequired {
+		return err
+	}
+	return provider.migrateDatabase()
 }
 
 // CheckUserAndPass retrieves the SFTP user with the given username and password if a match is found or an error
@@ -774,7 +792,7 @@ func validateFolderQuotaLimits(folder vfs.VirtualFolder) error {
 }
 
 func validateUserVirtualFolders(user *User) error {
-	if len(user.VirtualFolders) == 0 || user.FsConfig.Provider != 0 {
+	if len(user.VirtualFolders) == 0 || user.FsConfig.Provider != LocalFilesystemProvider {
 		user.VirtualFolders = []vfs.VirtualFolder{}
 		return nil
 	}
@@ -950,7 +968,7 @@ func validateFilters(user *User) error {
 }
 
 func saveGCSCredentials(user *User) error {
-	if user.FsConfig.Provider != 2 {
+	if user.FsConfig.Provider != GCSFilesystemProvider {
 		return nil
 	}
 	if len(user.FsConfig.GCSConfig.Credentials) == 0 {
@@ -969,7 +987,7 @@ func saveGCSCredentials(user *User) error {
 }
 
 func validateFilesystemConfig(user *User) error {
-	if user.FsConfig.Provider == 1 {
+	if user.FsConfig.Provider == S3FilesystemProvider {
 		err := vfs.ValidateS3FsConfig(&user.FsConfig.S3Config)
 		if err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate s3config: %v", err)}
@@ -985,14 +1003,14 @@ func validateFilesystemConfig(user *User) error {
 			}
 		}
 		return nil
-	} else if user.FsConfig.Provider == 2 {
+	} else if user.FsConfig.Provider == GCSFilesystemProvider {
 		err := vfs.ValidateGCSFsConfig(&user.FsConfig.GCSConfig, user.getGCSCredentialsFilePath())
 		if err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate GCS config: %v", err)}
 		}
 		return nil
 	}
-	user.FsConfig.Provider = 0
+	user.FsConfig.Provider = LocalFilesystemProvider
 	user.FsConfig.S3Config = vfs.S3FsConfig{}
 	user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
 	return nil
@@ -1223,16 +1241,16 @@ func comparePbkdf2PasswordAndHash(password, hashedPassword string) (bool, error)
 // HideUserSensitiveData hides user sensitive data
 func HideUserSensitiveData(user *User) User {
 	user.Password = ""
-	if user.FsConfig.Provider == 1 {
+	if user.FsConfig.Provider == S3FilesystemProvider {
 		user.FsConfig.S3Config.AccessSecret = utils.RemoveDecryptionKey(user.FsConfig.S3Config.AccessSecret)
-	} else if user.FsConfig.Provider == 2 {
+	} else if user.FsConfig.Provider == GCSFilesystemProvider {
 		user.FsConfig.GCSConfig.Credentials = ""
 	}
 	return *user
 }
 
 func addCredentialsToUser(user *User) error {
-	if user.FsConfig.Provider != 2 {
+	if user.FsConfig.Provider != GCSFilesystemProvider {
 		return nil
 	}
 	if user.FsConfig.GCSConfig.AutomaticCredentials > 0 {

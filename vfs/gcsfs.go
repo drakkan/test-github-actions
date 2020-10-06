@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -26,8 +27,6 @@ import (
 )
 
 var (
-	// we can use fields selection only when we don't need directory-like results
-	// with folders
 	gcsDefaultFieldsSelection = []string{"Name", "Size", "Deleted", "Updated"}
 )
 
@@ -93,6 +92,10 @@ func (fs GCSFs) Stat(name string) (os.FileInfo, error) {
 	}
 	prefix := fs.getPrefixForStat(name)
 	query := &storage.Query{Prefix: prefix, Delimiter: "/"}
+	err = query.SetAttrSelection(gcsDefaultFieldsSelection)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
 	defer cancelFn()
 	bkt := fs.svc.Bucket(fs.config.Bucket)
@@ -118,9 +121,6 @@ func (fs GCSFs) Stat(name string) (os.FileInfo, error) {
 			if fs.isEqual(attrs.Name, name) {
 				isDir := strings.HasSuffix(attrs.Name, "/")
 				result = NewFileInfo(name, isDir, attrs.Size, attrs.Updated, false)
-				if !isDir {
-					result.setContentType(attrs.ContentType)
-				}
 				break
 			}
 		}
@@ -179,6 +179,10 @@ func (fs GCSFs) Create(name string, flag int) (*os.File, *PipeWriter, func(), er
 	obj := bkt.Object(name)
 	ctx, cancelFn := context.WithCancel(context.Background())
 	objectWriter := obj.NewWriter(ctx)
+	contentType := mime.TypeByExtension(path.Ext(name))
+	if contentType != "" {
+		objectWriter.ObjectAttrs.ContentType = contentType
+	}
 	if len(fs.config.StorageClass) > 0 {
 		objectWriter.ObjectAttrs.StorageClass = fs.config.StorageClass
 	}
@@ -323,6 +327,10 @@ func (fs GCSFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 		}
 	}
 	query := &storage.Query{Prefix: prefix, Delimiter: "/"}
+	err := query.SetAttrSelection(gcsDefaultFieldsSelection)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
 	defer cancelFn()
 	bkt := fs.svc.Bucket(fs.config.Bucket)
@@ -348,9 +356,6 @@ func (fs GCSFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 				continue
 			}
 			fi := NewFileInfo(name, isDir, attrs.Size, attrs.Updated, false)
-			if !isDir {
-				fi.setContentType(attrs.ContentType)
-			}
 			result = append(result, fi)
 		}
 	}
@@ -584,4 +589,18 @@ func (fs *GCSFs) getPrefixForStat(name string) string {
 		}
 	}
 	return prefix
+}
+
+// GetMimeType implements MimeTyper interface
+func (fs GCSFs) GetMimeType(name string) (string, error) {
+	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
+	defer cancelFn()
+
+	bkt := fs.svc.Bucket(fs.config.Bucket)
+	obj := bkt.Object(name)
+	attrs, err := obj.Attrs(ctx)
+	if err != nil {
+		return "", err
+	}
+	return attrs.ContentType, nil
 }

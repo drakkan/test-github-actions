@@ -62,7 +62,7 @@ SFTPGo is developed and tested on Linux. After each commit, the code is automati
 
 Binary releases for Linux, macOS, and Windows are available. Please visit the [releases](https://github.com/drakkan/sftpgo/releases "releases") page.
 
-Sample Dockerfiles for [Debian](https://www.debian.org) and [Alpine](https://alpinelinux.org) are available inside the source tree [docker](./docker) directory.
+Official Docker images are available. Documentation is [here](./docker/README.md).
 
 Some Linux distro packages are available:
 
@@ -70,6 +70,7 @@ Some Linux distro packages are available:
   - [sftpgo](https://aur.archlinux.org/packages/sftpgo/). This package follows stable releases. It requires `git`, `gcc` and `go` to build.
   - [sftpgo-bin](https://aur.archlinux.org/packages/sftpgo-bin/). This package follows stable releases downloading the prebuilt linux binary from GitHub. It does not require `git`, `gcc` and `go` to build.
   - [sftpgo-git](https://aur.archlinux.org/packages/sftpgo-git/). This package builds and installs the latest git master. It requires `git`, `gcc` and `go` to build.
+- Deb and RPM packages are built after each commit and for each release.
 
 You can easily test new features selecting a commit from the [Actions](https://github.com/drakkan/sftpgo/actions) page and downloading the matching build artifacts for Linux, macOS or Windows. GitHub stores artifacts for 90 days.
 
@@ -89,15 +90,17 @@ sftpgo serve
 
 Check out [this documentation](./docs/service.md) if you want to run SFTPGo as a service.
 
-### Data provider initialization
+### Data provider initialization and update
 
-Before starting the SFTPGo server, please ensure that the configured data provider is properly initialized.
+Before starting the SFTPGo server please ensure that the configured data provider is properly initialized/updated.
 
-SQL based data providers (SQLite, MySQL, PostgreSQL) require the creation of a database containing the required tables. Memory and bolt data providers do not require an initialization.
+SQL based data providers (SQLite, MySQL, PostgreSQL) require the creation of a database containing the required tables. Memory and bolt data providers do not require an initialization but they could require an update to the existing data after upgrading SFTPGo.
 
-After configuring the data provider using the configuration file, you can create the required database structure using the `initprovider` command.
-For SQLite provider, the `initprovider` command will auto create the database file, if missing, and the required tables.
-For PostgreSQL and MySQL providers, you need to create the configured database, and the `initprovider` command will create the required tables.
+For PostgreSQL and MySQL providers, you need to create the configured database.
+
+SFTPGo will attempt to automatically detect if the data provider is initialized/updated and if not, will attempt to initialize/ update it on startup as needed.
+
+Alternately, you can create/update the required data provider structures yourself using the `initprovider` command.
 
 For example, you can simply execute the following command from the configuration directory:
 
@@ -111,7 +114,7 @@ Take a look at the CLI usage to learn how to specify a different configuration f
 sftpgo initprovider --help
 ```
 
-After the initialization, the database structure will be automatically checked and updated, if required, at startup.
+You can disable automatic data provider checks/updates at startup by setting the `update_mode` configuration key to `1`.
 
 ## Tutorials
 
