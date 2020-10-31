@@ -3,7 +3,6 @@
 package cmd
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -56,6 +55,16 @@ var (
 	portableWebDAVPort           int
 	portableWebDAVCert           string
 	portableWebDAVKey            string
+	portableAzContainer          string
+	portableAzAccountName        string
+	portableAzAccountKey         string
+	portableAzEndpoint           string
+	portableAzAccessTier         string
+	portableAzSASURL             string
+	portableAzKeyPrefix          string
+	portableAzULPartSize         int
+	portableAzULConcurrency      int
+	portableAzUseEmulator        bool
 	portableCmd                  = &cobra.Command{
 		Use:   "portable",
 		Short: "Serve a single directory",
@@ -77,7 +86,7 @@ Please take a look at the usage below to customize the serving parameters`,
 			}
 			permissions := make(map[string][]string)
 			permissions["/"] = portablePermissions
-			portableGCSCredentials := ""
+			var portableGCSCredentials []byte
 			if fsProvider == dataprovider.GCSFilesystemProvider && len(portableGCSCredentialsFile) > 0 {
 				fi, err := os.Stat(portableGCSCredentialsFile)
 				if err != nil {
@@ -93,7 +102,7 @@ Please take a look at the usage below to customize the serving parameters`,
 				if err != nil {
 					fmt.Printf("Unable to read credentials file: %v\n", err)
 				}
-				portableGCSCredentials = base64.StdEncoding.EncodeToString(creds)
+				portableGCSCredentials = creds
 				portableGCSAutoCredentials = 0
 			}
 			if portableFTPDPort >= 0 && len(portableFTPSCert) > 0 && len(portableFTPSKey) > 0 {
@@ -150,6 +159,18 @@ Please take a look at the usage below to customize the serving parameters`,
 							AutomaticCredentials: portableGCSAutoCredentials,
 							StorageClass:         portableGCSStorageClass,
 							KeyPrefix:            portableGCSKeyPrefix,
+						},
+						AzBlobConfig: vfs.AzBlobFsConfig{
+							Container:         portableAzContainer,
+							AccountName:       portableAzAccountName,
+							AccountKey:        portableAzAccountKey,
+							Endpoint:          portableAzEndpoint,
+							AccessTier:        portableAzAccessTier,
+							SASURL:            portableAzSASURL,
+							KeyPrefix:         portableAzKeyPrefix,
+							UseEmulator:       portableAzUseEmulator,
+							UploadPartSize:    int64(portableAzULPartSize),
+							UploadConcurrency: portableAzULConcurrency,
 						},
 					},
 					Filters: dataprovider.UserFilters{
@@ -214,9 +235,10 @@ multicast DNS`)
 advertised via multicast DNS, this
 flag allows to put username/password
 inside the advertised TXT record`)
-	portableCmd.Flags().IntVarP(&portableFsProvider, "fs-provider", "f", int(dataprovider.LocalFilesystemProvider), `0 means local filesystem,
-1 Amazon S3 compatible,
-2 Google Cloud Storage`)
+	portableCmd.Flags().IntVarP(&portableFsProvider, "fs-provider", "f", int(dataprovider.LocalFilesystemProvider), `0 => local filesystem
+1 => AWS S3 compatible
+2 => Google Cloud Storage
+3 => Azure Blob Storage`)
 	portableCmd.Flags().StringVar(&portableS3Bucket, "s3-bucket", "", "")
 	portableCmd.Flags().StringVar(&portableS3Region, "s3-region", "", "")
 	portableCmd.Flags().StringVar(&portableS3AccessKey, "s3-access-key", "", "")
@@ -246,6 +268,22 @@ a JSON credentials file, 1 automatic
 over HTTPS`)
 	portableCmd.Flags().StringVar(&portableWebDAVKey, "webdav-key", "", `Path to the key file for WebDAV over
 HTTPS`)
+	portableCmd.Flags().StringVar(&portableAzContainer, "az-container", "", "")
+	portableCmd.Flags().StringVar(&portableAzAccountName, "az-account-name", "", "")
+	portableCmd.Flags().StringVar(&portableAzAccountKey, "az-account-key", "", "")
+	portableCmd.Flags().StringVar(&portableAzSASURL, "az-sas-url", "", `Shared access signature URL`)
+	portableCmd.Flags().StringVar(&portableAzEndpoint, "az-endpoint", "", `Leave empty to use the default:
+"blob.core.windows.net"`)
+	portableCmd.Flags().StringVar(&portableAzAccessTier, "az-access-tier", "", `Leave empty to use the default
+container setting`)
+	portableCmd.Flags().StringVar(&portableAzKeyPrefix, "az-key-prefix", "", `Allows to restrict access to the
+virtual folder identified by this
+prefix and its contents`)
+	portableCmd.Flags().IntVar(&portableAzULPartSize, "az-upload-part-size", 4, `The buffer size for multipart uploads
+(MB)`)
+	portableCmd.Flags().IntVar(&portableAzULConcurrency, "az-upload-concurrency", 2, `How many parts are uploaded in
+parallel`)
+	portableCmd.Flags().BoolVar(&portableAzUseEmulator, "az-use-emulator", false, "")
 	rootCmd.AddCommand(portableCmd)
 }
 

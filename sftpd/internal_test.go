@@ -1741,16 +1741,20 @@ func TestLoadHostKeys(t *testing.T) {
 	assert.NoError(t, err)
 	rsaKeyName := filepath.Join(keysDir, defaultPrivateRSAKeyName)
 	ecdsaKeyName := filepath.Join(keysDir, defaultPrivateECDSAKeyName)
+	ed25519KeyName := filepath.Join(keysDir, defaultPrivateEd25519KeyName)
 	nonDefaultKeyName := filepath.Join(keysDir, "akey")
-	c.HostKeys = []string{nonDefaultKeyName, rsaKeyName, ecdsaKeyName}
+	c.HostKeys = []string{nonDefaultKeyName, rsaKeyName, ecdsaKeyName, ed25519KeyName}
 	err = c.checkAndLoadHostKeys(configDir, serverConfig)
 	assert.Error(t, err)
 	assert.FileExists(t, rsaKeyName)
 	assert.FileExists(t, ecdsaKeyName)
+	assert.FileExists(t, ed25519KeyName)
 	assert.NoFileExists(t, nonDefaultKeyName)
 	err = os.Remove(rsaKeyName)
 	assert.NoError(t, err)
 	err = os.Remove(ecdsaKeyName)
+	assert.NoError(t, err)
+	err = os.Remove(ed25519KeyName)
 	assert.NoError(t, err)
 	if runtime.GOOS != osWindows {
 		err = os.Chmod(keysDir, 0551)
@@ -1762,6 +1766,9 @@ func TestLoadHostKeys(t *testing.T) {
 		err = c.checkAndLoadHostKeys(configDir, serverConfig)
 		assert.Error(t, err)
 		c.HostKeys = []string{ecdsaKeyName, rsaKeyName}
+		err = c.checkAndLoadHostKeys(configDir, serverConfig)
+		assert.Error(t, err)
+		c.HostKeys = []string{ed25519KeyName}
 		err = c.checkAndLoadHostKeys(configDir, serverConfig)
 		assert.Error(t, err)
 		err = os.Chmod(keysDir, 0755)
@@ -1806,4 +1813,61 @@ func TestRecursiveCopyErrors(t *testing.T) {
 	// try to copy a missing directory
 	err = sshCmd.checkRecursiveCopyPermissions("adir", "another", "/another")
 	assert.Error(t, err)
+}
+
+func TestSFTPSubSystem(t *testing.T) {
+	permissions := make(map[string][]string)
+	permissions["/"] = []string{dataprovider.PermAny}
+	user := dataprovider.User{
+		Permissions: permissions,
+		HomeDir:     os.TempDir(),
+	}
+	user.FsConfig.Provider = dataprovider.AzureBlobFilesystemProvider
+	err := ServeSubSystemConnection(user, "connID", nil, nil)
+	assert.Error(t, err)
+	user.FsConfig.Provider = dataprovider.LocalFilesystemProvider
+
+	buf := make([]byte, 0, 4096)
+	stdErrBuf := make([]byte, 0, 4096)
+	mockSSHChannel := &MockChannel{
+		Buffer:       bytes.NewBuffer(buf),
+		StdErrBuffer: bytes.NewBuffer(stdErrBuf),
+	}
+	// this is 327680 and it will result in packet too long error
+	_, err = mockSSHChannel.Write([]byte{0x00, 0x05, 0x00, 0x00, 0x00, 0x00})
+	assert.NoError(t, err)
+	err = ServeSubSystemConnection(user, "id", mockSSHChannel, mockSSHChannel)
+	assert.EqualError(t, err, "packet too long")
+
+	subsystemChannel := newSubsystemChannel(mockSSHChannel, mockSSHChannel)
+	n, err := subsystemChannel.Write([]byte{0x00})
+	assert.NoError(t, err)
+	assert.Equal(t, n, 1)
+	err = subsystemChannel.Close()
+	assert.NoError(t, err)
+}
+
+func TestRecoverer(t *testing.T) {
+	c := Configuration{}
+	c.AcceptInboundConnection(nil, nil)
+	connID := "connectionID"
+	connection := &Connection{
+		BaseConnection: common.NewBaseConnection(connID, common.ProtocolSFTP, dataprovider.User{}, nil),
+	}
+	c.handleSftpConnection(nil, connection)
+	sshCmd := sshCommand{
+		command:    "cd",
+		connection: connection,
+	}
+	err := sshCmd.handle()
+	assert.EqualError(t, err, common.ErrGenericFailure.Error())
+	scpCmd := scpCommand{
+		sshCommand: sshCommand{
+			command:    "scp",
+			connection: connection,
+		},
+	}
+	err = scpCmd.handle()
+	assert.EqualError(t, err, common.ErrGenericFailure.Error())
+	assert.Len(t, common.Connections.GetStats(), 0)
 }

@@ -26,18 +26,23 @@ The `serve` command supports the following flags:
 
 - `--config-dir` string. Location of the config dir. This directory should contain the configuration file and is used as the base directory for any files that use a relative path (eg. the private keys for the SFTP server, the SQLite or bblot database if you use SQLite or bbolt as data provider). The default value is "." or the value of `SFTPGO_CONFIG_DIR` environment variable.
 - `--config-file` string. Name of the configuration file. It must be the name of a file stored in `config-dir`, not the absolute path to the configuration file. The specified file name must have no extension because we automatically append JSON, YAML, TOML, HCL and Java extensions when we search for the file. The default value is "sftpgo" (and therefore `sftpgo.json`, `sftpgo.yaml` and so on are searched) or the value of `SFTPGO_CONFIG_FILE` environment variable.
+- `--loaddata-from` string. Load users and folders from this file. The file must be specified as absolute path and it must contain a backup obtained using the `dumpdata` REST API or compatible content. The default value is empty or the value of `SFTPGO_LOADDATA_FROM` environment variable.
+- `--loaddata-clean` boolean. Determine if the loaddata-from file should be removed after a successful load. Default `false` or the value of `SFTPGO_LOADDATA_CLEAN` environment variable (1 or `true`, 0 or `false`).
+- `--loaddata-mode`, integer. Restore mode for data to load. 0 means new users are added, existing users are updated. 1 means new users are added, existing users are not modified. Default 1 or the value of `SFTPGO_LOADDATA_MODE` environment variable.
+- `--loaddata-scan`, integer. Quota scan mode after data load. 0 means no quota scan. 1 means quota scan. 2 means scan quota if the user has quota restrictions. Default 0 or the value of `SFTPGO_LOADDATA_QUOTA_SCAN` environment variable.
 - `--log-compress` boolean. Determine if the rotated log files should be compressed using gzip. Default `false` or the value of `SFTPGO_LOG_COMPRESS` environment variable (1 or `true`, 0 or `false`). It is unused if `log-file-path` is empty.
 - `--log-file-path` string. Location for the log file, default "sftpgo.log" or the value of `SFTPGO_LOG_FILE_PATH` environment variable. Leave empty to write logs to the standard error.
 - `--log-max-age` int. Maximum number of days to retain old log files. Default 28 or the value of `SFTPGO_LOG_MAX_AGE` environment variable. It is unused if `log-file-path` is empty.
 - `--log-max-backups` int. Maximum number of old log files to retain. Default 5 or the value of `SFTPGO_LOG_MAX_BACKUPS` environment variable. It is unused if `log-file-path` is empty.
 - `--log-max-size` int. Maximum size in megabytes of the log file before it gets rotated. Default 10 or the value of `SFTPGO_LOG_MAX_SIZE` environment variable. It is unused if `log-file-path` is empty.
 - `--log-verbose` boolean. Enable verbose logs. Default `true` or the value of `SFTPGO_LOG_VERBOSE` environment variable (1 or `true`, 0 or `false`).
+- `--profiler` boolean. Enable the built-in profiler. The profiler will be accessible via HTTP/HTTPS using the base URL "/debug/pprof/". Default `false` or the value of `SFTPGO_PROFILER` environment variable (1 or `true`, 0 or `false`).
 
 Log file can be rotated on demand sending a `SIGUSR1` signal on Unix based systems and using the command `sftpgo service rotatelogs` on Windows.
 
-If you don't configure any private host key, the daemon will use `id_rsa` and `id_ecdsa` in the configuration directory. If these files don't exist, the daemon will attempt to autogenerate them (if the user that executes SFTPGo has write access to the `config-dir`). The server supports any private key format supported by [`crypto/ssh`](https://github.com/golang/crypto/blob/master/ssh/keys.go#L33).
+If you don't configure any private host key, the daemon will use `id_rsa`, `id_ecdsa` and `id_ed25519` in the configuration directory. If these files don't exist, the daemon will attempt to autogenerate them. The server supports any private key format supported by [`crypto/ssh`](https://github.com/golang/crypto/blob/master/ssh/keys.go#L33).
 
-The `gen` command allows to generate completion scripts for your shell and man pages. Currently the man pages visual representation is wrong, take a look at this upstream [bug](https://github.com/spf13/cobra/issues/1049) for more details.
+The `gen` command allows to generate completion scripts for your shell and man pages.
 
 ## Configuration file
 
@@ -68,7 +73,7 @@ The configuration file contains the following sections:
   - `actions`, struct. Deprecated, please use the same key in `common` section.
   - `keys`, struct array. Deprecated, please use `host_keys`.
     - `private_key`, path to the private key file. It can be a path relative to the config dir or an absolute one.
-  - `host_keys`, list of strings. It contains the daemon's private host keys. Each host key can be defined as a path relative to the configuration directory or an absolute one. If empty, the daemon will search or try to generate `id_rsa` and `id_ecdsa` keys inside the configuration directory. If you configure absolute paths to files named `id_rsa` and/or `id_ecdsa` then SFTPGo will try to generate these keys using the default settings.
+  - `host_keys`, list of strings. It contains the daemon's private host keys. Each host key can be defined as a path relative to the configuration directory or an absolute one. If empty, the daemon will search or try to generate `id_rsa`, `id_ecdsa` and `id_ed25519` keys inside the configuration directory. If you configure absolute paths to files named `id_rsa`, `id_ecdsa` and/or `id_ed25519` then SFTPGo will try to generate these keys using the default settings.
   - `kex_algorithms`, list of strings. Available KEX (Key Exchange) algorithms in preference order. Leave empty to use default values. The supported values can be found here: [`crypto/ssh`](https://github.com/golang/crypto/blob/master/ssh/common.go#L46 "Supported kex algos")
   - `ciphers`, list of strings. Allowed ciphers. Leave empty to use default values. The supported values can be found here: [crypto/ssh](https://github.com/golang/crypto/blob/master/ssh/common.go#L28 "Supported ciphers")
   - `macs`, list of strings. Available MAC (message authentication code) algorithms in preference order. Leave empty to use default values. The supported values can be found here: [crypto/ssh](https://github.com/golang/crypto/blob/master/ssh/common.go#L84 "Supported MACs")
@@ -132,6 +137,7 @@ The configuration file contains the following sections:
   - `external_auth_hook`, string. Absolute path to an external program or an HTTP URL to invoke for users authentication. See [External Authentication](./external-auth.md) for more details. Leave empty to disable.
   - `external_auth_scope`, integer. 0 means all supported authentication scopes (passwords, public keys and keyboard interactive). 1 means passwords only. 2 means public keys only. 4 means key keyboard interactive only. The flags can be combined, for example 6 means public keys and keyboard interactive
   - `credentials_path`, string. It defines the directory for storing user provided credential files such as Google Cloud Storage credentials. This can be an absolute path or a path relative to the config dir
+  - `prefer_database_credentials`, boolean. When true, users' Google Cloud Storage credentials will be written to the data provider instead of disk, though pre-existing credentials on disk will be used as a fallback. When false, they will be written to the directory specified by `credentials_path`.
   - `pre_login_program`, string. Deprecated, please use `pre_login_hook`.
   - `pre_login_hook`, string. Absolute path to an external program or an HTTP URL to invoke to modify user details just before the login. See [Dynamic user modification](./dynamic-user-mod.md) for more details. Leave empty to disable.
   - `post_login_hook`, string. Absolute path to an external program or an HTTP URL to invoke to notify a successful or failed login. See [Post-login hook](./post-login-hook.md) for more details. Leave empty to disable.
@@ -170,18 +176,19 @@ If you want to use a private host key that uses an algorithm/setting different f
 ]
 ```
 
-where `id_rsa`, `id_ecdsa` and `id_ed25519`, in this example, are files containing your generated keys. You can use absolute paths or paths relative to the configuration directory.
+where `id_rsa`, `id_ecdsa` and `id_ed25519`, in this example, are files containing your generated keys. You can use absolute paths or paths relative to the configuration directory specified via the `--config-dir` serve flag. By default the configuration directory is the working directory.
 
-If you want the default host keys generation in a directory different from the config dir, please specify absolute paths to files named `id_rsa` or `id_ecdsa` like this:
+If you want the default host keys generation in a directory different from the config dir, please specify absolute paths to files named `id_rsa`, `id_ecdsa` or `id_ed25519` like this:
 
 ```json
 "host_keys": [
   "/etc/sftpgo/keys/id_rsa",
-  "/etc/sftpgo/keys/id_ecdsa"
+  "/etc/sftpgo/keys/id_ecdsa",
+  "/etc/sftpgo/keys/id_ed25519"
 ]
 ```
 
-then SFTPGo will try to create `id_rsa` and `id_ecdsa`, if they are missing, inside the existing directory `/etc/sftpgo/keys`.
+then SFTPGo will try to create `id_rsa`, `id_ecdsa` and `id_ed25519`, if they are missing, inside the directory `/etc/sftpgo/keys`.
 
 The configuration can be read from JSON, TOML, YAML, HCL, envfile and Java properties config files. If your `config-file` flag is set to `sftpgo` (default value), you need to create a configuration file called `sftpgo.json` or `sftpgo.yaml` and so on inside `config-dir`.
 
@@ -193,5 +200,3 @@ Let's see some examples:
 
 - To set sftpd `bind_port`, you need to define the env var `SFTPGO_SFTPD__BIND_PORT`
 - To set the `execute_on` actions, you need to define the env var `SFTPGO_COMMON__ACTIONS__EXECUTE_ON`. For example `SFTPGO_COMMON__ACTIONS__EXECUTE_ON=upload,download`
-
-Please note that, to override configuration options with environment variables, a configuration file containing the options to override is required, this is a [viper bug](https://github.com/spf13/viper/issues/584). You can, for example, deploy the default configuration file and then override the options you need to customize using environment variables.

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -25,9 +26,10 @@ import (
 )
 
 const (
-	defaultPrivateRSAKeyName    = "id_rsa"
-	defaultPrivateECDSAKeyName  = "id_ecdsa"
-	sourceAddressCriticalOption = "source-address"
+	defaultPrivateRSAKeyName     = "id_rsa"
+	defaultPrivateECDSAKeyName   = "id_ecdsa"
+	defaultPrivateEd25519KeyName = "id_ed25519"
+	sourceAddressCriticalOption  = "source-address"
 )
 
 var (
@@ -265,6 +267,11 @@ func (c Configuration) configureKeyboardInteractiveAuth(serverConfig *ssh.Server
 
 // AcceptInboundConnection handles an inbound connection to the server instance and determines if the request should be served or not.
 func (c Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.ServerConfig) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error(logSender, "", "panic in AcceptInboundConnection: %#v stack strace: %v", r, string(debug.Stack()))
+		}
+	}()
 	// Before beginning a handshake must be performed on the incoming net.Conn
 	// we'll set a Deadline for handshake to complete, the default is 2 minutes as OpenSSH
 	conn.SetDeadline(time.Now().Add(handshakeTimeout)) //nolint:errcheck
@@ -300,7 +307,7 @@ func (c Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Server
 	fs, err := user.GetFilesystem(connectionID)
 
 	if err != nil {
-		logger.Warn(logSender, "", "could create filesystem for user %#v err: %v", user.Username, err)
+		logger.Warn(logSender, "", "could not create filesystem for user %#v err: %v", user.Username, err)
 		return
 	}
 
@@ -373,6 +380,11 @@ func (c Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Server
 }
 
 func (c Configuration) handleSftpConnection(channel ssh.Channel, connection *Connection) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error(logSender, "", "panic in handleSftpConnection: %#v stack strace: %v", r, string(debug.Stack()))
+		}
+	}()
 	common.Connections.Add(connection)
 	defer common.Connections.Remove(connection.GetID())
 
@@ -471,6 +483,33 @@ func (c *Configuration) checkSSHCommands() {
 	c.EnabledSSHCommands = sshCommands
 }
 
+func (c *Configuration) generateDefaultHostKeys(configDir string) error {
+	var err error
+	defaultHostKeys := []string{defaultPrivateRSAKeyName, defaultPrivateECDSAKeyName, defaultPrivateEd25519KeyName}
+	for _, k := range defaultHostKeys {
+		autoFile := filepath.Join(configDir, k)
+		if _, err = os.Stat(autoFile); os.IsNotExist(err) {
+			logger.Info(logSender, "", "No host keys configured and %#v does not exist; try to create a new host key", autoFile)
+			logger.InfoToConsole("No host keys configured and %#v does not exist; try to create a new host key", autoFile)
+			if k == defaultPrivateRSAKeyName {
+				err = utils.GenerateRSAKeys(autoFile)
+			} else if k == defaultPrivateECDSAKeyName {
+				err = utils.GenerateECDSAKeys(autoFile)
+			} else {
+				err = utils.GenerateEd25519Keys(autoFile)
+			}
+			if err != nil {
+				logger.Warn(logSender, "", "error creating host key %#v: %v", autoFile, err)
+				logger.WarnToConsole("error creating host key %#v: %v", autoFile, err)
+				return err
+			}
+		}
+		c.HostKeys = append(c.HostKeys, k)
+	}
+
+	return err
+}
+
 func (c *Configuration) checkHostKeyAutoGeneration(configDir string) error {
 	for _, k := range c.HostKeys {
 		if filepath.IsAbs(k) {
@@ -495,6 +534,15 @@ func (c *Configuration) checkHostKeyAutoGeneration(configDir string) error {
 						logger.WarnToConsole("error creating host key %#v: %v", k, err)
 						return err
 					}
+				case defaultPrivateEd25519KeyName:
+					logger.Info(logSender, "", "try to create non-existent host key %#v", k)
+					logger.InfoToConsole("try to create non-existent host key %#v", k)
+					err = utils.GenerateEd25519Keys(k)
+					if err != nil {
+						logger.Warn(logSender, "", "error creating host key %#v: %v", k, err)
+						logger.WarnToConsole("error creating host key %#v: %v", k, err)
+						return err
+					}
 				default:
 					logger.Warn(logSender, "", "non-existent host key %#v will not be created", k)
 					logger.WarnToConsole("non-existent host key %#v will not be created", k)
@@ -503,24 +551,8 @@ func (c *Configuration) checkHostKeyAutoGeneration(configDir string) error {
 		}
 	}
 	if len(c.HostKeys) == 0 {
-		defaultKeys := []string{defaultPrivateRSAKeyName, defaultPrivateECDSAKeyName}
-		for _, k := range defaultKeys {
-			autoFile := filepath.Join(configDir, k)
-			if _, err := os.Stat(autoFile); os.IsNotExist(err) {
-				logger.Info(logSender, "", "No host keys configured and %#v does not exist; try to create a new host key", autoFile)
-				logger.InfoToConsole("No host keys configured and %#v does not exist; try to create a new host key", autoFile)
-				if k == defaultPrivateRSAKeyName {
-					err = utils.GenerateRSAKeys(autoFile)
-				} else {
-					err = utils.GenerateECDSAKeys(autoFile)
-				}
-				if err != nil {
-					logger.Warn(logSender, "", "error creating host key %#v: %v", autoFile, err)
-					logger.WarnToConsole("error creating host key %#v: %v", autoFile, err)
-					return err
-				}
-			}
-			c.HostKeys = append(c.HostKeys, k)
+		if err := c.generateDefaultHostKeys(configDir); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -534,14 +566,14 @@ func (c *Configuration) checkAndLoadHostKeys(configDir string, serverConfig *ssh
 	for _, k := range c.HostKeys {
 		hostKey := k
 		if !utils.IsFileInputValid(hostKey) {
-			logger.Warn(logSender, "", "unable to load invalid host key: %#v", hostKey)
-			logger.WarnToConsole("unable to load invalid host key: %#v", hostKey)
+			logger.Warn(logSender, "", "unable to load invalid host key %#v", hostKey)
+			logger.WarnToConsole("unable to load invalid host key %#v", hostKey)
 			continue
 		}
 		if !filepath.IsAbs(hostKey) {
 			hostKey = filepath.Join(configDir, hostKey)
 		}
-		logger.Info(logSender, "", "Loading private host key: %s", hostKey)
+		logger.Info(logSender, "", "Loading private host key %#v", hostKey)
 
 		privateBytes, err := ioutil.ReadFile(hostKey)
 		if err != nil {
@@ -552,6 +584,8 @@ func (c *Configuration) checkAndLoadHostKeys(configDir string, serverConfig *ssh
 		if err != nil {
 			return err
 		}
+		logger.Info(logSender, "", "Host key %#v loaded, type %#v, fingerprint %#v", hostKey,
+			private.PublicKey().Type(), ssh.FingerprintSHA256(private.PublicKey()))
 
 		// Add private key to the server configuration.
 		serverConfig.AddHostKey(private)

@@ -7,7 +7,7 @@
 [![Mentioned in Awesome Go](https://awesome.re/mentioned-badge.svg)](https://github.com/avelino/awesome-go)
 
 Fully featured and highly configurable SFTP server with optional FTP/S and WebDAV support, written in Go.
-It can serve local filesystem, S3 or Google Cloud Storage.
+It can serve local filesystem, S3 (compatible) Object Storage, Google Cloud Storage and Azure Blob Storage.
 
 ## Features
 
@@ -44,6 +44,7 @@ It can serve local filesystem, S3 or Google Cloud Storage.
 - [Web based administration interface](./docs/web-admin.md) to easily manage users, folders and connections.
 - Easy [migration](./examples/rest-api-cli#convert-users-from-other-stores) from Linux system user accounts.
 - [Portable mode](./docs/portable-mode.md): a convenient way to share a single directory on demand.
+- [SFTP subsystem mode](./docs/sftp-subsystem.md): you can use SFTPGo as OpenSSH's SFTP subsystem.
 - Performance analysis using built-in [profiler](./docs/profiling.md).
 - Configuration format is at your choice: JSON, TOML, YAML, HCL, envfile are supported.
 - Log files are accurate and they are saved in the easily parsable JSON format ([more information](./docs/logs.md)).
@@ -54,7 +55,7 @@ SFTPGo is developed and tested on Linux. After each commit, the code is automati
 
 ## Requirements
 
-- Go 1.13 or higher as build only dependency.
+- Go 1.14 or higher as build only dependency.
 - A suitable SQL server to use as data provider: PostgreSQL 9.4+ or MySQL 5.6+ or SQLite 3.x.
 - The SQL server is optional: you can choose to use an embedded bolt database as key/value store or an in memory data provider.
 
@@ -62,7 +63,7 @@ SFTPGo is developed and tested on Linux. After each commit, the code is automati
 
 Binary releases for Linux, macOS, and Windows are available. Please visit the [releases](https://github.com/drakkan/sftpgo/releases "releases") page.
 
-Official Docker images are available. Documentation is [here](./docker/README.md).
+An official Docker image is available. Documentation is [here](./docker/README.md).
 
 Some Linux distro packages are available:
 
@@ -71,6 +72,7 @@ Some Linux distro packages are available:
   - [sftpgo-bin](https://aur.archlinux.org/packages/sftpgo-bin/). This package follows stable releases downloading the prebuilt linux binary from GitHub. It does not require `git`, `gcc` and `go` to build.
   - [sftpgo-git](https://aur.archlinux.org/packages/sftpgo-git/). This package builds and installs the latest git master. It requires `git`, `gcc` and `go` to build.
 - Deb and RPM packages are built after each commit and for each release.
+- For Ubuntu a PPA is available [here](https://launchpad.net/~sftpgo/+archive/ubuntu/sftpgo).
 
 You can easily test new features selecting a commit from the [Actions](https://github.com/drakkan/sftpgo/actions) page and downloading the matching build artifacts for Linux, macOS or Windows. GitHub stores artifacts for 90 days.
 
@@ -115,6 +117,16 @@ sftpgo initprovider --help
 ```
 
 You can disable automatic data provider checks/updates at startup by setting the `update_mode` configuration key to `1`.
+
+## Users and folders management
+
+After starting SFTPGo you can manage users and folders using:
+
+- the [web based administration interface](./docs/web-admin.md)
+- the [REST API](./docs/rest-api.md)
+- the sample [REST API CLI](./examples/rest-api-cli)
+
+To support embedded data providers like `bolt` and `SQLite` we can't have a CLI that directly write users and folders to the data provider, we always have to use the REST API.
 
 ## Tutorials
 
@@ -162,6 +174,10 @@ Each user can be mapped to the whole bucket or to a bucket virtual folder. This 
 
 Each user can be mapped with a Google Cloud Storage bucket or a bucket virtual folder. This way, the mapped bucket/virtual folder is exposed over SFTP/SCP/FTP/WebDAV. More information about Google Cloud Storage integration can be found [here](./docs/google-cloud-storage.md).
 
+### Azure Blob Storage backend
+
+Each user can be mapped with an Azure Blob Storage container or a container virtual folder. This way, the mapped container/virtual folder is exposed over SFTP/SCP/FTP/WebDAV. More information about Azure Blob Storage integration can be found [here](./docs/azure-blob-storage.md).
+
 ### Other Storage backends
 
 Adding new storage backends is quite easy:
@@ -186,6 +202,10 @@ Details information about account configuration properties can be found [here](.
 SFTPGo can easily saturate a Gigabit connection on low end hardware with no special configuration, this is generally enough for most use cases.
 
 More in-depth analysis of performance can be found [here](./docs/performance.md).
+
+## Release Cadence
+
+SFTPGo releases are feature-driven, we don't have a fixed time based schedule. As a rough estimate, you can expect 1 or 2 new releases per year.
 
 ## Acknowledgements
 

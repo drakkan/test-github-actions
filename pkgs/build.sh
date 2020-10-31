@@ -17,13 +17,14 @@ echo -n ${VERSION} > dist/version
 cd dist
 BASE_DIR="../.."
 
-echo "SFTPGO_HTTPD__TEMPLATES_PATH=/usr/share/sftpgo/templates" > sftpgo.env
-echo "SFTPGO_HTTPD__STATIC_FILES_PATH=/usr/share/sftpgo/static" >> sftpgo.env
-echo "SFTPGO_HTTPD__BACKUPS_PATH=/var/lib/sftpgo/backups" >> sftpgo.env
-echo "SFTPGO_DATA_PROVIDER__CREDENTIALS_PATH=/var/lib/sftpgo/credentials" >> sftpgo.env
-
 cp ${BASE_DIR}/sftpgo.json .
-sed -i 's/sftpgo.db/\/var\/lib\/sftpgo\/sftpgo.db/g' sftpgo.json
+sed -i "s|sftpgo.db|/var/lib/sftpgo/sftpgo.db|" sftpgo.json
+sed -i "s|\"users_base_dir\": \"\",|\"users_base_dir\": \"/srv/sftpgo/data\",|" sftpgo.json
+sed -i "s|\"templates\"|\"/usr/share/sftpgo/templates\"|" sftpgo.json
+sed -i "s|\"static\"|\"/usr/share/sftpgo/static\"|" sftpgo.json
+sed -i "s|\"backups\"|\"/srv/sftpgo/backups\"|" sftpgo.json
+sed -i "s|\"credentials\"|\"/var/lib/sftpgo/credentials\"|" sftpgo.json
+
 $BASE_DIR/sftpgo gen completion bash > sftpgo-completion.bash
 $BASE_DIR/sftpgo gen man -d man1
 
@@ -39,19 +40,19 @@ maintainer: "Nicola Murino <nicola.murino@gmail.com>"
 provides:
   - sftpgo
 description: |
-  SFTPGo is a fully featured and highly configurable
-    SFTP server with optional FTP/S and WebDAV support.
-    It can serve local filesystem, S3, GCS
+  Fully featured and highly configurable SFTP server
+  SFTPGo has optional FTP/S and WebDAV support.
+  It can serve local filesystem, S3 (Compatible) Object Storage,
+  Google Cloud Storage and Azure Blob Storage.
 vendor: "SFTPGo"
 homepage: "https://github.com/drakkan/sftpgo"
 license: "GPL-3.0"
 files:
   ${BASE_DIR}/sftpgo: "/usr/bin/sftpgo"
-  ./sftpgo.env: "/etc/sftpgo/sftpgo.env"
-  ./sftpgo-completion.bash: "/etc/bash_completion.d/sftpgo-completion.bash"
+  ./sftpgo-completion.bash: "/usr/share/bash-completion/completions/sftpgo"
   ./man1/*: "/usr/share/man/man1/"
   ${BASE_DIR}/init/sftpgo.service: "/lib/systemd/system/sftpgo.service"
-  ${BASE_DIR}/examples/rest-api-cli/sftpgo_api_cli.py: "/usr/bin/sftpgo_api_cli"
+  ${BASE_DIR}/examples/rest-api-cli/sftpgo_api_cli: "/usr/bin/sftpgo_api_cli"
   ${BASE_DIR}/templates/*: "/usr/share/sftpgo/templates/"
   ${BASE_DIR}/static/**/*: "/usr/share/sftpgo/static/"
 
@@ -60,12 +61,15 @@ config_files:
 
 empty_folders:
   - /var/lib/sftpgo
+  - /srv/sftpgo
 
 overrides:
   deb:
     recommends:
       - bash-completion
       - python3-requests
+      - python3-pygments
+      - mime-support
     scripts:
       postinstall: ../scripts/deb/postinstall.sh
       preremove: ../scripts/deb/preremove.sh
@@ -73,6 +77,7 @@ overrides:
   rpm:
     recommends:
       - bash-completion
+      - mailcap
       # centos 8 has python3-requests, centos 6/7 python-requests
     scripts:
       postinstall: ../scripts/rpm/postinstall

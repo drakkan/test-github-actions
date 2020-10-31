@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -84,7 +85,13 @@ func processSSHCommand(payload []byte, connection *Connection, enabledSSHCommand
 	return false
 }
 
-func (c *sshCommand) handle() error {
+func (c *sshCommand) handle() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error(logSender, "", "panic in handle ssh command: %#v stack strace: %v", r, string(debug.Stack()))
+			err = common.ErrGenericFailure
+		}
+	}()
 	common.Connections.Add(c.connection)
 	defer common.Connections.Remove(c.connection.GetID())
 
@@ -108,7 +115,7 @@ func (c *sshCommand) handle() error {
 	} else if c.command == "sftpgo-remove" {
 		return c.handeSFTPGoRemove()
 	}
-	return nil
+	return
 }
 
 func (c *sshCommand) handeSFTPGoCopy() error {
@@ -381,7 +388,7 @@ func (c *sshCommand) executeSystemCommand(command systemCommand) error {
 			common.TransferDownload, 0, 0, 0, false, c.connection.Fs)
 		transfer := newTransfer(baseTransfer, nil, nil, nil)
 
-		w, e := transfer.copyFromReaderToWriter(c.connection.channel.Stderr(), stderr)
+		w, e := transfer.copyFromReaderToWriter(c.connection.channel.(ssh.Channel).Stderr(), stderr)
 		c.connection.Log(logger.LevelDebug, "command: %#v, copy from sdterr to remote command ended, written: %v err: %v",
 			c.connection.command, w, e)
 		// os.ErrClosed means that the command is finished so we don't need to do anything
@@ -707,7 +714,7 @@ func (c *sshCommand) sendExitStatus(err error) {
 	exitStatus := sshSubsystemExitStatus{
 		Status: status,
 	}
-	c.connection.channel.SendRequest("exit-status", false, ssh.Marshal(&exitStatus)) //nolint:errcheck
+	c.connection.channel.(ssh.Channel).SendRequest("exit-status", false, ssh.Marshal(&exitStatus)) //nolint:errcheck
 	c.connection.channel.Close()
 	// for scp we notify single uploads/downloads
 	if c.command != scpCmdName {

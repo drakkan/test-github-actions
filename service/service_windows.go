@@ -123,12 +123,12 @@ func (s *WindowsService) RunService() error {
 		return err
 	}
 
-	isIntSess, err := svc.IsAnInteractiveSession()
+	isService, err := svc.IsWindowsService()
 	if err != nil {
 		return err
 	}
 
-	s.isInteractive = isIntSess
+	s.isInteractive = !isService
 	dir := filepath.Dir(exePath)
 	if err = os.Chdir(dir); err != nil {
 		return err

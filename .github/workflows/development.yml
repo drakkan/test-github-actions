@@ -12,10 +12,48 @@ jobs:
     strategy:
       matrix:
         go: [1.15]
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - name: Dump GitHub context
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Build for Linux/macOS
+        if: startsWith(matrix.os, 'windows-') != true
+        run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
+
+      - name: Build for Windows
+        if: startsWith(matrix.os, 'windows-')
+        run: |
+          $GIT_COMMIT = (git describe --always --dirty) | Out-String
+          $DATE_TIME = ([datetime]::Now.ToUniversalTime().toString("yyyy-MM-ddTHH:mm:ssZ")) | Out-String
+          go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=$GIT_COMMIT -X github.com/drakkan/sftpgo/version.date=$DATE_TIME" -o sftpgo.exe
+
+      - name: Run test cases using SQLite provider
+        run: go test -v -p 1 -timeout 10m ./... -coverprofile=coverage.txt -covermode=atomic
+
+      - name: Run test cases using bolt provider
+        run: |
+          go test -v -p 1 -timeout 2m ./config -covermode=atomic
+          go test -v -p 1 -timeout 2m ./common -covermode=atomic
+          go test -v -p 1 -timeout 3m ./httpd -covermode=atomic
+          go test -v -p 1 -timeout 8m ./sftpd -covermode=atomic
+          go test -v -p 1 -timeout 2m ./ftpd -covermode=atomic
+          go test -v -p 1 -timeout 2m ./webdavd -covermode=atomic
         env:
-          GITHUB_CONTEXT: ${{ toJson(github) }}
-        run: echo "$GITHUB_CONTEXT"
+          SFTPGO_DATA_PROVIDER__DRIVER: bolt
+          SFTPGO_DATA_PROVIDER__NAME: 'sftpgo_bolt.db'
+
+      - name: Run test cases using memory provider
+        run: go test -v -p 1 -timeout 10m ./... -covermode=atomic
+        env:
+          SFTPGO_DATA_PROVIDER__DRIVER: memory
+          SFTPGO_DATA_PROVIDER__NAME: ''
+
+

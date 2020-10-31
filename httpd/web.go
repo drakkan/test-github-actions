@@ -1,7 +1,6 @@
 package httpd
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"html/template"
@@ -430,8 +429,25 @@ func getFsConfigFromUserPostFields(r *http.Request) (dataprovider.Filesystem, er
 			}
 			return fs, err
 		}
-		fs.GCSConfig.Credentials = base64.StdEncoding.EncodeToString(fileBytes)
+		fs.GCSConfig.Credentials = fileBytes
 		fs.GCSConfig.AutomaticCredentials = 0
+	} else if fs.Provider == dataprovider.AzureBlobFilesystemProvider {
+		fs.AzBlobConfig.Container = r.Form.Get("az_container")
+		fs.AzBlobConfig.AccountName = r.Form.Get("az_account_name")
+		fs.AzBlobConfig.AccountKey = r.Form.Get("az_account_key")
+		fs.AzBlobConfig.SASURL = r.Form.Get("az_sas_url")
+		fs.AzBlobConfig.Endpoint = r.Form.Get("az_endpoint")
+		fs.AzBlobConfig.KeyPrefix = r.Form.Get("az_key_prefix")
+		fs.AzBlobConfig.AccessTier = r.Form.Get("az_access_tier")
+		fs.AzBlobConfig.UseEmulator = len(r.Form.Get("az_use_emulator")) > 0
+		fs.AzBlobConfig.UploadPartSize, err = strconv.ParseInt(r.Form.Get("az_upload_part_size"), 10, 64)
+		if err != nil {
+			return fs, err
+		}
+		fs.AzBlobConfig.UploadConcurrency, err = strconv.Atoi(r.Form.Get("az_upload_concurrency"))
+		if err != nil {
+			return fs, err
+		}
 	}
 	return fs, nil
 }

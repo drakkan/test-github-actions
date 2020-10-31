@@ -1,0 +1,41 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+  # Add user and group
+  if ! getent group sftpgo >/dev/null; then
+    groupadd --system sftpgo
+  fi
+  if ! getent passwd sftpgo >/dev/null; then
+    useradd --system \
+      --gid sftpgo \
+      --no-create-home \
+      --home-dir /var/lib/sftpgo \
+      --shell /usr/sbin/nologin \
+      --comment "SFTPGo user" \
+      sftpgo
+  fi
+
+  if [ -z "$2" ]; then
+    # if configure has no args this is the first installation
+    # for upgrades the second arg is the previously installed version
+    #
+    # initialize data provider
+    sftpgo initprovider -c /etc/sftpgo
+    # ensure files and folders have the appropriate permissions
+    chown -R sftpgo:sftpgo /etc/sftpgo /var/lib/sftpgo /srv/sftpgo
+    chmod 750 /etc/sftpgo /var/lib/sftpgo /srv/sftpgo
+    chmod 640 /etc/sftpgo/sftpgo.json
+    echo "Please be sure to have the python3-requests package installed if you want to use the REST API CLI"
+  fi
+
+  # we added /srv/sftpgo after 1.1.0, we should check if we are upgrading
+  # from this version but a non-recursive chmod/chown shouldn't hurt
+  if [ -d /srv/sftpgo ]; then
+    chown sftpgo:sftpgo /srv/sftpgo
+    chmod 750 /srv/sftpgo
+  fi
+
+fi
+
+#DEBHELPER#

@@ -220,20 +220,20 @@ func (t *BaseTransfer) Close() error {
 			t.Connection.ID, t.Connection.protocol)
 		action := newActionNotification(&t.Connection.User, operationDownload, t.fsPath, "", "", t.Connection.protocol,
 			atomic.LoadInt64(&t.BytesSent), t.ErrTransfer)
-		go action.execute() //nolint:errcheck
+		go actionHandler.Handle(action) //nolint:errcheck
 	} else {
 		fileSize := atomic.LoadInt64(&t.BytesReceived) + t.MinWriteOffset
 		info, err := t.Fs.Stat(t.fsPath)
 		if err == nil {
 			fileSize = info.Size()
 		}
-		t.Connection.Log(logger.LevelDebug, "upload file size %v stat error %v", fileSize, err)
+		t.Connection.Log(logger.LevelDebug, "uploaded file size %v stat error: %v", fileSize, err)
 		t.updateQuota(numFiles, fileSize)
 		logger.TransferLog(uploadLogSender, t.fsPath, elapsed, atomic.LoadInt64(&t.BytesReceived), t.Connection.User.Username,
 			t.Connection.ID, t.Connection.protocol)
 		action := newActionNotification(&t.Connection.User, operationUpload, t.fsPath, "", "", t.Connection.protocol,
 			fileSize, t.ErrTransfer)
-		go action.execute() //nolint:errcheck
+		go actionHandler.Handle(action) //nolint:errcheck
 	}
 	if t.ErrTransfer != nil {
 		t.Connection.Log(logger.LevelWarn, "transfer error: %v, path: %#v", t.ErrTransfer, t.fsPath)

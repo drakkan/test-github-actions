@@ -249,12 +249,16 @@ type Config struct {
 	// - 4 means WebDAV
 	// you can combine the scopes, for example 6 means FTP and WebDAV
 	CheckPasswordScope int `json:"check_password_scope" mapstructure:"check_password_scope"`
-	// PasswordHashing defines the configuration for password hashing
-	PasswordHashing PasswordHashing `json:"password_hashing" mapstructure:"password_hashing"`
 	// Defines how the database will be initialized/updated:
 	// - 0 means automatically
 	// - 1 means manually using the initprovider sub-command
 	UpdateMode int `json:"update_mode" mapstructure:"update_mode"`
+	// PasswordHashing defines the configuration for password hashing
+	PasswordHashing PasswordHashing `json:"password_hashing" mapstructure:"password_hashing"`
+	// PreferDatabaseCredentials indicates whether credential files (currently used for Google
+	// Cloud Storage) should be stored in the database instead of in the directory specified by
+	// CredentialsPath.
+	PreferDatabaseCredentials bool `json:"prefer_database_credentials" mapstructure:"prefer_database_credentials"`
 }
 
 // BackupData defines the structure for the backup/restore files
@@ -380,8 +384,10 @@ func Initialize(cnf Config, basePath string) error {
 	if err = validateHooks(); err != nil {
 		return err
 	}
-	if err = validateCredentialsDir(basePath); err != nil {
-		return err
+	if !cnf.PreferDatabaseCredentials {
+		if err = validateCredentialsDir(basePath); err != nil {
+			return err
+		}
 	}
 	err = createProvider(basePath)
 	if err != nil {
@@ -974,15 +980,14 @@ func saveGCSCredentials(user *User) error {
 	if len(user.FsConfig.GCSConfig.Credentials) == 0 {
 		return nil
 	}
-	decoded, err := base64.StdEncoding.DecodeString(user.FsConfig.GCSConfig.Credentials)
-	if err != nil {
-		return &ValidationError{err: fmt.Sprintf("could not validate GCS credentials: %v", err)}
+	if config.PreferDatabaseCredentials {
+		return nil
 	}
-	err = ioutil.WriteFile(user.getGCSCredentialsFilePath(), decoded, 0600)
+	err := ioutil.WriteFile(user.getGCSCredentialsFilePath(), user.FsConfig.GCSConfig.Credentials, 0600)
 	if err != nil {
 		return &ValidationError{err: fmt.Sprintf("could not save GCS credentials: %v", err)}
 	}
-	user.FsConfig.GCSConfig.Credentials = ""
+	user.FsConfig.GCSConfig.Credentials = nil
 	return nil
 }
 
@@ -992,7 +997,7 @@ func validateFilesystemConfig(user *User) error {
 		if err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate s3config: %v", err)}
 		}
-		if len(user.FsConfig.S3Config.AccessSecret) > 0 {
+		if user.FsConfig.S3Config.AccessSecret != "" {
 			vals := strings.Split(user.FsConfig.S3Config.AccessSecret, "$")
 			if !strings.HasPrefix(user.FsConfig.S3Config.AccessSecret, "$aes$") || len(vals) != 4 {
 				accessSecret, err := utils.EncryptData(user.FsConfig.S3Config.AccessSecret)
@@ -1009,10 +1014,27 @@ func validateFilesystemConfig(user *User) error {
 			return &ValidationError{err: fmt.Sprintf("could not validate GCS config: %v", err)}
 		}
 		return nil
+	} else if user.FsConfig.Provider == AzureBlobFilesystemProvider {
+		err := vfs.ValidateAzBlobFsConfig(&user.FsConfig.AzBlobConfig)
+		if err != nil {
+			return &ValidationError{err: fmt.Sprintf("could not validate Azure Blob config: %v", err)}
+		}
+		if user.FsConfig.AzBlobConfig.AccountKey != "" {
+			vals := strings.Split(user.FsConfig.AzBlobConfig.AccountKey, "$")
+			if !strings.HasPrefix(user.FsConfig.AzBlobConfig.AccountKey, "$aes$") || len(vals) != 4 {
+				accountKey, err := utils.EncryptData(user.FsConfig.AzBlobConfig.AccountKey)
+				if err != nil {
+					return &ValidationError{err: fmt.Sprintf("could not encrypt Azure blob account key: %v", err)}
+				}
+				user.FsConfig.AzBlobConfig.AccountKey = accountKey
+			}
+		}
+		return nil
 	}
 	user.FsConfig.Provider = LocalFilesystemProvider
 	user.FsConfig.S3Config = vfs.S3FsConfig{}
 	user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
+	user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
 	return nil
 }
 
@@ -1244,7 +1266,9 @@ func HideUserSensitiveData(user *User) User {
 	if user.FsConfig.Provider == S3FilesystemProvider {
 		user.FsConfig.S3Config.AccessSecret = utils.RemoveDecryptionKey(user.FsConfig.S3Config.AccessSecret)
 	} else if user.FsConfig.Provider == GCSFilesystemProvider {
-		user.FsConfig.GCSConfig.Credentials = ""
+		user.FsConfig.GCSConfig.Credentials = nil
+	} else if user.FsConfig.Provider == AzureBlobFilesystemProvider {
+		user.FsConfig.AzBlobConfig.AccountKey = utils.RemoveDecryptionKey(user.FsConfig.AzBlobConfig.AccountKey)
 	}
 	return *user
 }
@@ -1256,11 +1280,17 @@ func addCredentialsToUser(user *User) error {
 	if user.FsConfig.GCSConfig.AutomaticCredentials > 0 {
 		return nil
 	}
+
+	// Don't read from file if credentials have already been set
+	if len(user.FsConfig.GCSConfig.Credentials) > 0 {
+		return nil
+	}
+
 	cred, err := ioutil.ReadFile(user.getGCSCredentialsFilePath())
 	if err != nil {
 		return err
 	}
-	user.FsConfig.GCSConfig.Credentials = base64.StdEncoding.EncodeToString(cred)
+	user.FsConfig.GCSConfig.Credentials = cred
 	return nil
 }
 
