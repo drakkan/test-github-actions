@@ -6,54 +6,42 @@ on:
   pull_request:
 
 jobs:
-  test-deploy:
-    name: Test and deploy
-    runs-on: ${{ matrix.os }}
+  xgo:
+    name: Cross build
     strategy:
+      fail-fast: false
       matrix:
-        go: [1.15]
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        go_version:
+          - 1.15.4
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v2
-        with:
-          fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v2
-        with:
-          go-version: ${{ matrix.go }}
-
-      - name: Build for Linux/macOS
-        if: startsWith(matrix.os, 'windows-') != true
-        run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
-
-      - name: Build for Windows
-        if: startsWith(matrix.os, 'windows-')
+      - name: Gather image information
+        id: info
         run: |
-          $GIT_COMMIT = (git describe --always --dirty) | Out-String
-          $DATE_TIME = ([datetime]::Now.ToUniversalTime().toString("yyyy-MM-ddTHH:mm:ssZ")) | Out-String
-          go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=$GIT_COMMIT -X github.com/drakkan/sftpgo/version.date=$DATE_TIME" -o sftpgo.exe
+          GIT_COMMIT=$(git describe --always)
+          BUILD_DATE=$(date -u +%FT%TZ)
+          echo ::set-output name=sha::${GIT_COMMIT}
+          echo ::set-output name=created::${BUILD_DATE}
 
-      - name: Run test cases using SQLite provider
-        run: go test -v -p 1 -timeout 10m ./... -coverprofile=coverage.txt -covermode=atomic
+      - name: Build with xgo
+        uses: crazy-max/ghaction-xgo@v1
+        with:
+          xgo_version: ${{ matrix.go_version }}
+          dest: output
+          prefix: sftpgo
+          targets: linux/arm64,linux/ppc64le
+          v: true
+          x: false
+          race: false
+          ldflags: -s -w -X github.com/drakkan/sftpgo/version.commit=${{ steps.info.sha }} -X github.com/drakkan/sftpgo/version.date=${{ steps.info.created }}
+          buildmode: default
 
-      - name: Run test cases using bolt provider
-        run: |
-          go test -v -p 1 -timeout 2m ./config -covermode=atomic
-          go test -v -p 1 -timeout 2m ./common -covermode=atomic
-          go test -v -p 1 -timeout 3m ./httpd -covermode=atomic
-          go test -v -p 1 -timeout 8m ./sftpd -covermode=atomic
-          go test -v -p 1 -timeout 2m ./ftpd -covermode=atomic
-          go test -v -p 1 -timeout 2m ./webdavd -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: bolt
-          SFTPGO_DATA_PROVIDER__NAME: 'sftpgo_bolt.db'
-
-      - name: Run test cases using memory provider
-        run: go test -v -p 1 -timeout 10m ./... -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: memory
-          SFTPGO_DATA_PROVIDER__NAME: ''
-
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo-cross
+          path: output
 

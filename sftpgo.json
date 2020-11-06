@@ -14,7 +14,7 @@
   "sftpd": {
     "bind_port": 2022,
     "bind_address": "",
-    "max_auth_tries": 20,
+    "max_auth_tries": 0,
     "banner": "",
     "host_keys": [],
     "kex_algorithms": [],
@@ -62,9 +62,14 @@
       "max_age": 0
     },
     "cache": {
-      "enabled": true,
-      "expiration_time": 0,
-      "max_size": 50
+      "users": {
+        "expiration_time": 0,
+        "max_size": 50
+      },
+      "mime_types": {
+        "enabled": true,
+        "max_size": 1000
+      }
     }
   },
   "data_provider": {
