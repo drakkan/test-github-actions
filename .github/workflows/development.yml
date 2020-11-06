@@ -10,9 +10,6 @@ jobs:
     name: Cross build
     strategy:
       fail-fast: false
-      matrix:
-        go_version:
-          - 1.15.3
     runs-on: ubuntu-latest
 
     steps:
@@ -29,12 +26,11 @@ jobs:
       - name: Build with xgo
         uses: crazy-max/ghaction-xgo@v1
         with:
-          xgo_version: ${{ matrix.go_version }}
           dest: output
           prefix: sftpgo
           targets: linux/arm64,linux/ppc64le
           v: true
-          x: false
+          x: true
           race: false
           ldflags: -s -w -X github.com/drakkan/sftpgo/version.commit=${{ steps.info.sha }} -X github.com/drakkan/sftpgo/version.date=${{ steps.info.created }}
           buildmode: default
