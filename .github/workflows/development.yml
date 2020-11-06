@@ -20,9 +20,6 @@ jobs:
         run: |
           GIT_COMMIT=$(git describe --always)
           BUILD_DATE=$(date -u +%FT%TZ)
-          echo "values"
-          echo ${GIT_COMMIT}
-          echo ${BUILD_DATE}
           echo ::set-output name=sha::${GIT_COMMIT}
           echo ::set-output name=created::${BUILD_DATE}
 
@@ -35,7 +32,7 @@ jobs:
           v: true
           x: false
           race: false
-          ldflags: -s -w -X github.com/drakkan/sftpgo/version.commit=${{ steps.info.sha }} -X github.com/drakkan/sftpgo/version.date=${{ steps.info.created }}
+          ldflags: -s -w -X github.com/drakkan/sftpgo/version.commit=${{ steps.info.outputs.sha }} -X github.com/drakkan/sftpgo/version.date=${{ steps.info.outputs.created }}
           buildmode: default
 
       - name: Upload build artifact
