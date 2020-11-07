@@ -6,25 +6,30 @@ on:
   pull_request:
 
 jobs:
-  xgo:
-    name: Cross build
+  test-deploy:
+    name: Test and deploy
+    runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
+      matrix:
+        go: [1.15]
+        os: [ubuntu-latest]
 
     steps:
       - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v2
         with:
-          go-version: 1.15.4
+          go-version: ${{ matrix.go }}
 
-      - name: Build for Linux/amd64
+      - name: Build for Linux/macOS
+        if: startsWith(matrix.os, 'windows-') != true
         run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
 
       - name: Gather build info
-        id: info
+        id: cross_info
         run: |
           GIT_COMMIT=$(git describe --always)
           BUILD_DATE=$(date -u +%FT%TZ)
@@ -43,21 +48,76 @@ jobs:
           ldflags: -s -w -X github.com/drakkan/sftpgo/version.commit=${{ steps.info.outputs.sha }} -X github.com/drakkan/sftpgo/version.date=${{ steps.info.outputs.created }}
           buildmode: default
 
-      - name: Prepare Linux Packages for arm64
-        id: build_linux_pkgs
+      - name: Prepare build artifact for Linux/macOS
+        if: startsWith(matrix.os, 'windows-') != true
         run: |
-          cp cross/sftpgo-linux-arm64 .
-          cd pkgs
-          ./build.sh
-          cp dist/rpm/* ../cross/
-          cp dist/deb/* ../cross/
-        env:
-          NFPM_ARCH: arm64
-          BIN_SUFFIX: -linux-arm64
+          mkdir -p output/{bash_completion,zsh_completion}
+          mkdir -p output/examples/rest-api-cli
+          cp sftpgo output/
+          cp sftpgo.json output/
+          cp -r templates output/
+          cp -r static output/
+          cp -r init output/
+          cp examples/rest-api-cli/sftpgo_api_cli output/examples/rest-api-cli/
+          ./sftpgo gen completion bash > output/bash_completion/sftpgo
+          ./sftpgo gen completion zsh > output/zsh_completion/_sftpgo
+          ./sftpgo gen man -d output/man/man1
+          gzip output/man/man1/*
+          cp cross/sftpgo-linux-arm64 output/ || :
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v2
         with:
-          name: sftpgo-cross
-          path: cross
+          name: sftpgo-${{ matrix.os }}-go${{ matrix.go }}
+          path: output
+
+      - name: Build Linux Packages
+        id: build_linux_pkgs
+        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
+        run: |
+          cd pkgs
+          ./build.sh
+          PKG_VERSION=$(cat dist/version)
+          echo "::set-output name=pkg-version::${PKG_VERSION}"
+
+      - name: Upload Debian Package
+        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-x86_64-deb
+          path: pkgs/dist/deb/*
+
+      - name: Upload RPM Package
+        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-x86_64-rpm
+          path: pkgs/dist/rpm/*
+
+      - name: Build Linux Packages arm64
+        id: build_linux_pkgs_arm64
+        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
+        run: |
+          cd pkgs
+          rm -rf dist
+          ./build.sh
+          PKG_VERSION=$(cat dist/version)
+          echo "::set-output name=pkg-version::${PKG_VERSION}"
+        env:
+          NFPM_ARCH: arm64
+          BIN_SUFFIX: -linux-arm64
+
+      - name: Upload Debian Package arm64
+        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-arm64-deb
+          path: pkgs/dist/deb/*
+
+      - name: Upload RPM Package arm64
+        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-arm64-rpm
+          path: pkgs/dist/rpm/*
 
