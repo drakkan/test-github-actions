@@ -216,6 +216,7 @@ jobs:
           cd ..
           export NFPM_ARCH=arm64
           export BIN_SUFFIX=-linux-arm64
+          cp cross/sftpgo-linux-arm64 .
           cd pkgs_arm64
           ./build.sh
           PKG_VERSION=${SFTPGO_VERSION:1}
