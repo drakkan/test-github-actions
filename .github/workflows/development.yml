@@ -45,7 +45,6 @@ jobs:
 
       - name: Prepare Linux Packages for arm64
         id: build_linux_pkgs
-        if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
           cp cross/sftpgo-linux-arm64 .
           cd pkgs
