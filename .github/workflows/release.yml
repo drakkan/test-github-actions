@@ -213,24 +213,15 @@ jobs:
           cp -r pkgs pkgs_arm64
           cd pkgs
           ./build.sh
-          PKG_VERSION=${SFTPGO_VERSION:1}
-          echo "::set-output name=pkg-version::${PKG_VERSION}"
-        env:
-          SFTPGO_VERSION: ${{ steps.get_version.outputs.VERSION }}
-
-      - name: Prepare Linux Packages arm64
-        id: build_linux_pkgs_arm64
-        if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: |
-          cp cross/sftpgo-linux-arm64 .
+          cd ..
+          export NFPM_ARCH=arm64
+          export BIN_SUFFIX=-linux-arm64
           cd pkgs_arm64
           ./build.sh
           PKG_VERSION=${SFTPGO_VERSION:1}
           echo "::set-output name=pkg-version::${PKG_VERSION}"
         env:
           SFTPGO_VERSION: ${{ steps.get_version.outputs.VERSION }}
-          NFPM_ARCH: arm64
-          BIN_SUFFIX: -linux-arm64
 
       - name: Prepare Release for Windows
         if: startsWith(matrix.os, 'windows-')
@@ -353,8 +344,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
-          asset_path: ./pkgs_arm64/dist/deb/sftpgo_${{ steps.build_linux_pkgs_arm64.outputs.pkg-version }}-1_arm64.deb
-          asset_name: sftpgo_${{ steps.build_linux_pkgs_arm64.outputs.pkg-version }}-1_arm64.deb
+          asset_path: ./pkgs_arm64/dist/deb/sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-1_arm64.deb
+          asset_name: sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-1_arm64.deb
           asset_content_type: application/vnd.debian.binary-package
 
       - name: Upload RPM Package arm64
@@ -364,6 +355,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
-          asset_path: ./pkgs_arm64/dist/rpm/sftpgo-${{ steps.build_linux_pkgs_arm64.outputs.pkg-version }}-1.aarch64.rpm
-          asset_name: sftpgo-${{ steps.build_linux_pkgs_arm64.outputs.pkg-version }}-1.aarch64.rpm
+          asset_path: ./pkgs_arm64/dist/rpm/sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-1.aarch64.rpm
+          asset_name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-1.aarch64.rpm
           asset_content_type: application/x-rpm
