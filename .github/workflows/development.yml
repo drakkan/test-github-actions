@@ -15,7 +15,15 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: Gather image information
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.15.4
+
+      - name: Build for Linux/amd64
+        run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
+
+      - name: Gather build info
         id: info
         run: |
           GIT_COMMIT=$(git describe --always)
@@ -26,7 +34,7 @@ jobs:
       - name: Build with xgo
         uses: crazy-max/ghaction-xgo@v1
         with:
-          dest: output
+          dest: cross
           prefix: sftpgo
           targets: linux/arm64
           v: true
@@ -35,9 +43,22 @@ jobs:
           ldflags: -s -w -X github.com/drakkan/sftpgo/version.commit=${{ steps.info.outputs.sha }} -X github.com/drakkan/sftpgo/version.date=${{ steps.info.outputs.created }}
           buildmode: default
 
+      - name: Prepare Linux Packages for arm64
+        id: build_linux_pkgs
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: |
+          cp cross/sftpgo-linux-arm64 .
+          cd pkgs
+          ./build.sh
+          cp dist/rpm/* ../cross/
+          cp dist/deb/* ../cross/
+        env:
+          NFPM_ARCH: arm64
+          BIN_SUFFIX: -linux-arm64
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo-cross
-          path: output
+          path: cross
 
