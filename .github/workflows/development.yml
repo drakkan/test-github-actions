@@ -28,7 +28,7 @@ jobs:
         if: startsWith(matrix.os, 'windows-') != true
         run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
 
-      - name: Gather build info
+      - name: Gather cross build info
         id: cross_info
         run: |
           GIT_COMMIT=$(git describe --always)
@@ -45,7 +45,7 @@ jobs:
           v: true
           x: false
           race: false
-          ldflags: -s -w -X github.com/drakkan/sftpgo/version.commit=${{ steps.info.outputs.sha }} -X github.com/drakkan/sftpgo/version.date=${{ steps.info.outputs.created }}
+          ldflags: -s -w -X github.com/drakkan/sftpgo/version.commit=${{ steps.cross_info.outputs.sha }} -X github.com/drakkan/sftpgo/version.date=${{ steps.cross_info.outputs.created }}
           buildmode: default
 
       - name: Prepare build artifact for Linux/macOS
@@ -73,7 +73,6 @@ jobs:
 
       - name: Build Linux Packages
         id: build_linux_pkgs
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         run: |
           cd pkgs
           ./build.sh
@@ -81,14 +80,12 @@ jobs:
           echo "::set-output name=pkg-version::${PKG_VERSION}"
 
       - name: Upload Debian Package
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-x86_64-deb
           path: pkgs/dist/deb/*
 
       - name: Upload RPM Package
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-x86_64-rpm
@@ -96,7 +93,6 @@ jobs:
 
       - name: Build Linux Packages arm64
         id: build_linux_pkgs_arm64
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         run: |
           cd pkgs
           rm -rf dist
@@ -108,14 +104,12 @@ jobs:
           BIN_SUFFIX: -linux-arm64
 
       - name: Upload Debian Package arm64
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-arm64-deb
           path: pkgs/dist/deb/*
 
       - name: Upload RPM Package arm64
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-arm64-rpm
