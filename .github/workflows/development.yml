@@ -94,6 +94,7 @@ jobs:
       - name: Build Linux Packages arm64
         id: build_linux_pkgs_arm64
         run: |
+          cp cross/sftpgo-linux-arm64 .
           cd pkgs
           rm -rf dist
           ./build.sh
