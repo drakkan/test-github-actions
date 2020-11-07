@@ -222,6 +222,7 @@ jobs:
         id: build_linux_pkgs_arm64
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
+          cp cross/sftpgo-linux-arm64 .
           cd pkgs_arm64
           ./build.sh
           PKG_VERSION=${SFTPGO_VERSION:1}
