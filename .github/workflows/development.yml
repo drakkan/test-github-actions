@@ -56,6 +56,8 @@ jobs:
         if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         uses: crazy-max/ghaction-xgo@v1
         with:
+          xgo_version: latest
+          go_version: ${{ matrix.go }}
           dest: cross
           prefix: sftpgo
           targets: linux/arm64,linux/ppc64le
@@ -143,7 +145,7 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-arm64-deb
-          path: pkgs_ppc64le/dist/deb/*
+          path: pkgs_arm64/dist/deb/*
 
       - name: Upload RPM Package arm64
         if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
@@ -165,79 +167,3 @@ jobs:
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-ppc64le-rpm
           path: pkgs_ppc64le/dist/rpm/*
-
-  test-postgresql-mysql:
-    name: Test with PostgreSQL/MySQL
-    runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:latest
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: sftpgo
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
-      mariadb:
-        image: mariadb:latest
-        env:
-          MYSQL_ROOT_PASSWORD: mysql
-          MYSQL_DATABASE: sftpgo
-          MYSQL_USER: sftpgo
-          MYSQL_PASSWORD: sftpgo
-        options: >-
-          --health-cmd "mysqladmin status -h 127.0.0.1 -P 3306 -u root -p$MYSQL_ROOT_PASSWORD"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 6
-        ports:
-          - 3307:3306
-
-    steps:
-      - uses: actions/checkout@v2
-
-      - name: Set up Go
-        uses: actions/setup-go@v2
-        with:
-          go-version: 1.15
-
-      - name: Build
-        run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
-
-      - name: Run tests using PostgreSQL provider
-        run: |
-          go test -v -p 1 -timeout 10m ./... -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: postgresql
-          SFTPGO_DATA_PROVIDER__NAME: sftpgo
-          SFTPGO_DATA_PROVIDER__HOST: localhost
-          SFTPGO_DATA_PROVIDER__PORT: 5432
-          SFTPGO_DATA_PROVIDER__USERNAME: postgres
-          SFTPGO_DATA_PROVIDER__PASSWORD: postgres
-
-      - name: Run tests using MySQL provider
-        run: |
-          go test -v -p 1 -timeout 10m ./... -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: mysql
-          SFTPGO_DATA_PROVIDER__NAME: sftpgo
-          SFTPGO_DATA_PROVIDER__HOST: localhost
-          SFTPGO_DATA_PROVIDER__PORT: 3307
-          SFTPGO_DATA_PROVIDER__USERNAME: sftpgo
-          SFTPGO_DATA_PROVIDER__PASSWORD: sftpgo
-
-  golangci-lint:
-    name: golangci-lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v2
-        with:
-          version: latest

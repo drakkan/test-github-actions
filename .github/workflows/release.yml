@@ -5,7 +5,7 @@ on:
     tags: 'v*'
 
 env:
-  GO_VERSION: 1.15
+  GO_VERSION: 1.15.4
 
 jobs:
   create-release:
@@ -158,6 +158,8 @@ jobs:
         if: ${{ matrix.os == 'ubuntu-latest' }}
         uses: crazy-max/ghaction-xgo@v1
         with:
+          xgo_version: latest
+          go_version: ${{ env.GO_VERSION }}
           dest: cross
           prefix: sftpgo
           targets: linux/arm64,linux/ppc64le
@@ -216,6 +218,7 @@ jobs:
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
           cp -r pkgs pkgs_arm64
+          cp -r pkgs pkgs_ppc64le
           cd pkgs
           ./build.sh
           cd ..
