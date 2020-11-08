@@ -13,7 +13,7 @@ jobs:
       matrix:
         go: [1.15]
         os: [ubuntu-latest, macos-latest]
-        upload-coverage: [false]
+        upload-coverage: [true]
         include:
           - go: 1.14
             os: ubuntu-latest
