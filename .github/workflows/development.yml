@@ -13,7 +13,7 @@ jobs:
       matrix:
         go: [1.15]
         os: [ubuntu-latest, macos-latest]
-        upload-coverage: [true]
+        upload-coverage: [false]
         include:
           - go: 1.14
             os: ubuntu-latest
@@ -131,7 +131,14 @@ jobs:
         id: build_linux_pkgs
         if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         run: |
+          cp -r pkgs pkgs_arm64
           cd pkgs
+          ./build.sh
+          cd ..
+          export NFPM_ARCH=arm64
+          export BIN_SUFFIX=-linux-arm64
+          cp cross/sftpgo${BIN_SUFFIX} .
+          cd pkgs_arm64
           ./build.sh
           PKG_VERSION=$(cat dist/version)
           echo "::set-output name=pkg-version::${PKG_VERSION}"
@@ -149,20 +156,6 @@ jobs:
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-x86_64-rpm
           path: pkgs/dist/rpm/*
-
-      - name: Build Linux Packages arm64
-        id: build_linux_pkgs_arm64
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
-        run: |
-          cp cross/sftpgo-linux-arm64 .
-          cd pkgs
-          rm -rf dist
-          ./build.sh
-          PKG_VERSION=$(cat dist/version)
-          echo "::set-output name=pkg-version::${PKG_VERSION}"
-        env:
-          NFPM_ARCH: arm64
-          BIN_SUFFIX: -linux-arm64
 
       - name: Upload Debian Package arm64
         if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}

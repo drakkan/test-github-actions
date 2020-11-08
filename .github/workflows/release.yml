@@ -216,7 +216,7 @@ jobs:
           cd ..
           export NFPM_ARCH=arm64
           export BIN_SUFFIX=-linux-arm64
-          cp cross/sftpgo-linux-arm64 .
+          cp cross/sftpgo${BIN_SUFFIX} .
           cd pkgs_arm64
           ./build.sh
           PKG_VERSION=${SFTPGO_VERSION:1}
@@ -283,7 +283,7 @@ jobs:
           asset_name: sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_x86_64.tar.xz
           asset_content_type: application/x-xz
 
-      - name: Upload Linux arm64 Release
+      - name: Upload Linux/arm64 Release
         if: ${{ matrix.os == 'ubuntu-latest' }}
         uses: actions/upload-release-asset@v1
         env:
