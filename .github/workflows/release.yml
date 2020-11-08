@@ -158,8 +158,6 @@ jobs:
         if: ${{ matrix.os == 'ubuntu-latest' }}
         uses: crazy-max/ghaction-xgo@v1
         with:
-          xgo_version: latest
-          go_version: ${{ env.GO_VERSION }}
           dest: cross
           prefix: sftpgo
           targets: linux/arm64,linux/ppc64le
