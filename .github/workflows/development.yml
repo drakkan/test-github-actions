@@ -43,34 +43,6 @@ jobs:
           $DATE_TIME = ([datetime]::Now.ToUniversalTime().toString("yyyy-MM-ddTHH:mm:ssZ")) | Out-String
           go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=$GIT_COMMIT -X github.com/drakkan/sftpgo/version.date=$DATE_TIME" -o sftpgo.exe
 
-      - name: Run test cases using SQLite provider
-        run: go test -v -p 1 -timeout 10m ./... -coverprofile=coverage.txt -covermode=atomic
-
-      - name: Upload coverage to Codecov
-        if: ${{ matrix.upload-coverage }}
-        uses: codecov/codecov-action@v1
-        with:
-          file: ./coverage.txt
-          fail_ci_if_error: false
-
-      - name: Run test cases using bolt provider
-        run: |
-          go test -v -p 1 -timeout 2m ./config -covermode=atomic
-          go test -v -p 1 -timeout 2m ./common -covermode=atomic
-          go test -v -p 1 -timeout 3m ./httpd -covermode=atomic
-          go test -v -p 1 -timeout 8m ./sftpd -covermode=atomic
-          go test -v -p 1 -timeout 2m ./ftpd -covermode=atomic
-          go test -v -p 1 -timeout 2m ./webdavd -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: bolt
-          SFTPGO_DATA_PROVIDER__NAME: 'sftpgo_bolt.db'
-
-      - name: Run test cases using memory provider
-        run: go test -v -p 1 -timeout 10m ./... -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: memory
-          SFTPGO_DATA_PROVIDER__NAME: ''
-
       - name: Gather cross build info
         id: cross_info
         if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
@@ -86,7 +58,7 @@ jobs:
         with:
           dest: cross
           prefix: sftpgo
-          targets: linux/arm64
+          targets: linux/arm64,linux/ppc64le
           v: true
           x: false
           race: false
@@ -109,6 +81,7 @@ jobs:
           ./sftpgo gen man -d output/man/man1
           gzip output/man/man1/*
           cp cross/sftpgo-linux-arm64 output/ || :
+          cp cross/sftpgo-linux-ppc64le output/ || :
 
       - name: Prepare build artifact for Windows
         if: startsWith(matrix.os, 'windows-')
@@ -132,6 +105,7 @@ jobs:
         if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         run: |
           cp -r pkgs pkgs_arm64
+          cp -r pkgs pkgs_ppc64le
           cd pkgs
           ./build.sh
           cd ..
@@ -140,6 +114,13 @@ jobs:
           cp cross/sftpgo${BIN_SUFFIX} .
           cd pkgs_arm64
           ./build.sh
+          cd ..
+          export NFPM_ARCH=ppc64le
+          export BIN_SUFFIX=-linux-ppc64le
+          cp cross/sftpgo${BIN_SUFFIX} .
+          cd pkgs_ppc64le
+          ./build.sh
+          cd ..
           PKG_VERSION=$(cat dist/version)
           echo "::set-output name=pkg-version::${PKG_VERSION}"
 
@@ -162,14 +143,28 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-arm64-deb
-          path: pkgs/dist/deb/*
+          path: pkgs_ppc64le/dist/deb/*
 
       - name: Upload RPM Package arm64
         if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-arm64-rpm
-          path: pkgs/dist/rpm/*
+          path: pkgs_arm64/dist/rpm/*
+
+      - name: Upload Debian Package ppc64le
+        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-ppc64le-deb
+          path: pkgs_ppc64le/dist/deb/*
+
+      - name: Upload RPM Package ppc64le
+        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-ppc64le-rpm
+          path: pkgs_ppc64le/dist/rpm/*
 
   test-postgresql-mysql:
     name: Test with PostgreSQL/MySQL
