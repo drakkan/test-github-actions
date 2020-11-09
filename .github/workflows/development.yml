@@ -120,7 +120,6 @@ jobs:
           cp cross/sftpgo${BIN_SUFFIX} .
           cd pkgs_ppc64le
           ./build.sh
-          cd ..
           PKG_VERSION=$(cat dist/version)
           echo "::set-output name=pkg-version::${PKG_VERSION}"
 

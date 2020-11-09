@@ -193,6 +193,7 @@ jobs:
           cp examples/rest-api-cli/sftpgo_api_cli output/examples/rest-api-cli/
           cp -r output output_arm64
           cp -r output output_ppc64le
+          cp -r output output_all
           cd output
           tar cJvf sftpgo_${SFTPGO_VERSION}_${OS}_x86_64.tar.xz *
           cd ..
@@ -205,6 +206,12 @@ jobs:
             cp cross/sftpgo-linux-ppc64le output_ppc64le/sftpgo
             cd output_ppc64le
             tar cJvf sftpgo_${SFTPGO_VERSION}_${OS}_ppc64le.tar.xz *
+            cd ..
+            mkdir output_all/{arm64,ppc64le}
+            cp cross/sftpgo-linux-arm64 output_all/arm64/sftpgo
+            cp cross/sftpgo-linux-ppc64le output_all/ppc64le/sftpgo
+            cd output_all
+            tar cJvf sftpgo_${SFTPGO_VERSION}_${OS}_bundle.tar.xz *
             cd ..
           fi
         env:
@@ -316,6 +323,17 @@ jobs:
           upload_url: ${{ steps.upload_url.outputs.url }}
           asset_path: ./output_ppc64le/sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_ppc64le.tar.xz
           asset_name: sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_ppc64le.tar.xz
+          asset_content_type: application/x-xz
+
+      - name: Upload Linux bundle Release
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.upload_url.outputs.url }}
+          asset_path: ./output_ppc64le/sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_bundle.tar.xz
+          asset_name: sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_bundle.tar.xz
           asset_content_type: application/x-xz
 
       - name: Upload Windows Release
