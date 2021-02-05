@@ -3,7 +3,6 @@ package sftpd
 import (
 	"crypto/md5"
 	"crypto/sha1"
-	"crypto/sha256"
 	"crypto/sha512"
 	"errors"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/google/shlex"
+	"github.com/minio/sha256-simd"
 	fscopy "github.com/otiai10/copy"
 	"golang.org/x/crypto/ssh"
 
@@ -82,6 +82,7 @@ func processSSHCommand(payload []byte, connection *Connection, enabledSSHCommand
 			connection.Log(logger.LevelInfo, "ssh command not enabled/supported: %#v", name)
 		}
 	}
+	connection.Fs.Close()
 	return false
 }
 
@@ -257,9 +258,6 @@ func (c *sshCommand) updateQuota(sshDestPath string, filesNum int, filesSize int
 }
 
 func (c *sshCommand) handleHashCommands() error {
-	if !vfs.IsLocalOsFs(c.connection.Fs) {
-		return c.sendErrorResponse(errUnsupportedConfig)
-	}
 	var h hash.Hash
 	if c.command == "md5sum" {
 		h = md5.New()
@@ -295,7 +293,7 @@ func (c *sshCommand) handleHashCommands() error {
 		if !c.connection.User.HasPerm(dataprovider.PermListItems, sshPath) {
 			return c.sendErrorResponse(common.ErrPermissionDenied)
 		}
-		hash, err := computeHashForFile(h, fsPath)
+		hash, err := c.computeHashForFile(h, fsPath)
 		if err != nil {
 			return c.sendErrorResponse(err)
 		}
@@ -539,7 +537,7 @@ func (c *sshCommand) getCopyPaths() (string, string, error) {
 	if strings.HasSuffix(sshDestPath, "/") {
 		sshDestPath = path.Join(sshDestPath, path.Base(sshSourcePath))
 	}
-	if len(sshSourcePath) == 0 || len(sshDestPath) == 0 || len(c.args) != 2 {
+	if sshSourcePath == "" || sshDestPath == "" || len(c.args) != 2 {
 		err := errors.New("usage sftpgo-copy <source dir path> <destination dir path>")
 		return "", "", err
 	}
@@ -552,7 +550,7 @@ func (c *sshCommand) hasCopyPermissions(sshSourcePath, sshDestPath string, srcIn
 	}
 	if srcInfo.IsDir() {
 		return c.connection.User.HasPerm(dataprovider.PermCreateDirs, path.Dir(sshDestPath))
-	} else if srcInfo.Mode()&os.ModeSymlink == os.ModeSymlink {
+	} else if srcInfo.Mode()&os.ModeSymlink != 0 {
 		return c.connection.User.HasPerm(dataprovider.PermCreateSymlinks, path.Dir(sshDestPath))
 	}
 	return c.connection.User.HasPerm(dataprovider.PermUpload, path.Dir(sshDestPath))
@@ -608,7 +606,7 @@ func (c *sshCommand) checkCopyPermissions(fsSourcePath, fsDestPath, sshSourcePat
 
 func (c *sshCommand) getRemovePath() (string, error) {
 	sshDestPath := c.getDestPath()
-	if len(sshDestPath) == 0 || len(c.args) != 1 {
+	if sshDestPath == "" || len(c.args) != 1 {
 		err := errors.New("usage sftpgo-remove <destination path>")
 		return "", err
 	}
@@ -714,7 +712,8 @@ func (c *sshCommand) sendExitStatus(err error) {
 	exitStatus := sshSubsystemExitStatus{
 		Status: status,
 	}
-	c.connection.channel.(ssh.Channel).SendRequest("exit-status", false, ssh.Marshal(&exitStatus)) //nolint:errcheck
+	_, err = c.connection.channel.(ssh.Channel).SendRequest("exit-status", false, ssh.Marshal(&exitStatus))
+	c.connection.Log(logger.LevelDebug, "exit status sent, error: %v", err)
 	c.connection.channel.Close()
 	// for scp we notify single uploads/downloads
 	if c.command != scpCmdName {
@@ -735,14 +734,20 @@ func (c *sshCommand) sendExitStatus(err error) {
 	}
 }
 
-func computeHashForFile(hasher hash.Hash, path string) (string, error) {
+func (c *sshCommand) computeHashForFile(hasher hash.Hash, path string) (string, error) {
 	hash := ""
-	f, err := os.Open(path)
+	f, r, _, err := c.connection.Fs.Open(path, 0)
 	if err != nil {
 		return hash, err
 	}
-	defer f.Close()
-	_, err = io.Copy(hasher, f)
+	var reader io.ReadCloser
+	if f != nil {
+		reader = f
+	} else {
+		reader = r
+	}
+	defer reader.Close()
+	_, err = io.Copy(hasher, reader)
 	if err == nil {
 		hash = fmt.Sprintf("%x", hasher.Sum(nil))
 	}

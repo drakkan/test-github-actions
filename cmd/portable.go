@@ -14,6 +14,7 @@ import (
 
 	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/dataprovider"
+	"github.com/drakkan/sftpgo/kms"
 	"github.com/drakkan/sftpgo/service"
 	"github.com/drakkan/sftpgo/sftpd"
 	"github.com/drakkan/sftpgo/version"
@@ -32,8 +33,8 @@ var (
 	portablePublicKeys           []string
 	portablePermissions          []string
 	portableSSHCommands          []string
-	portableAllowedExtensions    []string
-	portableDeniedExtensions     []string
+	portableAllowedPatterns      []string
+	portableDeniedPatterns       []string
 	portableFsProvider           int
 	portableS3Bucket             string
 	portableS3Region             string
@@ -65,6 +66,13 @@ var (
 	portableAzULPartSize         int
 	portableAzULConcurrency      int
 	portableAzUseEmulator        bool
+	portableCryptPassphrase      string
+	portableSFTPEndpoint         string
+	portableSFTPUsername         string
+	portableSFTPPassword         string
+	portableSFTPPrivateKeyPath   string
+	portableSFTPFingerprints     []string
+	portableSFTPPrefix           string
 	portableCmd                  = &cobra.Command{
 		Use:   "portable",
 		Short: "Serve a single directory",
@@ -86,27 +94,28 @@ Please take a look at the usage below to customize the serving parameters`,
 			}
 			permissions := make(map[string][]string)
 			permissions["/"] = portablePermissions
-			var portableGCSCredentials []byte
-			if fsProvider == dataprovider.GCSFilesystemProvider && len(portableGCSCredentialsFile) > 0 {
-				fi, err := os.Stat(portableGCSCredentialsFile)
+			portableGCSCredentials := ""
+			if fsProvider == dataprovider.GCSFilesystemProvider && portableGCSCredentialsFile != "" {
+				contents, err := getFileContents(portableGCSCredentialsFile)
 				if err != nil {
-					fmt.Printf("Invalid GCS credentials file: %v\n", err)
+					fmt.Printf("Unable to get GCS credentials: %v\n", err)
 					os.Exit(1)
 				}
-				if fi.Size() > 1048576 {
-					fmt.Printf("Invalid GCS credentials file: %#v is too big %v/1048576 bytes\n", portableGCSCredentialsFile,
-						fi.Size())
-					os.Exit(1)
-				}
-				creds, err := ioutil.ReadFile(portableGCSCredentialsFile)
-				if err != nil {
-					fmt.Printf("Unable to read credentials file: %v\n", err)
-				}
-				portableGCSCredentials = creds
+				portableGCSCredentials = contents
 				portableGCSAutoCredentials = 0
 			}
+			portableSFTPPrivateKey := ""
+			if fsProvider == dataprovider.SFTPFilesystemProvider && portableSFTPPrivateKeyPath != "" {
+				contents, err := getFileContents(portableSFTPPrivateKeyPath)
+				if err != nil {
+					fmt.Printf("Unable to get SFTP private key: %v\n", err)
+					os.Exit(1)
+				}
+				portableSFTPPrivateKey = contents
+			}
 			if portableFTPDPort >= 0 && len(portableFTPSCert) > 0 && len(portableFTPSKey) > 0 {
-				_, err := common.NewCertManager(portableFTPSCert, portableFTPSKey, "FTP portable")
+				_, err := common.NewCertManager(portableFTPSCert, portableFTPSKey, filepath.Clean(defaultConfigDir),
+					"FTP portable")
 				if err != nil {
 					fmt.Printf("Unable to load FTPS key pair, cert file %#v key file %#v error: %v\n",
 						portableFTPSCert, portableFTPSKey, err)
@@ -114,7 +123,8 @@ Please take a look at the usage below to customize the serving parameters`,
 				}
 			}
 			if portableWebDAVPort > 0 && len(portableWebDAVCert) > 0 && len(portableWebDAVKey) > 0 {
-				_, err := common.NewCertManager(portableWebDAVCert, portableWebDAVKey, "WebDAV portable")
+				_, err := common.NewCertManager(portableWebDAVCert, portableWebDAVKey, filepath.Clean(defaultConfigDir),
+					"WebDAV portable")
 				if err != nil {
 					fmt.Printf("Unable to load WebDAV key pair, cert file %#v key file %#v error: %v\n",
 						portableWebDAVCert, portableWebDAVKey, err)
@@ -123,14 +133,13 @@ Please take a look at the usage below to customize the serving parameters`,
 			}
 			service := service.Service{
 				ConfigDir:     filepath.Clean(defaultConfigDir),
-				ConfigFile:    defaultConfigName,
+				ConfigFile:    defaultConfigFile,
 				LogFilePath:   portableLogFile,
 				LogMaxSize:    defaultLogMaxSize,
 				LogMaxBackups: defaultLogMaxBackup,
 				LogMaxAge:     defaultLogMaxAge,
 				LogCompress:   defaultLogCompress,
 				LogVerbose:    portableLogVerbose,
-				Profiler:      defaultProfiler,
 				Shutdown:      make(chan bool),
 				PortableMode:  1,
 				PortableUser: dataprovider.User{
@@ -146,7 +155,7 @@ Please take a look at the usage below to customize the serving parameters`,
 							Bucket:            portableS3Bucket,
 							Region:            portableS3Region,
 							AccessKey:         portableS3AccessKey,
-							AccessSecret:      portableS3AccessSecret,
+							AccessSecret:      kms.NewPlainSecret(portableS3AccessSecret),
 							Endpoint:          portableS3Endpoint,
 							StorageClass:      portableS3StorageClass,
 							KeyPrefix:         portableS3KeyPrefix,
@@ -155,7 +164,7 @@ Please take a look at the usage below to customize the serving parameters`,
 						},
 						GCSConfig: vfs.GCSFsConfig{
 							Bucket:               portableGCSBucket,
-							Credentials:          portableGCSCredentials,
+							Credentials:          kms.NewPlainSecret(portableGCSCredentials),
 							AutomaticCredentials: portableGCSAutoCredentials,
 							StorageClass:         portableGCSStorageClass,
 							KeyPrefix:            portableGCSKeyPrefix,
@@ -163,7 +172,7 @@ Please take a look at the usage below to customize the serving parameters`,
 						AzBlobConfig: vfs.AzBlobFsConfig{
 							Container:         portableAzContainer,
 							AccountName:       portableAzAccountName,
-							AccountKey:        portableAzAccountKey,
+							AccountKey:        kms.NewPlainSecret(portableAzAccountKey),
 							Endpoint:          portableAzEndpoint,
 							AccessTier:        portableAzAccessTier,
 							SASURL:            portableAzSASURL,
@@ -172,9 +181,20 @@ Please take a look at the usage below to customize the serving parameters`,
 							UploadPartSize:    int64(portableAzULPartSize),
 							UploadConcurrency: portableAzULConcurrency,
 						},
+						CryptConfig: vfs.CryptFsConfig{
+							Passphrase: kms.NewPlainSecret(portableCryptPassphrase),
+						},
+						SFTPConfig: vfs.SFTPFsConfig{
+							Endpoint:     portableSFTPEndpoint,
+							Username:     portableSFTPUsername,
+							Password:     kms.NewPlainSecret(portableSFTPPassword),
+							PrivateKey:   kms.NewPlainSecret(portableSFTPPrivateKey),
+							Fingerprints: portableSFTPFingerprints,
+							Prefix:       portableSFTPPrefix,
+						},
 					},
 					Filters: dataprovider.UserFilters{
-						FileExtensions: parseFileExtensionsFilters(),
+						FilePatterns: parsePatternsFilesFilters(),
 					},
 				},
 			}
@@ -197,7 +217,8 @@ func init() {
 This can be an absolute path or a path
 relative to the current directory
 `)
-	portableCmd.Flags().IntVarP(&portableSFTPDPort, "sftpd-port", "s", 0, "0 means a random unprivileged port")
+	portableCmd.Flags().IntVarP(&portableSFTPDPort, "sftpd-port", "s", 0, `0 means a random unprivileged port,
+< 0 disabled`)
 	portableCmd.Flags().IntVar(&portableFTPDPort, "ftpd-port", -1, `0 means a random unprivileged port,
 < 0 disabled`)
 	portableCmd.Flags().IntVar(&portableWebDAVPort, "webdav-port", -1, `0 means a random unprivileged port,
@@ -217,18 +238,18 @@ value`)
 	portableCmd.Flags().StringSliceVarP(&portablePermissions, "permissions", "g", []string{"list", "download"},
 		`User's permissions. "*" means any
 permission`)
-	portableCmd.Flags().StringArrayVar(&portableAllowedExtensions, "allowed-extensions", []string{},
-		`Allowed file extensions case
-insensitive. The format is
-/dir::ext1,ext2.
-For example: "/somedir::.jpg,.png"`)
-	portableCmd.Flags().StringArrayVar(&portableDeniedExtensions, "denied-extensions", []string{},
-		`Denied file extensions case
-insensitive. The format is
-/dir::ext1,ext2.
-For example: "/somedir::.jpg,.png"`)
+	portableCmd.Flags().StringArrayVar(&portableAllowedPatterns, "allowed-patterns", []string{},
+		`Allowed file patterns case insensitive.
+The format is:
+/dir::pattern1,pattern2.
+For example: "/somedir::*.jpg,a*b?.png"`)
+	portableCmd.Flags().StringArrayVar(&portableDeniedPatterns, "denied-patterns", []string{},
+		`Denied file patterns case insensitive.
+The format is:
+/dir::pattern1,pattern2.
+For example: "/somedir::*.jpg,a*b?.png"`)
 	portableCmd.Flags().BoolVarP(&portableAdvertiseService, "advertise-service", "S", false,
-		`Advertise SFTP/FTP service using
+		`Advertise configured services using
 multicast DNS`)
 	portableCmd.Flags().BoolVarP(&portableAdvertiseCredentials, "advertise-credentials", "C", false,
 		`If the SFTP/FTP service is
@@ -238,7 +259,9 @@ inside the advertised TXT record`)
 	portableCmd.Flags().IntVarP(&portableFsProvider, "fs-provider", "f", int(dataprovider.LocalFilesystemProvider), `0 => local filesystem
 1 => AWS S3 compatible
 2 => Google Cloud Storage
-3 => Azure Blob Storage`)
+3 => Azure Blob Storage
+4 => Encrypted local filesystem
+5 => SFTP`)
 	portableCmd.Flags().StringVar(&portableS3Bucket, "s3-bucket", "", "")
 	portableCmd.Flags().StringVar(&portableS3Region, "s3-region", "", "")
 	portableCmd.Flags().StringVar(&portableS3AccessKey, "s3-access-key", "", "")
@@ -284,45 +307,56 @@ prefix and its contents`)
 	portableCmd.Flags().IntVar(&portableAzULConcurrency, "az-upload-concurrency", 2, `How many parts are uploaded in
 parallel`)
 	portableCmd.Flags().BoolVar(&portableAzUseEmulator, "az-use-emulator", false, "")
+	portableCmd.Flags().StringVar(&portableCryptPassphrase, "crypto-passphrase", "", `Passphrase for encryption/decryption`)
+	portableCmd.Flags().StringVar(&portableSFTPEndpoint, "sftp-endpoint", "", `SFTP endpoint as host:port for SFTP
+provider`)
+	portableCmd.Flags().StringVar(&portableSFTPUsername, "sftp-username", "", `SFTP user for SFTP provider`)
+	portableCmd.Flags().StringVar(&portableSFTPPassword, "sftp-password", "", `SFTP password for SFTP provider`)
+	portableCmd.Flags().StringVar(&portableSFTPPrivateKeyPath, "sftp-key-path", "", `SFTP private key path for SFTP provider`)
+	portableCmd.Flags().StringSliceVar(&portableSFTPFingerprints, "sftp-fingerprints", []string{}, `SFTP fingerprints to verify remote host
+key for SFTP provider`)
+	portableCmd.Flags().StringVar(&portableSFTPPrefix, "sftp-prefix", "", `SFTP prefix allows restrict all
+operations to a given path within the
+remote SFTP server`)
 	rootCmd.AddCommand(portableCmd)
 }
 
-func parseFileExtensionsFilters() []dataprovider.ExtensionsFilter {
-	var extensions []dataprovider.ExtensionsFilter
-	for _, val := range portableAllowedExtensions {
-		p, exts := getExtensionsFilterValues(strings.TrimSpace(val))
+func parsePatternsFilesFilters() []dataprovider.PatternsFilter {
+	var patterns []dataprovider.PatternsFilter
+	for _, val := range portableAllowedPatterns {
+		p, exts := getPatternsFilterValues(strings.TrimSpace(val))
 		if len(p) > 0 {
-			extensions = append(extensions, dataprovider.ExtensionsFilter{
-				Path:              path.Clean(p),
-				AllowedExtensions: exts,
-				DeniedExtensions:  []string{},
+			patterns = append(patterns, dataprovider.PatternsFilter{
+				Path:            path.Clean(p),
+				AllowedPatterns: exts,
+				DeniedPatterns:  []string{},
 			})
 		}
 	}
-	for _, val := range portableDeniedExtensions {
-		p, exts := getExtensionsFilterValues(strings.TrimSpace(val))
+	for _, val := range portableDeniedPatterns {
+		p, exts := getPatternsFilterValues(strings.TrimSpace(val))
 		if len(p) > 0 {
 			found := false
-			for index, e := range extensions {
+			for index, e := range patterns {
 				if path.Clean(e.Path) == path.Clean(p) {
-					extensions[index].DeniedExtensions = append(extensions[index].DeniedExtensions, exts...)
+					patterns[index].DeniedPatterns = append(patterns[index].DeniedPatterns, exts...)
 					found = true
 					break
 				}
 			}
 			if !found {
-				extensions = append(extensions, dataprovider.ExtensionsFilter{
-					Path:              path.Clean(p),
-					AllowedExtensions: []string{},
-					DeniedExtensions:  exts,
+				patterns = append(patterns, dataprovider.PatternsFilter{
+					Path:            path.Clean(p),
+					AllowedPatterns: []string{},
+					DeniedPatterns:  exts,
 				})
 			}
 		}
 	}
-	return extensions
+	return patterns
 }
 
-func getExtensionsFilterValues(value string) (string, []string) {
+func getPatternsFilterValues(value string) (string, []string) {
 	if strings.Contains(value, "::") {
 		dirExts := strings.Split(value, "::")
 		if len(dirExts) > 1 {
@@ -334,10 +368,25 @@ func getExtensionsFilterValues(value string) (string, []string) {
 					exts = append(exts, cleanedExt)
 				}
 			}
-			if len(dir) > 0 && len(exts) > 0 {
+			if dir != "" && len(exts) > 0 {
 				return dir, exts
 			}
 		}
 	}
 	return "", nil
+}
+
+func getFileContents(name string) (string, error) {
+	fi, err := os.Stat(name)
+	if err != nil {
+		return "", err
+	}
+	if fi.Size() > 1048576 {
+		return "", fmt.Errorf("%#v is too big %v/1048576 bytes", name, fi.Size())
+	}
+	contents, err := ioutil.ReadFile(name)
+	if err != nil {
+		return "", err
+	}
+	return string(contents), nil
 }

@@ -20,6 +20,9 @@ import (
 
 // BaseConnection defines common fields for a connection using any supported protocol
 type BaseConnection struct {
+	// last activity for this connection.
+	// Since this is accessed atomically we put as first element of the struct achieve 64 bit alignment
+	lastActivity int64
 	// Unique identifier for the connection
 	ID string
 	// user associated with this connection if any
@@ -29,8 +32,6 @@ type BaseConnection struct {
 	protocol  string
 	Fs        vfs.Fs
 	sync.RWMutex
-	// last activity for this connection
-	lastActivity    int64
 	transferID      uint64
 	activeTransfers []ActiveTransfer
 }
@@ -98,6 +99,14 @@ func (c *BaseConnection) UpdateLastActivity() {
 // GetLastActivity returns the last connection activity
 func (c *BaseConnection) GetLastActivity() time.Time {
 	return time.Unix(0, atomic.LoadInt64(&c.lastActivity))
+}
+
+// CloseFS closes the underlying fs
+func (c *BaseConnection) CloseFS() error {
+	if c.Fs != nil {
+		return c.Fs.Close()
+	}
+	return nil
 }
 
 // AddTransfer associates a new transfer to this connection
@@ -260,7 +269,7 @@ func (c *BaseConnection) RemoveFile(fsPath, virtualPath string, info os.FileInfo
 	}
 
 	logger.CommandLog(removeLogSender, fsPath, "", c.User.Username, "", c.ID, c.protocol, -1, -1, "", "", "", -1)
-	if info.Mode()&os.ModeSymlink != os.ModeSymlink {
+	if info.Mode()&os.ModeSymlink == 0 {
 		vfolder, err := c.User.GetVirtualFolderForPath(path.Dir(virtualPath))
 		if err == nil {
 			dataprovider.UpdateVirtualFolderQuota(vfolder.BaseVirtualFolder, -1, -size, false) //nolint:errcheck
@@ -318,7 +327,7 @@ func (c *BaseConnection) RemoveDir(fsPath, virtualPath string) error {
 		c.Log(logger.LevelWarn, "failed to remove a dir %#v: stat error: %+v", fsPath, err)
 		return c.GetFsError(err)
 	}
-	if !fi.IsDir() || fi.Mode()&os.ModeSymlink == os.ModeSymlink {
+	if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
 		c.Log(logger.LevelDebug, "cannot remove %#v is not a directory", fsPath)
 		return c.GetGenericError(nil)
 	}
@@ -442,58 +451,95 @@ func (c *BaseConnection) getPathForSetStatPerms(fsPath, virtualPath string) stri
 
 // DoStat execute a Stat if mode = 0, Lstat if mode = 1
 func (c *BaseConnection) DoStat(fsPath string, mode int) (os.FileInfo, error) {
+	var info os.FileInfo
+	var err error
 	if mode == 1 {
-		return c.Fs.Lstat(c.getRealFsPath(fsPath))
+		info, err = c.Fs.Lstat(c.getRealFsPath(fsPath))
+	} else {
+		info, err = c.Fs.Stat(c.getRealFsPath(fsPath))
 	}
-	return c.Fs.Stat(c.getRealFsPath(fsPath))
+	if err == nil && vfs.IsCryptOsFs(c.Fs) {
+		info = c.Fs.(*vfs.CryptFs).ConvertFileInfo(info)
+	}
+	return info, err
+}
+
+func (c *BaseConnection) ignoreSetStat() bool {
+	if Config.SetstatMode == 1 {
+		return true
+	}
+	if Config.SetstatMode == 2 && !vfs.IsLocalOrSFTPFs(c.Fs) {
+		return true
+	}
+	return false
+}
+
+func (c *BaseConnection) handleChmod(fsPath, pathForPerms string, attributes *StatAttributes) error {
+	if !c.User.HasPerm(dataprovider.PermChmod, pathForPerms) {
+		return c.GetPermissionDeniedError()
+	}
+	if c.ignoreSetStat() {
+		return nil
+	}
+	if err := c.Fs.Chmod(c.getRealFsPath(fsPath), attributes.Mode); err != nil {
+		c.Log(logger.LevelWarn, "failed to chmod path %#v, mode: %v, err: %+v", fsPath, attributes.Mode.String(), err)
+		return c.GetFsError(err)
+	}
+	logger.CommandLog(chmodLogSender, fsPath, "", c.User.Username, attributes.Mode.String(), c.ID, c.protocol,
+		-1, -1, "", "", "", -1)
+	return nil
+}
+
+func (c *BaseConnection) handleChown(fsPath, pathForPerms string, attributes *StatAttributes) error {
+	if !c.User.HasPerm(dataprovider.PermChown, pathForPerms) {
+		return c.GetPermissionDeniedError()
+	}
+	if c.ignoreSetStat() {
+		return nil
+	}
+	if err := c.Fs.Chown(c.getRealFsPath(fsPath), attributes.UID, attributes.GID); err != nil {
+		c.Log(logger.LevelWarn, "failed to chown path %#v, uid: %v, gid: %v, err: %+v", fsPath, attributes.UID,
+			attributes.GID, err)
+		return c.GetFsError(err)
+	}
+	logger.CommandLog(chownLogSender, fsPath, "", c.User.Username, "", c.ID, c.protocol, attributes.UID, attributes.GID,
+		"", "", "", -1)
+	return nil
+}
+
+func (c *BaseConnection) handleChtimes(fsPath, pathForPerms string, attributes *StatAttributes) error {
+	if !c.User.HasPerm(dataprovider.PermChtimes, pathForPerms) {
+		return c.GetPermissionDeniedError()
+	}
+	if c.ignoreSetStat() {
+		return nil
+	}
+	if err := c.Fs.Chtimes(c.getRealFsPath(fsPath), attributes.Atime, attributes.Mtime); err != nil {
+		c.Log(logger.LevelWarn, "failed to chtimes for path %#v, access time: %v, modification time: %v, err: %+v",
+			fsPath, attributes.Atime, attributes.Mtime, err)
+		return c.GetFsError(err)
+	}
+	accessTimeString := attributes.Atime.Format(chtimesFormat)
+	modificationTimeString := attributes.Mtime.Format(chtimesFormat)
+	logger.CommandLog(chtimesLogSender, fsPath, "", c.User.Username, "", c.ID, c.protocol, -1, -1,
+		accessTimeString, modificationTimeString, "", -1)
+	return nil
 }
 
 // SetStat set StatAttributes for the specified fsPath
 func (c *BaseConnection) SetStat(fsPath, virtualPath string, attributes *StatAttributes) error {
-	if Config.SetstatMode == 1 {
-		return nil
-	}
 	pathForPerms := c.getPathForSetStatPerms(fsPath, virtualPath)
 
 	if attributes.Flags&StatAttrPerms != 0 {
-		if !c.User.HasPerm(dataprovider.PermChmod, pathForPerms) {
-			return c.GetPermissionDeniedError()
-		}
-		if err := c.Fs.Chmod(c.getRealFsPath(fsPath), attributes.Mode); err != nil {
-			c.Log(logger.LevelWarn, "failed to chmod path %#v, mode: %v, err: %+v", fsPath, attributes.Mode.String(), err)
-			return c.GetFsError(err)
-		}
-		logger.CommandLog(chmodLogSender, fsPath, "", c.User.Username, attributes.Mode.String(), c.ID, c.protocol,
-			-1, -1, "", "", "", -1)
+		return c.handleChmod(fsPath, pathForPerms, attributes)
 	}
 
 	if attributes.Flags&StatAttrUIDGID != 0 {
-		if !c.User.HasPerm(dataprovider.PermChown, pathForPerms) {
-			return c.GetPermissionDeniedError()
-		}
-		if err := c.Fs.Chown(c.getRealFsPath(fsPath), attributes.UID, attributes.GID); err != nil {
-			c.Log(logger.LevelWarn, "failed to chown path %#v, uid: %v, gid: %v, err: %+v", fsPath, attributes.UID,
-				attributes.GID, err)
-			return c.GetFsError(err)
-		}
-		logger.CommandLog(chownLogSender, fsPath, "", c.User.Username, "", c.ID, c.protocol, attributes.UID, attributes.GID,
-			"", "", "", -1)
+		return c.handleChown(fsPath, pathForPerms, attributes)
 	}
 
 	if attributes.Flags&StatAttrTimes != 0 {
-		if !c.User.HasPerm(dataprovider.PermChtimes, pathForPerms) {
-			return c.GetPermissionDeniedError()
-		}
-
-		if err := c.Fs.Chtimes(c.getRealFsPath(fsPath), attributes.Atime, attributes.Mtime); err != nil {
-			c.Log(logger.LevelWarn, "failed to chtimes for path %#v, access time: %v, modification time: %v, err: %+v",
-				fsPath, attributes.Atime, attributes.Mtime, err)
-			return c.GetFsError(err)
-		}
-		accessTimeString := attributes.Atime.Format(chtimesFormat)
-		modificationTimeString := attributes.Mtime.Format(chtimesFormat)
-		logger.CommandLog(chtimesLogSender, fsPath, "", c.User.Username, "", c.ID, c.protocol, -1, -1,
-			accessTimeString, modificationTimeString, "", -1)
+		return c.handleChtimes(fsPath, pathForPerms, attributes)
 	}
 
 	if attributes.Flags&StatAttrSize != 0 {
@@ -527,7 +573,7 @@ func (c *BaseConnection) truncateFile(fsPath, virtualPath string, size int64) er
 		initialSize = info.Size()
 		err = c.Fs.Truncate(fsPath, size)
 	}
-	if err == nil && vfs.IsLocalOsFs(c.Fs) {
+	if err == nil && vfs.IsLocalOrSFTPFs(c.Fs) {
 		sizeDiff := initialSize - size
 		vfolder, err := c.User.GetVirtualFolderForPath(path.Dir(virtualPath))
 		if err == nil {
@@ -608,7 +654,7 @@ func (c *BaseConnection) isRenamePermitted(fsSourcePath, virtualSourcePath, virt
 	if fi != nil {
 		if fi.IsDir() {
 			return c.User.HasPerm(dataprovider.PermCreateDirs, path.Dir(virtualTargetPath))
-		} else if fi.Mode()&os.ModeSymlink == os.ModeSymlink {
+		} else if fi.Mode()&os.ModeSymlink != 0 {
 			return c.User.HasPerm(dataprovider.PermCreateSymlinks, path.Dir(virtualTargetPath))
 		}
 	}
@@ -751,7 +797,7 @@ func (c *BaseConnection) HasSpace(checkFiles bool, requestPath string) vfs.Quota
 		}
 		result.QuotaSize = vfolder.QuotaSize
 		result.QuotaFiles = vfolder.QuotaFiles
-		result.UsedFiles, result.UsedSize, err = dataprovider.GetUsedVirtualFolderQuota(vfolder.MappedPath)
+		result.UsedFiles, result.UsedSize, err = dataprovider.GetUsedVirtualFolderQuota(vfolder.Name)
 	} else {
 		if c.User.HasNoQuotaRestrictions(checkFiles) {
 			return result
@@ -902,7 +948,7 @@ func (c *BaseConnection) GetPermissionDeniedError() error {
 	switch c.protocol {
 	case ProtocolSFTP:
 		return sftp.ErrSSHFxPermissionDenied
-	case ProtocolWebDAV:
+	case ProtocolWebDAV, ProtocolFTP:
 		return os.ErrPermission
 	default:
 		return ErrPermissionDenied
@@ -914,7 +960,7 @@ func (c *BaseConnection) GetNotExistError() error {
 	switch c.protocol {
 	case ProtocolSFTP:
 		return sftp.ErrSSHFxNoSuchFile
-	case ProtocolWebDAV:
+	case ProtocolWebDAV, ProtocolFTP:
 		return os.ErrNotExist
 	default:
 		return ErrNotExist
@@ -950,6 +996,8 @@ func (c *BaseConnection) GetFsError(err error) error {
 		return c.GetNotExistError()
 	} else if c.Fs.IsPermission(err) {
 		return c.GetPermissionDeniedError()
+	} else if c.Fs.IsNotSupported(err) {
+		return c.GetOpUnsupportedError()
 	} else if err != nil {
 		return c.GetGenericError(err)
 	}

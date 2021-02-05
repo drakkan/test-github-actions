@@ -3,8 +3,10 @@ package webdavd
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/middleware"
 	"github.com/rs/cors"
 	"github.com/rs/xid"
 	"golang.org/x/net/webdav"
@@ -25,40 +28,23 @@ import (
 
 var (
 	err401        = errors.New("Unauthorized")
-	err403        = errors.New("Forbidden")
 	xForwardedFor = http.CanonicalHeaderKey("X-Forwarded-For")
 	xRealIP       = http.CanonicalHeaderKey("X-Real-IP")
 )
 
 type webDavServer struct {
 	config  *Configuration
-	certMgr *common.CertManager
+	binding Binding
 }
 
-func newServer(config *Configuration, configDir string) (*webDavServer, error) {
-	var err error
-	server := &webDavServer{
-		config:  config,
-		certMgr: nil,
-	}
-	certificateFile := getConfigPath(config.CertificateFile, configDir)
-	certificateKeyFile := getConfigPath(config.CertificateKeyFile, configDir)
-	if len(certificateFile) > 0 && len(certificateKeyFile) > 0 {
-		server.certMgr, err = common.NewCertManager(certificateFile, certificateKeyFile, logSender)
-		if err != nil {
-			return server, err
-		}
-	}
-	return server, nil
-}
-
-func (s *webDavServer) listenAndServe() error {
+func (s *webDavServer) listenAndServe(compressor *middleware.Compressor) error {
+	handler := compressor.Handler(s)
 	httpServer := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", s.config.BindAddress, s.config.BindPort),
-		Handler:           server,
+		Addr:              s.binding.GetAddress(),
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 16, // 64KB
+		ErrorLog:          log.New(&logger.StdLoggerWrapper{Sender: logSender}, "", 0),
 	}
 	if s.config.Cors.Enabled {
 		c := cors.New(cors.Options{
@@ -70,18 +56,73 @@ func (s *webDavServer) listenAndServe() error {
 			AllowCredentials:   s.config.Cors.AllowCredentials,
 			OptionsPassthrough: true,
 		})
-		httpServer.Handler = c.Handler(server)
-	} else {
-		httpServer.Handler = server
+		handler = c.Handler(handler)
 	}
-	if s.certMgr != nil {
+	httpServer.Handler = handler
+	if certMgr != nil && s.binding.EnableHTTPS {
+		serviceStatus.Bindings = append(serviceStatus.Bindings, s.binding)
 		httpServer.TLSConfig = &tls.Config{
-			GetCertificate: s.certMgr.GetCertificateFunc(),
+			GetCertificate: certMgr.GetCertificateFunc(),
 			MinVersion:     tls.VersionTLS12,
 		}
+		if s.binding.ClientAuthType == 1 {
+			httpServer.TLSConfig.ClientCAs = certMgr.GetRootCAs()
+			httpServer.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			httpServer.TLSConfig.VerifyConnection = s.verifyTLSConnection
+		}
+		logger.Info(logSender, "", "starting HTTPS serving, binding: %v", s.binding.GetAddress())
 		return httpServer.ListenAndServeTLS("", "")
 	}
+	s.binding.EnableHTTPS = false
+	serviceStatus.Bindings = append(serviceStatus.Bindings, s.binding)
+	logger.Info(logSender, "", "starting HTTP serving, binding: %v", s.binding.GetAddress())
 	return httpServer.ListenAndServe()
+}
+
+func (s *webDavServer) verifyTLSConnection(state tls.ConnectionState) error {
+	if certMgr != nil {
+		var clientCrt *x509.Certificate
+		var clientCrtName string
+		if len(state.PeerCertificates) > 0 {
+			clientCrt = state.PeerCertificates[0]
+			clientCrtName = clientCrt.Subject.String()
+		}
+		if len(state.VerifiedChains) == 0 {
+			logger.Warn(logSender, "", "TLS connection cannot be verified: unable to get verification chain")
+			return errors.New("TLS connection cannot be verified: unable to get verification chain")
+		}
+		for _, verifiedChain := range state.VerifiedChains {
+			var caCrt *x509.Certificate
+			if len(verifiedChain) > 0 {
+				caCrt = verifiedChain[len(verifiedChain)-1]
+			}
+			if certMgr.IsRevoked(clientCrt, caCrt) {
+				logger.Debug(logSender, "", "tls handshake error, client certificate %#v has been revoked", clientCrtName)
+				return common.ErrCrtRevoked
+			}
+		}
+	}
+
+	return nil
+}
+
+// returns true if we have to handle a HEAD response, for a directory, ourself
+func (s *webDavServer) checkRequestMethod(ctx context.Context, r *http.Request, connection *Connection) bool {
+	// see RFC4918, section 9.4
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		p := path.Clean(r.URL.Path)
+		info, err := connection.Stat(ctx, p)
+		if err == nil && info.IsDir() {
+			if r.Method == http.MethodHead {
+				return true
+			}
+			r.Method = "PROPFIND"
+			if r.Header.Get("Depth") == "" {
+				r.Header.Add("Depth", "1")
+			}
+		}
+	}
+	return false
 }
 
 // ServeHTTP implements the http.Handler interface
@@ -92,38 +133,43 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, common.ErrGenericFailure.Error(), http.StatusInternalServerError)
 		}
 	}()
+	if !common.Connections.IsNewConnectionAllowed() {
+		logger.Log(logger.LevelDebug, common.ProtocolFTP, "", "connection refused, configured limit reached")
+		http.Error(w, common.ErrConnectionDenied.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	checkRemoteAddress(r)
-	if err := common.Config.ExecutePostConnectHook(r.RemoteAddr, common.ProtocolWebDAV); err != nil {
+	ipAddr := utils.GetIPFromRemoteAddress(r.RemoteAddr)
+	if common.IsBanned(ipAddr) {
 		http.Error(w, common.ErrConnectionDenied.Error(), http.StatusForbidden)
 		return
 	}
-	user, isCached, lockSystem, err := s.authenticate(r)
+	if err := common.Config.ExecutePostConnectHook(ipAddr, common.ProtocolWebDAV); err != nil {
+		http.Error(w, common.ErrConnectionDenied.Error(), http.StatusForbidden)
+		return
+	}
+	user, _, lockSystem, err := s.authenticate(r, ipAddr)
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", "Basic realm=\"SFTPGo WebDAV\"")
 		http.Error(w, err401.Error(), http.StatusUnauthorized)
 		return
 	}
 
-	if path.Clean(r.URL.Path) == "/" && (r.Method == http.MethodGet || r.Method == "PROPFIND" || r.Method == http.MethodOptions) {
-		http.Redirect(w, r, path.Join("/", user.Username), http.StatusMovedPermanently)
-		return
-	}
-
-	connectionID, err := s.validateUser(user, r)
+	connectionID, err := s.validateUser(&user, r)
 	if err != nil {
-		updateLoginMetrics(user.Username, r.RemoteAddr, err)
+		updateLoginMetrics(&user, ipAddr, err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 
 	fs, err := user.GetFilesystem(connectionID)
 	if err != nil {
-		updateLoginMetrics(user.Username, r.RemoteAddr, err)
+		updateLoginMetrics(&user, ipAddr, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	updateLoginMetrics(user.Username, r.RemoteAddr, err)
+	updateLoginMetrics(&user, ipAddr, err)
 
 	ctx := context.WithValue(r.Context(), requestIDKey, connectionID)
 	ctx = context.WithValue(ctx, requestStartKey, time.Now())
@@ -135,27 +181,16 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	common.Connections.Add(connection)
 	defer common.Connections.Remove(connection.GetID())
 
-	if !isCached {
-		// we update last login and check for home directory only if the user is not cached
-		connection.Fs.CheckRootPath(connection.GetUsername(), user.GetUID(), user.GetGID())
-		dataprovider.UpdateLastLogin(user) //nolint:errcheck
-	}
+	dataprovider.UpdateLastLogin(user) //nolint:errcheck
 
-	prefix := path.Join("/", user.Username)
-	// see RFC4918, section 9.4
-	if r.Method == http.MethodGet {
-		p := strings.TrimPrefix(path.Clean(r.URL.Path), prefix)
-		info, err := connection.Stat(ctx, p)
-		if err == nil && info.IsDir() {
-			r.Method = "PROPFIND"
-			if r.Header.Get("Depth") == "" {
-				r.Header.Add("Depth", "1")
-			}
-		}
+	if s.checkRequestMethod(ctx, r, connection) {
+		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		w.WriteHeader(http.StatusMultiStatus)
+		w.Write([]byte("")) //nolint:errcheck
+		return
 	}
 
 	handler := webdav.Handler{
-		Prefix:     prefix,
 		FileSystem: connection,
 		LockSystem: lockSystem,
 		Logger:     writeLog,
@@ -163,7 +198,7 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	handler.ServeHTTP(w, r.WithContext(ctx))
 }
 
-func (s *webDavServer) authenticate(r *http.Request) (dataprovider.User, bool, webdav.LockSystem, error) {
+func (s *webDavServer) authenticate(r *http.Request, ip string) (dataprovider.User, bool, webdav.LockSystem, error) {
 	var user dataprovider.User
 	var err error
 	username, password, ok := r.BasicAuth()
@@ -176,16 +211,17 @@ func (s *webDavServer) authenticate(r *http.Request) (dataprovider.User, bool, w
 		if cachedUser.IsExpired() {
 			dataprovider.RemoveCachedWebDAVUser(username)
 		} else {
-			if len(password) > 0 && cachedUser.Password == password {
+			if password != "" && cachedUser.Password == password {
 				return cachedUser.User, true, cachedUser.LockSystem, nil
 			}
-			updateLoginMetrics(username, r.RemoteAddr, dataprovider.ErrInvalidCredentials)
+			updateLoginMetrics(&cachedUser.User, ip, dataprovider.ErrInvalidCredentials)
 			return user, false, nil, dataprovider.ErrInvalidCredentials
 		}
 	}
-	user, err = dataprovider.CheckUserAndPass(username, password, utils.GetIPFromRemoteAddress(r.RemoteAddr), common.ProtocolWebDAV)
+	user, err = dataprovider.CheckUserAndPass(username, password, ip, common.ProtocolWebDAV)
 	if err != nil {
-		updateLoginMetrics(username, r.RemoteAddr, err)
+		user.Username = username
+		updateLoginMetrics(&user, ip, err)
 		return user, false, nil, err
 	}
 	lockSystem := webdav.NewMemLS()
@@ -199,19 +235,21 @@ func (s *webDavServer) authenticate(r *http.Request) (dataprovider.User, bool, w
 			cachedUser.Expiration = time.Now().Add(time.Duration(s.config.Cache.Users.ExpirationTime) * time.Minute)
 		}
 		dataprovider.CacheWebDAVUser(cachedUser, s.config.Cache.Users.MaxSize)
+		if user.FsConfig.Provider != dataprovider.SFTPFilesystemProvider {
+			// for sftp fs check root path does nothing so don't open a useless SFTP connection
+			tempFs, err := user.GetFilesystem("temp")
+			if err == nil {
+				tempFs.CheckRootPath(user.Username, user.UID, user.GID)
+				tempFs.Close()
+			}
+		}
 	}
-	return user, false, lockSystem, err
+	return user, false, lockSystem, nil
 }
 
-func (s *webDavServer) validateUser(user dataprovider.User, r *http.Request) (string, error) {
+func (s *webDavServer) validateUser(user *dataprovider.User, r *http.Request) (string, error) {
 	connID := xid.New().String()
 	connectionID := fmt.Sprintf("%v_%v", common.ProtocolWebDAV, connID)
-
-	uriSegments := strings.Split(path.Clean(r.URL.Path), "/")
-	if len(uriSegments) < 2 || uriSegments[1] != user.Username {
-		logger.Debug(logSender, connectionID, "URI %#v not allowed for user %#v", r.URL.Path, user.Username)
-		return connID, err403
-	}
 
 	if !filepath.IsAbs(user.HomeDir) {
 		logger.Warn(logSender, connectionID, "user %#v has an invalid home dir: %#v. Home dir must be an absolute path, login not allowed",
@@ -293,12 +331,16 @@ func checkRemoteAddress(r *http.Request) {
 	}
 }
 
-func updateLoginMetrics(username, remoteAddress string, err error) {
+func updateLoginMetrics(user *dataprovider.User, ip string, err error) {
 	metrics.AddLoginAttempt(dataprovider.LoginMethodPassword)
-	ip := utils.GetIPFromRemoteAddress(remoteAddress)
 	if err != nil {
-		logger.ConnectionFailedLog(username, ip, dataprovider.LoginMethodPassword, common.ProtocolWebDAV, err.Error())
+		logger.ConnectionFailedLog(user.Username, ip, dataprovider.LoginMethodPassword, common.ProtocolWebDAV, err.Error())
+		event := common.HostEventLoginFailed
+		if _, ok := err.(*dataprovider.RecordNotFoundError); ok {
+			event = common.HostEventUserNotFound
+		}
+		common.AddDefenderEvent(ip, event)
 	}
 	metrics.AddLoginResult(dataprovider.LoginMethodPassword, err)
-	dataprovider.ExecutePostLoginHook(username, dataprovider.LoginMethodPassword, ip, common.ProtocolWebDAV, err)
+	dataprovider.ExecutePostLoginHook(user, dataprovider.LoginMethodPassword, ip, common.ProtocolWebDAV, err)
 }

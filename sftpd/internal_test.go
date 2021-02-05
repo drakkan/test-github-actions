@@ -397,17 +397,6 @@ func TestSFTPCmdTargetPath(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
-func TestSetstatModeIgnore(t *testing.T) {
-	originalMode := common.Config.SetstatMode
-	common.Config.SetstatMode = 1
-	connection := Connection{}
-	request := sftp.NewRequest("Setstat", "invalid")
-	request.Flags = 0
-	err := connection.handleSFTPSetstat("invalid", request)
-	assert.NoError(t, err)
-	common.Config.SetstatMode = originalMode
-}
-
 func TestSFTPGetUsedQuota(t *testing.T) {
 	u := dataprovider.User{}
 	u.HomeDir = "home_rel_path"
@@ -751,8 +740,6 @@ func TestSSHCommandsRemoteFs(t *testing.T) {
 		connection: connection,
 		args:       []string{},
 	}
-	err = cmd.handleHashCommands()
-	assert.Error(t, err, "command must fail for a non local filesystem")
 
 	command, err := cmd.getSystemCommand()
 	assert.NoError(t, err)
@@ -1080,6 +1067,78 @@ func TestSCPFileMode(t *testing.T) {
 	fileMode = fileMode | uint32(os.ModeSticky)
 	mode = getFileModeAsString(os.FileMode(fileMode), false)
 	assert.Equal(t, "1044", mode)
+}
+
+func TestSCPUploadError(t *testing.T) {
+	buf := make([]byte, 65535)
+	stdErrBuf := make([]byte, 65535)
+	writeErr := fmt.Errorf("test write error")
+	mockSSHChannel := MockChannel{
+		Buffer:       bytes.NewBuffer(buf),
+		StdErrBuffer: bytes.NewBuffer(stdErrBuf),
+		ReadError:    nil,
+		WriteError:   writeErr,
+	}
+	user := dataprovider.User{
+		HomeDir:     filepath.Join(os.TempDir()),
+		Permissions: make(map[string][]string),
+	}
+	user.Permissions["/"] = []string{dataprovider.PermAny}
+	fs := vfs.NewOsFs("", user.HomeDir, nil)
+
+	connection := &Connection{
+		BaseConnection: common.NewBaseConnection("", common.ProtocolSFTP, user, fs),
+		channel:        &mockSSHChannel,
+	}
+	scpCommand := scpCommand{
+		sshCommand: sshCommand{
+			command:    "scp",
+			connection: connection,
+			args:       []string{"-t", "/"},
+		},
+	}
+	err := scpCommand.handle()
+	assert.EqualError(t, err, writeErr.Error())
+
+	mockSSHChannel = MockChannel{
+		Buffer:       bytes.NewBuffer([]byte("D0755 0 testdir\n")),
+		StdErrBuffer: bytes.NewBuffer(stdErrBuf),
+		ReadError:    nil,
+		WriteError:   writeErr,
+	}
+	err = scpCommand.handleRecursiveUpload()
+	assert.EqualError(t, err, writeErr.Error())
+
+	mockSSHChannel = MockChannel{
+		Buffer:       bytes.NewBuffer([]byte("D0755 a testdir\n")),
+		StdErrBuffer: bytes.NewBuffer(stdErrBuf),
+		ReadError:    nil,
+		WriteError:   nil,
+	}
+	err = scpCommand.handleRecursiveUpload()
+	assert.Error(t, err)
+}
+
+func TestSCPInvalidEndDir(t *testing.T) {
+	stdErrBuf := make([]byte, 65535)
+	mockSSHChannel := MockChannel{
+		Buffer:       bytes.NewBuffer([]byte("E\n")),
+		StdErrBuffer: bytes.NewBuffer(stdErrBuf),
+	}
+	fs := vfs.NewOsFs("", os.TempDir(), nil)
+	connection := &Connection{
+		BaseConnection: common.NewBaseConnection("", common.ProtocolSFTP, dataprovider.User{}, fs),
+		channel:        &mockSSHChannel,
+	}
+	scpCommand := scpCommand{
+		sshCommand: sshCommand{
+			command:    "scp",
+			connection: connection,
+			args:       []string{"-t", "/tmp"},
+		},
+	}
+	err := scpCommand.handleRecursiveUpload()
+	assert.EqualError(t, err, "unacceptable end dir command")
 }
 
 func TestSCPParseUploadMessage(t *testing.T) {
@@ -1474,8 +1533,9 @@ func TestSCPDownloadFileData(t *testing.T) {
 		WriteError:   writeErr,
 	}
 	connection := &Connection{
-		BaseConnection: common.NewBaseConnection("", common.ProtocolSCP, dataprovider.User{}, nil),
-		channel:        &mockSSHChannelReadErr,
+		BaseConnection: common.NewBaseConnection("", common.ProtocolSCP, dataprovider.User{},
+			vfs.NewOsFs("", os.TempDir(), nil)),
+		channel: &mockSSHChannelReadErr,
 	}
 	scpCommand := scpCommand{
 		sshCommand: sshCommand{
@@ -1680,6 +1740,13 @@ func TestTransferFailingReader(t *testing.T) {
 	err = tr.Close()
 	assert.NoError(t, err)
 
+	tr = newTransfer(baseTransfer, nil, nil, errRead)
+	_, err = tr.ReadAt(buf, 0)
+	assert.EqualError(t, err, errRead.Error())
+
+	err = tr.Close()
+	assert.NoError(t, err)
+
 	err = os.Remove(fsPath)
 	assert.NoError(t, err)
 	assert.Len(t, connection.GetTransfers(), 0)
@@ -1870,4 +1937,72 @@ func TestRecoverer(t *testing.T) {
 	err = scpCmd.handle()
 	assert.EqualError(t, err, common.ErrGenericFailure.Error())
 	assert.Len(t, common.Connections.GetStats(), 0)
+}
+
+func TestListernerAcceptErrors(t *testing.T) {
+	errFake := errors.New("a fake error")
+	listener := newFakeListener(errFake)
+	c := Configuration{}
+	err := c.serve(listener, nil)
+	require.EqualError(t, err, errFake.Error())
+	err = listener.Close()
+	require.NoError(t, err)
+
+	errNetFake := &fakeNetError{error: errFake}
+	listener = newFakeListener(errNetFake)
+	err = c.serve(listener, nil)
+	require.EqualError(t, err, errFake.Error())
+	err = listener.Close()
+	require.NoError(t, err)
+}
+
+type fakeNetError struct {
+	error
+	count int
+}
+
+func (e *fakeNetError) Timeout() bool {
+	return false
+}
+
+func (e *fakeNetError) Temporary() bool {
+	e.count++
+	return e.count < 10
+}
+
+func (e *fakeNetError) Error() string {
+	return e.error.Error()
+}
+
+type fakeListener struct {
+	server net.Conn
+	client net.Conn
+	err    error
+}
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	return l.client, l.err
+}
+
+func (l *fakeListener) Close() error {
+	errClient := l.client.Close()
+	errServer := l.server.Close()
+	if errServer != nil {
+		return errServer
+	}
+	return errClient
+}
+
+func (l *fakeListener) Addr() net.Addr {
+	return l.server.LocalAddr()
+}
+
+func newFakeListener(err error) net.Listener {
+	server, client := net.Pipe()
+
+	return &fakeListener{
+		server: server,
+		client: client,
+		err:    err,
+	}
 }

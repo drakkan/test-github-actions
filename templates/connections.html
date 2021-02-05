@@ -13,12 +13,12 @@
     <div id="errorTxt" class="card-body text-form-error"></div>
 </div>
 
-{{if .Connections}}
 <div class="card shadow mb-4">
     <div class="card-header py-3">
         <h6 class="m-0 font-weight-bold text-primary">View and manage connections</h6>
     </div>
     <div class="card-body">
+        {{if .Connections}}
         <div class="table-responsive">
             <table class="table table-striped table-bordered" id="dataTable" width="100%" cellspacing="0">
                 <thead>
@@ -43,13 +43,13 @@
                 </tbody>
             </table>
         </div>
+        {{else}}
+        <div class="card mb-2 border-left-info">
+            <div class="card-body">No user connected</div>
+        </div>
+        {{end}}
     </div>
 </div>
-{{else}}
-<div class="card mb-4 border-left-success">
-    <div class="card-body">No user connected</div>
-</div>
-{{end}}
 {{end}}
 
 {{define "dialog"}}
@@ -90,23 +90,24 @@
 
     function disconnectAction() {
         var table = $('#dataTable').DataTable();
-        table.button(0).enable(false);
+        table.button('disconnect:name').enable(false);
         var connectionID = table.row({ selected: true }).data()[0];
-        var path = '{{.APIConnectionsURL}}' + "/" + connectionID;
+        var path = '{{.ConnectionsURL}}' + "/" + connectionID;
         $('#disconnectModal').modal('hide');
         $.ajax({
             url: path,
             type: 'DELETE',
             dataType: 'json',
+            headers: {'X-CSRF-TOKEN' : '{{.CSRFToken}}'},
             timeout: 15000,
             success: function (result) {
                 setTimeout(function () {
-                    table.button(0).enable(true);
+                    table.button('disconnect:name').enable(true);
                     window.location.href = '{{.ConnectionsURL}}';
                 }, 1000);
             },
             error: function ($xhr, textStatus, errorThrown) {
-                table.button(0).enable(true);
+                table.button('disconnect:name').enable(true);
                 var txt = "Unable to close the selected connection";
                 if ($xhr) {
                     var json = $xhr.responseJSON;
@@ -126,6 +127,7 @@
     $(document).ready(function () {
         $.fn.dataTable.ext.buttons.disconnect = {
             text: 'Disconnect',
+            name: 'disconnect',
             action: function (e, dt, node, config) {
                 $('#disconnectModal').modal('show');
             },
@@ -138,9 +140,7 @@
                 "<'row'<'col-sm-12'tr>>" +
                 "<'row'<'col-sm-12 col-md-5'i><'col-sm-12 col-md-7'p>>",
             select: true,
-            buttons: [
-                'disconnect'
-            ],
+            buttons: [],
             "columnDefs": [
                 {
                     "targets": [0],
@@ -152,10 +152,14 @@
             "order": [[1, 'asc']]
         });
 
+        {{if .LoggedAdmin.HasPermission "close_conns"}}
+        table.button().add(0,'disconnect');
+
         table.on('select deselect', function () {
             var selectedRows = table.rows({ selected: true }).count();
-            table.button(0).enable(selectedRows == 1);
+            table.button('disconnect:name').enable(selectedRows == 1);
         });
+        {{end}}
     });
 </script>
 {{end}}

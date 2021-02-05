@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import argparse
-import base64
 from datetime import datetime
 import json
 import platform
@@ -81,14 +80,15 @@ class SFTPGoApiRequests:
 					s3_region='', s3_access_key='', s3_access_secret='', s3_endpoint='', s3_storage_class='',
 					s3_key_prefix='', gcs_bucket='', gcs_key_prefix='', gcs_storage_class='', gcs_credentials_file='',
 					gcs_automatic_credentials='automatic', denied_login_methods=[], virtual_folders=[],
-					denied_extensions=[], allowed_extensions=[], s3_upload_part_size=0, s3_upload_concurrency=0,
+					denied_patterns=[], allowed_patterns=[], s3_upload_part_size=0, s3_upload_concurrency=0,
 					max_upload_file_size=0, denied_protocols=[], az_container='', az_account_name='', az_account_key='',
 					az_sas_url='', az_endpoint='', az_upload_part_size=0, az_upload_concurrency=0, az_key_prefix='',
-					az_use_emulator=False, az_access_tier=''):
+					az_use_emulator=False, az_access_tier='', additional_info='', crypto_passphrase='', sftp_endpoint='',
+					sftp_username='', sftp_password='', sftp_private_key_path='', sftp_fingerprints=[], sftp_prefix=''):
 		user = {'id':user_id, 'username':username, 'uid':uid, 'gid':gid,
 			'max_sessions':max_sessions, 'quota_size':quota_size, 'quota_files':quota_files,
 			'upload_bandwidth':upload_bandwidth, 'download_bandwidth':download_bandwidth,
-			'status':status, 'expiration_date':expiration_date}
+			'status':status, 'expiration_date':expiration_date, 'additional_info':additional_info}
 		if password is not None:
 			user.update({'password':password})
 		if public_keys:
@@ -103,15 +103,17 @@ class SFTPGoApiRequests:
 		if virtual_folders:
 			user.update({'virtual_folders':self.buildVirtualFolders(virtual_folders)})
 
-		user.update({'filters':self.buildFilters(allowed_ip, denied_ip, denied_login_methods, denied_extensions,
-													allowed_extensions, max_upload_file_size, denied_protocols)})
+		user.update({'filters':self.buildFilters(allowed_ip, denied_ip, denied_login_methods, denied_patterns,
+													allowed_patterns, max_upload_file_size, denied_protocols)})
 		user.update({'filesystem':self.buildFsConfig(fs_provider, s3_bucket, s3_region, s3_access_key, s3_access_secret,
 													s3_endpoint, s3_storage_class, s3_key_prefix, gcs_bucket,
 													gcs_key_prefix, gcs_storage_class, gcs_credentials_file,
 													gcs_automatic_credentials, s3_upload_part_size, s3_upload_concurrency,
 													az_container, az_account_name, az_account_key, az_sas_url,
 													az_endpoint, az_upload_part_size, az_upload_concurrency, az_key_prefix,
-													az_use_emulator, az_access_tier)})
+													az_use_emulator, az_access_tier, crypto_passphrase, sftp_endpoint,
+													sftp_username, sftp_password, sftp_private_key_path,
+													sftp_fingerprints, sftp_prefix)})
 		return user
 
 	def buildVirtualFolders(self, vfolders):
@@ -158,7 +160,7 @@ class SFTPGoApiRequests:
 					permissions.update({directory:values})
 		return permissions
 
-	def buildFilters(self, allowed_ip, denied_ip, denied_login_methods, denied_extensions, allowed_extensions,
+	def buildFilters(self, allowed_ip, denied_ip, denied_login_methods, denied_patterns, allowed_patterns,
 					max_upload_file_size, denied_protocols):
 		filters = {"max_upload_file_size":max_upload_file_size}
 		if allowed_ip:
@@ -181,11 +183,11 @@ class SFTPGoApiRequests:
 				filters.update({'denied_protocols':[]})
 			else:
 				filters.update({'denied_protocols':denied_protocols})
-		extensions_filter = []
-		extensions_denied = []
-		extensions_allowed = []
-		if denied_extensions:
-			for e in denied_extensions:
+		patterns_filter = []
+		patterns_denied = []
+		patterns_allowed = []
+		if denied_patterns:
+			for e in denied_patterns:
 				if '::' in e:
 					directory = None
 					values = []
@@ -195,10 +197,10 @@ class SFTPGoApiRequests:
 						else:
 							values = [v.strip() for v in value.split(',') if v.strip()]
 					if directory:
-						extensions_denied.append({'path':directory, 'denied_extensions':values,
-												'allowed_extensions':[]})
-		if allowed_extensions:
-			for e in allowed_extensions:
+						patterns_denied.append({'path':directory, 'denied_patterns':values,
+												'allowed_patterns':[]})
+		if allowed_patterns:
+			for e in allowed_patterns:
 				if '::' in e:
 					directory = None
 					values = []
@@ -208,57 +210,79 @@ class SFTPGoApiRequests:
 						else:
 							values = [v.strip() for v in value.split(',') if v.strip()]
 					if directory:
-						extensions_allowed.append({'path':directory, 'allowed_extensions':values,
-												'denied_extensions':[]})
-		if extensions_allowed and extensions_denied:
-			for allowed in extensions_allowed:
-				for denied in extensions_denied:
+						patterns_allowed.append({'path':directory, 'allowed_patterns':values,
+												'denied_patterns':[]})
+		if patterns_allowed and patterns_denied:
+			for allowed in patterns_allowed:
+				for denied in patterns_denied:
 					if allowed.get('path') == denied.get('path'):
-						allowed.update({'denied_extensions':denied.get('denied_extensions')})
-				extensions_filter.append(allowed)
-			for denied in extensions_denied:
+						allowed.update({'denied_patterns':denied.get('denied_patterns')})
+				patterns_filter.append(allowed)
+			for denied in patterns_denied:
 				found = False
-				for allowed in extensions_allowed:
+				for allowed in patterns_allowed:
 					if allowed.get('path') == denied.get('path'):
 						found = True
 				if not found:
-					extensions_filter.append(denied)
-		elif extensions_allowed:
-			extensions_filter = extensions_allowed
-		elif extensions_denied:
-			extensions_filter = extensions_denied
-		if allowed_extensions or denied_extensions:
-			filters.update({'file_extensions':extensions_filter})
+					patterns_filter.append(denied)
+		elif patterns_allowed:
+			patterns_filter = patterns_allowed
+		elif patterns_denied:
+			patterns_filter = patterns_denied
+		if allowed_patterns or denied_patterns:
+			filters.update({'file_patterns':patterns_filter})
 		return filters
 
 	def buildFsConfig(self, fs_provider, s3_bucket, s3_region, s3_access_key, s3_access_secret, s3_endpoint,
 					s3_storage_class, s3_key_prefix, gcs_bucket, gcs_key_prefix, gcs_storage_class,
 					gcs_credentials_file, gcs_automatic_credentials, s3_upload_part_size, s3_upload_concurrency,
 					az_container, az_account_name, az_account_key, az_sas_url, az_endpoint, az_upload_part_size,
-					az_upload_concurrency, az_key_prefix, az_use_emulator, az_access_tier):
+					az_upload_concurrency, az_key_prefix, az_use_emulator, az_access_tier, crypto_passphrase,
+					sftp_endpoint, sftp_username, sftp_password, sftp_private_key_path, sftp_fingerprints, sftp_prefix):
 		fs_config = {'provider':0}
 		if fs_provider == 'S3':
+			secret = {}
+			if s3_access_secret:
+				secret.update({"status":"Plain", "payload":s3_access_secret})
 			s3config = {'bucket':s3_bucket, 'region':s3_region, 'access_key':s3_access_key, 'access_secret':
-					s3_access_secret, 'endpoint':s3_endpoint, 'storage_class':s3_storage_class, 'key_prefix':
+					secret, 'endpoint':s3_endpoint, 'storage_class':s3_storage_class, 'key_prefix':
 					s3_key_prefix, 'upload_part_size':s3_upload_part_size, 'upload_concurrency':s3_upload_concurrency}
 			fs_config.update({'provider':1, 's3config':s3config})
 		elif fs_provider == 'GCS':
-			gcsconfig = {'bucket':gcs_bucket, 'key_prefix':gcs_key_prefix, 'storage_class':gcs_storage_class}
+			gcsconfig = {'bucket':gcs_bucket, 'key_prefix':gcs_key_prefix, 'storage_class':gcs_storage_class,
+						'credentials':{}}
 			if gcs_automatic_credentials == "automatic":
 				gcsconfig.update({'automatic_credentials':1})
 			else:
 				gcsconfig.update({'automatic_credentials':0})
 			if gcs_credentials_file:
 				with open(gcs_credentials_file) as creds:
-					gcsconfig.update({'credentials':base64.b64encode(creds.read().encode('UTF-8')).decode('UTF-8'),
-									'automatic_credentials':0})
+					secret = {"status":"Plain", "payload":creds.read()}
+					gcsconfig.update({'credentials':secret, 'automatic_credentials':0})
 			fs_config.update({'provider':2, 'gcsconfig':gcsconfig})
 		elif fs_provider == "AzureBlob":
-			azureconfig = {'container':az_container, 'account_name':az_account_name, 'account_key':az_account_key,
+			secret = {}
+			if az_account_key:
+				secret.update({"status":"Plain", "payload":az_account_key})
+			azureconfig = {'container':az_container, 'account_name':az_account_name, 'account_key':secret,
 						'sas_url':az_sas_url, 'endpoint':az_endpoint, 'upload_part_size':az_upload_part_size,
 						'upload_concurrency':az_upload_concurrency, 'key_prefix':az_key_prefix, 'use_emulator':
 						az_use_emulator, 'access_tier':az_access_tier}
 			fs_config.update({'provider':3, 'azblobconfig':azureconfig})
+		elif fs_provider == 'Crypto':
+			cryptoconfig = {'passphrase':{'status':'Plain', 'payload':crypto_passphrase}}
+			fs_config.update({'provider':4, 'cryptconfig':cryptoconfig})
+		elif fs_provider == 'SFTP':
+			sftpconfig = {'endpoint':sftp_endpoint, 'username':sftp_username, 'fingerprints':sftp_fingerprints,
+						'prefix':sftp_prefix}
+			if sftp_password:
+				pwd = {'status':'Plain', 'payload':sftp_password}
+				sftpconfig.update({'password':pwd})
+			if sftp_private_key_path:
+				with open(sftp_private_key_path) as pkey:
+					key = {'status':'Plain', 'payload':pkey.read()}
+					sftpconfig.update({'private_key':key})
+			fs_config.update({'provider':5, 'sftpconfig':sftpconfig})
 		return fs_config
 
 	def getUsers(self, limit=100, offset=0, order='ASC', username=''):
@@ -275,18 +299,21 @@ class SFTPGoApiRequests:
 			subdirs_permissions=[], allowed_ip=[], denied_ip=[], fs_provider='local', s3_bucket='', s3_region='',
 			s3_access_key='', s3_access_secret='', s3_endpoint='', s3_storage_class='', s3_key_prefix='', gcs_bucket='',
 			gcs_key_prefix='', gcs_storage_class='', gcs_credentials_file='', gcs_automatic_credentials='automatic',
-			denied_login_methods=[], virtual_folders=[], denied_extensions=[], allowed_extensions=[],
+			denied_login_methods=[], virtual_folders=[], denied_patterns=[], allowed_patterns=[],
 			s3_upload_part_size=0, s3_upload_concurrency=0, max_upload_file_size=0, denied_protocols=[], az_container="",
 			az_account_name='', az_account_key='', az_sas_url='', az_endpoint='', az_upload_part_size=0,
-			az_upload_concurrency=0, az_key_prefix='', az_use_emulator=False, az_access_tier=''):
+			az_upload_concurrency=0, az_key_prefix='', az_use_emulator=False, az_access_tier='', additional_info='',
+			crypto_passphrase='', sftp_endpoint='', sftp_username='', sftp_password='', sftp_private_key_path='',
+			sftp_fingerprints=[], sftp_prefix=''):
 		u = self.buildUserObject(0, username, password, public_keys, home_dir, uid, gid, max_sessions,
 			quota_size, quota_files, self.buildPermissions(perms, subdirs_permissions), upload_bandwidth, download_bandwidth,
 			status, expiration_date, allowed_ip, denied_ip, fs_provider, s3_bucket, s3_region, s3_access_key,
 			s3_access_secret, s3_endpoint, s3_storage_class, s3_key_prefix, gcs_bucket, gcs_key_prefix, gcs_storage_class,
-			gcs_credentials_file, gcs_automatic_credentials, denied_login_methods, virtual_folders, denied_extensions,
-			allowed_extensions, s3_upload_part_size, s3_upload_concurrency, max_upload_file_size, denied_protocols,
+			gcs_credentials_file, gcs_automatic_credentials, denied_login_methods, virtual_folders, denied_patterns,
+			allowed_patterns, s3_upload_part_size, s3_upload_concurrency, max_upload_file_size, denied_protocols,
 			az_container, az_account_name, az_account_key, az_sas_url, az_endpoint, az_upload_part_size,
-			az_upload_concurrency, az_key_prefix, az_use_emulator, az_access_tier)
+			az_upload_concurrency, az_key_prefix, az_use_emulator, az_access_tier, additional_info, crypto_passphrase,
+			sftp_endpoint, sftp_username, sftp_password, sftp_private_key_path, sftp_fingerprints, sftp_prefix)
 		r = requests.post(self.userPath, json=u, auth=self.auth, verify=self.verify)
 		self.printResponse(r)
 
@@ -295,19 +322,21 @@ class SFTPGoApiRequests:
 				expiration_date=0, subdirs_permissions=[], allowed_ip=[], denied_ip=[], fs_provider='local',
 				s3_bucket='', s3_region='', s3_access_key='', s3_access_secret='', s3_endpoint='', s3_storage_class='',
 				s3_key_prefix='', gcs_bucket='', gcs_key_prefix='', gcs_storage_class='', gcs_credentials_file='',
-				gcs_automatic_credentials='automatic', denied_login_methods=[], virtual_folders=[], denied_extensions=[],
-				allowed_extensions=[], s3_upload_part_size=0, s3_upload_concurrency=0, max_upload_file_size=0,
+				gcs_automatic_credentials='automatic', denied_login_methods=[], virtual_folders=[], denied_patterns=[],
+				allowed_patterns=[], s3_upload_part_size=0, s3_upload_concurrency=0, max_upload_file_size=0,
 				denied_protocols=[], disconnect=0, az_container='', az_account_name='', az_account_key='', az_sas_url='',
 				az_endpoint='', az_upload_part_size=0, az_upload_concurrency=0, az_key_prefix='', az_use_emulator=False,
-				az_access_tier=''):
+				az_access_tier='', additional_info='', crypto_passphrase='', sftp_endpoint='', sftp_username='',
+				sftp_password='', sftp_private_key_path='', sftp_fingerprints=[], sftp_prefix=''):
 		u = self.buildUserObject(user_id, username, password, public_keys, home_dir, uid, gid, max_sessions,
 			quota_size, quota_files, self.buildPermissions(perms, subdirs_permissions), upload_bandwidth, download_bandwidth,
 			status, expiration_date, allowed_ip, denied_ip, fs_provider, s3_bucket, s3_region, s3_access_key,
 			s3_access_secret, s3_endpoint, s3_storage_class, s3_key_prefix, gcs_bucket, gcs_key_prefix, gcs_storage_class,
-			gcs_credentials_file, gcs_automatic_credentials, denied_login_methods, virtual_folders, denied_extensions,
-			allowed_extensions, s3_upload_part_size, s3_upload_concurrency, max_upload_file_size, denied_protocols,
+			gcs_credentials_file, gcs_automatic_credentials, denied_login_methods, virtual_folders, denied_patterns,
+			allowed_patterns, s3_upload_part_size, s3_upload_concurrency, max_upload_file_size, denied_protocols,
 			az_container, az_account_name, az_account_key, az_sas_url, az_endpoint, az_upload_part_size,
-			az_upload_concurrency, az_key_prefix, az_use_emulator, az_access_tier)
+			az_upload_concurrency, az_key_prefix, az_use_emulator, az_access_tier, additional_info, crypto_passphrase,
+			sftp_endpoint, sftp_username, sftp_password, sftp_private_key_path, sftp_fingerprints, sftp_prefix)
 		r = requests.put(urlparse.urljoin(self.userPath, 'user/' + str(user_id)), params={'disconnect':disconnect},
 						json=u, auth=self.auth, verify=self.verify)
 		self.printResponse(r)
@@ -601,20 +630,21 @@ def addCommonUserArguments(parser):
 							help='User\'s status. 1 enabled, 0 disabled. Default: %(default)s')
 	parser.add_argument('--max-upload-file-size', type=int, default=0,
 					help='Maximum allowed size, as bytes, for a single file upload, 0 means unlimited. Default: %(default)s')
+	parser.add_argument('--additional-info', type=str, default='', help='Free form text field. Default: %(default)s')
 	parser.add_argument('-E', '--expiration-date', type=validDate, default='',
 					help='Expiration date as YYYY-MM-DD, empty string means no expiration. Default: %(default)s')
 	parser.add_argument('-Y', '--allowed-ip', type=str, nargs='+', default=[],
 					help='Allowed IP/Mask in CIDR notation. For example "192.168.2.0/24" or "2001:db8::/32". Default: %(default)s')
 	parser.add_argument('-N', '--denied-ip', type=str, nargs='+', default=[],
 					help='Denied IP/Mask in CIDR notation. For example "192.168.2.0/24" or "2001:db8::/32". Default: %(default)s')
-	parser.add_argument('--denied-extensions', type=str, nargs='*', default=[], help='Denied file extensions case insensitive. '
-					+'The format is /dir::ext1,ext2. For example: "/somedir::.jpg,.png" "/otherdir/subdir::.zip,.rar". ' +
-					'You have to set both denied and allowed extensions to update existing values or none to preserve them.' +
-					' If you only set allowed or denied extensions the missing one is assumed to be an empty list. Default: %(default)s')
-	parser.add_argument('--allowed-extensions', type=str, nargs='*', default=[], help='Allowed file extensions case insensitive. '
-					+'The format is /dir::ext1,ext2. For example: "/somedir::.jpg,.png" "/otherdir/subdir::.zip,.rar". ' +
+	parser.add_argument('--denied-patterns', type=str, nargs='*', default=[], help='Denied file patterns case insensitive. '
+					+'The format is /dir::pattern1,pattern2. For example: "/somedir::*.jpg,*.png" "/otherdir/subdir::a*b?.zip,*.rar". ' +
+					' You have to set both denied and allowed patterns to update existing values or none to preserve them.' +
+					' If you only set allowed or denied patterns the missing one is assumed to be an empty list. Default: %(default)s')
+	parser.add_argument('--allowed-patterns', type=str, nargs='*', default=[], help='Allowed file patterns case insensitive. '
+					+'The format is /dir::pattern1,pattern2. For example: "/somedir::*.jpg,a*b?.png" "/otherdir/subdir::*.zip,*.rar". ' +
 					'Default: %(default)s')
-	parser.add_argument('--fs', type=str, default='local', choices=['local', 'S3', 'GCS', "AzureBlob"],
+	parser.add_argument('--fs', type=str, default='local', choices=['local', 'S3', 'GCS', 'AzureBlob', 'Crypto', 'SFTP'],
 					help='Filesystem provider. Default: %(default)s')
 	parser.add_argument('--s3-bucket', type=str, default='', help='Default: %(default)s')
 	parser.add_argument('--s3-key-prefix', type=str, default='', help='Virtual root directory. If non empty only this ' +
@@ -652,6 +682,14 @@ def addCommonUserArguments(parser):
 					'directory and its contents will be available. Cannot start with "/". For example "folder/subfolder/".' +
 					' Default: %(default)s')
 	parser.add_argument('--az-use-emulator', type=bool, default=False, help='Default: %(default)s')
+	parser.add_argument('--crypto-passphrase', type=str, default='', help='Passphrase for encryption/decryption, to use ' +
+					'with Crypto filesystem')
+	parser.add_argument('--sftp-endpoint', type=str, default='', help='SFTP endpoint as host:port')
+	parser.add_argument('--sftp-username', type=str, default='', help='Default: %(default)s')
+	parser.add_argument('--sftp-password', type=str, default='', help='Default: %(default)s')
+	parser.add_argument('--sftp-private-key-path', type=str, default='', help='Default: %(default)s')
+	parser.add_argument('--sftp-fingerprints', type=str, nargs='+', default=[], help='Default: %(default)s')
+	parser.add_argument('--sftp-prefix', type=str, default='', help='Default: %(default)s')
 
 
 if __name__ == '__main__':
@@ -804,11 +842,12 @@ if __name__ == '__main__':
 				args.denied_ip, args.fs, args.s3_bucket, args.s3_region, args.s3_access_key, args.s3_access_secret,
 				args.s3_endpoint, args.s3_storage_class, args.s3_key_prefix, args.gcs_bucket, args.gcs_key_prefix,
 				args.gcs_storage_class, args.gcs_credentials_file, args.gcs_automatic_credentials,
-				args.denied_login_methods, args.virtual_folders, args.denied_extensions, args.allowed_extensions,
+				args.denied_login_methods, args.virtual_folders, args.denied_patterns, args.allowed_patterns,
 				args.s3_upload_part_size, args.s3_upload_concurrency, args.max_upload_file_size, args.denied_protocols,
 				args.az_container, args.az_account_name, args.az_account_key, args.az_sas_url, args.az_endpoint,
 				args.az_upload_part_size, args.az_upload_concurrency, args.az_key_prefix, args.az_use_emulator,
-				args.az_access_tier)
+				args.az_access_tier, args.additional_info, args.crypto_passphrase, args.sftp_endpoint, args.sftp_username,
+				args.sftp_password, args.sftp_private_key_path, args.sftp_fingerprints, args.sftp_prefix)
 	elif args.command == 'update-user':
 		api.updateUser(args.id, args.username, args.password, args.public_keys, args.home_dir, args.uid, args.gid,
 					args.max_sessions, args.quota_size, args.quota_files, args.permissions, args.upload_bandwidth,
@@ -817,11 +856,13 @@ if __name__ == '__main__':
 					args.s3_access_key, args.s3_access_secret, args.s3_endpoint, args.s3_storage_class,
 					args.s3_key_prefix, args.gcs_bucket, args.gcs_key_prefix, args.gcs_storage_class,
 					args.gcs_credentials_file, args.gcs_automatic_credentials, args.denied_login_methods,
-					args.virtual_folders, args.denied_extensions, args.allowed_extensions, args.s3_upload_part_size,
+					args.virtual_folders, args.denied_patterns, args.allowed_patterns, args.s3_upload_part_size,
 					args.s3_upload_concurrency, args.max_upload_file_size, args.denied_protocols, args.disconnect,
 					args.az_container, args.az_account_name, args.az_account_key, args.az_sas_url, args.az_endpoint,
 					args.az_upload_part_size, args.az_upload_concurrency, args.az_key_prefix, args.az_use_emulator,
-					args.az_access_tier)
+					args.az_access_tier, args.additional_info, args.crypto_passphrase, args.sftp_endpoint,
+					args.sftp_username, args.sftp_password, args.sftp_private_key_path, args.sftp_fingerprints,
+					args.sftp_prefix)
 	elif args.command == 'delete-user':
 		api.deleteUser(args.id)
 	elif args.command == 'get-users':

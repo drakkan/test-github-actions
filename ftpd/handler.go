@@ -2,6 +2,7 @@ package ftpd
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path"
 	"time"
@@ -16,7 +17,8 @@ import (
 )
 
 var (
-	errNotImplemented = errors.New("Not implemented")
+	errNotImplemented   = errors.New("Not implemented")
+	errCOMBNotSupported = errors.New("COMB is not supported for this filesystem")
 )
 
 // Connection details for an FTP connection.
@@ -44,12 +46,12 @@ func (c *Connection) GetRemoteAddress() string {
 
 // Disconnect disconnects the client
 func (c *Connection) Disconnect() error {
-	return c.clientContext.Close(ftpserver.StatusServiceNotAvailable, "connection closed")
+	return c.clientContext.Close()
 }
 
-// GetCommand returns an empty string
+// GetCommand returns the last received FTP command
 func (c *Connection) GetCommand() string {
-	return ""
+	return c.clientContext.GetLastCommand()
 }
 
 // Create is not implemented we use ClientDriverExtentionFileTransfer
@@ -99,7 +101,7 @@ func (c *Connection) Remove(name string) error {
 		return c.GetFsError(err)
 	}
 
-	if fi.IsDir() && fi.Mode()&os.ModeSymlink != os.ModeSymlink {
+	if fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 {
 		c.Log(logger.LevelDebug, "cannot remove %#v is not a file/symlink", p)
 		return c.GetGenericError(nil)
 	}
@@ -158,6 +160,24 @@ func (c *Connection) Name() string {
 	return c.GetID()
 }
 
+// Chown changes the uid and gid of the named file
+func (c *Connection) Chown(name string, uid, gid int) error {
+	c.UpdateLastActivity()
+
+	return common.ErrOpUnsupported
+	/*p, err := c.Fs.ResolvePath(name)
+	if err != nil {
+		return c.GetFsError(err)
+	}
+	attrs := common.StatAttributes{
+		Flags: common.StatAttrUIDGID,
+		UID:   uid,
+		GID:   gid,
+	}
+
+	return c.SetStat(p, name, &attrs)*/
+}
+
 // Chmod changes the mode of the named file/directory
 func (c *Connection) Chmod(name string, mode os.FileMode) error {
 	c.UpdateLastActivity()
@@ -189,7 +209,42 @@ func (c *Connection) Chtimes(name string, atime time.Time, mtime time.Time) erro
 	return c.SetStat(p, name, &attrs)
 }
 
-// AllocateSpace implements ClientDriverExtensionAllocate
+// GetAvailableSpace implements ClientDriverExtensionAvailableSpace interface
+func (c *Connection) GetAvailableSpace(dirName string) (int64, error) {
+	c.UpdateLastActivity()
+
+	quotaResult := c.HasSpace(false, path.Join(dirName, "fakefile.txt"))
+
+	if !quotaResult.HasSpace {
+		return 0, nil
+	}
+
+	if quotaResult.AllowedSize == 0 {
+		// no quota restrictions
+		if c.User.Filters.MaxUploadFileSize > 0 {
+			return c.User.Filters.MaxUploadFileSize, nil
+		}
+
+		p, err := c.Fs.ResolvePath(dirName)
+		if err != nil {
+			return 0, c.GetFsError(err)
+		}
+
+		return c.Fs.GetAvailableDiskSize(p)
+	}
+
+	// the available space is the minimum between MaxUploadFileSize, if setted,
+	// and quota allowed size
+	if c.User.Filters.MaxUploadFileSize > 0 {
+		if c.User.Filters.MaxUploadFileSize < quotaResult.AllowedSize {
+			return c.User.Filters.MaxUploadFileSize, nil
+		}
+	}
+
+	return quotaResult.AllowedSize, nil
+}
+
+// AllocateSpace implements ClientDriverExtensionAllocate interface
 func (c *Connection) AllocateSpace(size int) error {
 	c.UpdateLastActivity()
 	// check the max allowed file size first
@@ -266,6 +321,11 @@ func (c *Connection) GetHandle(name string, flags int, offset int64) (ftpserver.
 	if err != nil {
 		return nil, c.GetFsError(err)
 	}
+
+	if c.GetCommand() == "COMB" && !vfs.IsLocalOsFs(c.Fs) {
+		return nil, errCOMBNotSupported
+	}
+
 	if flags&os.O_WRONLY != 0 {
 		return c.uploadFile(p, name, flags)
 	}
@@ -307,7 +367,7 @@ func (c *Connection) uploadFile(fsPath, ftpPath string, flags int) (ftpserver.Fi
 	}
 
 	stat, statErr := c.Fs.Lstat(fsPath)
-	if (statErr == nil && stat.Mode()&os.ModeSymlink == os.ModeSymlink) || c.Fs.IsNotExist(statErr) {
+	if (statErr == nil && stat.Mode()&os.ModeSymlink != 0) || c.Fs.IsNotExist(statErr) {
 		if !c.User.HasPerm(dataprovider.PermUpload, path.Dir(ftpPath)) {
 			return nil, c.GetPermissionDeniedError()
 		}
@@ -365,7 +425,12 @@ func (c *Connection) handleFTPUploadToExistingFile(flags int, resolvedPath, file
 		return nil, common.ErrQuotaExceeded
 	}
 	minWriteOffset := int64(0)
-	isResume := flags&os.O_APPEND != 0 && flags&os.O_TRUNC == 0
+	// ftpserverlib sets:
+	// - os.O_WRONLY | os.O_APPEND for APPE and COMB
+	// - os.O_WRONLY | os.O_CREATE for REST.
+	// - os.O_WRONLY | os.O_CREATE | os.O_TRUNC if the command is not APPE and REST = 0
+	// so if we don't have O_TRUNC is a resume.
+	isResume := flags&os.O_TRUNC == 0
 	// if there is a size limit remaining size cannot be 0 here, since quotaResult.HasSpace
 	// will return false in this case and we deny the upload before
 	maxWriteSize, err := c.GetMaxWriteSize(quotaResult, isResume, fileSize)
@@ -394,8 +459,12 @@ func (c *Connection) handleFTPUploadToExistingFile(flags int, resolvedPath, file
 		c.Log(logger.LevelDebug, "upload resume requested, file path: %#v initial size: %v", filePath, fileSize)
 		minWriteOffset = fileSize
 		initialSize = fileSize
+		if vfs.IsSFTPFs(c.Fs) {
+			// we need this since we don't allow resume with wrong offset, we should fix this in pkg/sftp
+			file.Seek(initialSize, io.SeekStart) //nolint:errcheck // for sftp seek cannot file, it simply set the offset
+		}
 	} else {
-		if vfs.IsLocalOsFs(c.Fs) {
+		if vfs.IsLocalOrSFTPFs(c.Fs) {
 			vfolder, err := c.User.GetVirtualFolderForPath(path.Dir(requestPath))
 			if err == nil {
 				dataprovider.UpdateVirtualFolderQuota(vfolder.BaseVirtualFolder, 0, -fileSize, false) //nolint:errcheck

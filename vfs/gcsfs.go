@@ -4,9 +4,10 @@ package vfs
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"mime"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
+	"github.com/drakkan/sftpgo/kms"
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/metrics"
 	"github.com/drakkan/sftpgo/version"
@@ -34,7 +36,7 @@ var (
 type GCSFs struct {
 	connectionID   string
 	localTempDir   string
-	config         GCSFsConfig
+	config         *GCSFsConfig
 	svc            *storage.Client
 	ctxTimeout     time.Duration
 	ctxLongTimeout time.Duration
@@ -50,20 +52,40 @@ func NewGCSFs(connectionID, localTempDir string, config GCSFsConfig) (Fs, error)
 	fs := &GCSFs{
 		connectionID:   connectionID,
 		localTempDir:   localTempDir,
-		config:         config,
+		config:         &config,
 		ctxTimeout:     30 * time.Second,
 		ctxLongTimeout: 300 * time.Second,
 	}
-	if err = ValidateGCSFsConfig(&fs.config, fs.config.CredentialFile); err != nil {
+	if err = fs.config.Validate(fs.config.CredentialFile); err != nil {
 		return fs, err
 	}
 	ctx := context.Background()
 	if fs.config.AutomaticCredentials > 0 {
 		fs.svc, err = storage.NewClient(ctx)
-	} else if len(fs.config.Credentials) > 0 {
-		fs.svc, err = storage.NewClient(ctx, option.WithCredentialsJSON(fs.config.Credentials))
+	} else if !fs.config.Credentials.IsEmpty() {
+		if fs.config.Credentials.IsEncrypted() {
+			err = fs.config.Credentials.Decrypt()
+			if err != nil {
+				return fs, err
+			}
+		}
+		fs.svc, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(fs.config.Credentials.GetPayload())))
 	} else {
-		fs.svc, err = storage.NewClient(ctx, option.WithCredentialsFile(fs.config.CredentialFile))
+		var creds []byte
+		creds, err = ioutil.ReadFile(fs.config.CredentialFile)
+		if err != nil {
+			return fs, err
+		}
+		secret := kms.NewEmptySecret()
+		err = json.Unmarshal(creds, secret)
+		if err != nil {
+			return fs, err
+		}
+		err = secret.Decrypt()
+		if err != nil {
+			return fs, err
+		}
+		fs.svc, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(secret.GetPayload())))
 	}
 	return fs, err
 }
@@ -80,7 +102,7 @@ func (fs *GCSFs) ConnectionID() string {
 
 // Stat returns a FileInfo describing the named file
 func (fs *GCSFs) Stat(name string) (os.FileInfo, error) {
-	var result FileInfo
+	var result *FileInfo
 	var err error
 	if name == "" || name == "." {
 		err := fs.checkIfBucketExists()
@@ -114,47 +136,14 @@ func (fs *GCSFs) Stat(name string) (os.FileInfo, error) {
 }
 
 func (fs *GCSFs) getStatCompat(name string) (os.FileInfo, error) {
-	var result FileInfo
-	prefix := fs.getPrefixForStat(name)
-	query := &storage.Query{Prefix: prefix, Delimiter: "/"}
-	err := query.SetAttrSelection(gcsDefaultFieldsSelection)
+	var result *FileInfo
+	attrs, err := fs.headObject(name + "/")
 	if err != nil {
-		return nil, err
+		return result, err
 	}
-	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
-	defer cancelFn()
-	bkt := fs.svc.Bucket(fs.config.Bucket)
-	it := bkt.Objects(ctx, query)
-	for {
-		attrs, err := it.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			metrics.GCSListObjectsCompleted(err)
-			return result, err
-		}
-		if attrs.Prefix != "" {
-			if fs.isEqual(attrs.Prefix, name) {
-				result = NewFileInfo(name, true, 0, time.Now(), false)
-				break
-			}
-		} else {
-			if !attrs.Deleted.IsZero() {
-				continue
-			}
-			if fs.isEqual(attrs.Name, name) {
-				isDir := strings.HasSuffix(attrs.Name, "/")
-				result = NewFileInfo(name, isDir, attrs.Size, attrs.Updated, false)
-				break
-			}
-		}
-	}
-	metrics.GCSListObjectsCompleted(nil)
-	if result.Name() == "" {
-		err = errors.New("404 no such file or directory")
-	}
-	return result, err
+	objSize := attrs.Size
+	objectModTime := attrs.Updated
+	return NewFileInfo(name, true, objSize, objectModTime, false), nil
 }
 
 // Lstat returns a FileInfo describing the named file
@@ -163,7 +152,7 @@ func (fs *GCSFs) Lstat(name string) (os.FileInfo, error) {
 }
 
 // Open opens the named file for reading
-func (fs *GCSFs) Open(name string, offset int64) (*os.File, *pipeat.PipeReaderAt, func(), error) {
+func (fs *GCSFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error) {
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
@@ -194,7 +183,7 @@ func (fs *GCSFs) Open(name string, offset int64) (*os.File, *pipeat.PipeReaderAt
 }
 
 // Create creates or opens the named file for writing
-func (fs *GCSFs) Create(name string, flag int) (*os.File, *PipeWriter, func(), error) {
+func (fs *GCSFs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
@@ -218,8 +207,12 @@ func (fs *GCSFs) Create(name string, flag int) (*os.File, *PipeWriter, func(), e
 	}
 	go func() {
 		defer cancelFn()
-		defer objectWriter.Close()
+
 		n, err := io.Copy(objectWriter, r)
+		closeErr := objectWriter.Close()
+		if err == nil {
+			err = closeErr
+		}
 		r.CloseWithError(err) //nolint:errcheck
 		p.Done(err)
 		fsLog(fs, logger.LevelDebug, "upload completed, path: %#v, readed bytes: %v, err: %v", name, n, err)
@@ -314,37 +307,34 @@ func (fs *GCSFs) Mkdir(name string) error {
 
 // Symlink creates source as a symbolic link to target.
 func (*GCSFs) Symlink(source, target string) error {
-	return errors.New("403 symlinks are not supported")
+	return ErrVfsUnsupported
 }
 
 // Readlink returns the destination of the named symbolic link
 func (*GCSFs) Readlink(name string) (string, error) {
-	return "", errors.New("403 readlink is not supported")
+	return "", ErrVfsUnsupported
 }
 
 // Chown changes the numeric uid and gid of the named file.
-// Silently ignored.
 func (*GCSFs) Chown(name string, uid int, gid int) error {
-	return nil
+	return ErrVfsUnsupported
 }
 
 // Chmod changes the mode of the named file to mode.
-// Silently ignored.
 func (*GCSFs) Chmod(name string, mode os.FileMode) error {
-	return nil
+	return ErrVfsUnsupported
 }
 
 // Chtimes changes the access and modification times of the named file.
-// Silently ignored.
 func (*GCSFs) Chtimes(name string, atime, mtime time.Time) error {
-	return errors.New("403 chtimes is not supported")
+	return ErrVfsUnsupported
 }
 
 // Truncate changes the size of the named file.
 // Truncate by path is not supported, while truncating an opened
 // file is handled inside base transfer
 func (*GCSFs) Truncate(name string, size int64) error {
-	return errors.New("403 truncate is not supported")
+	return ErrVfsUnsupported
 }
 
 // ReadDir reads the directory named by dirname and returns
@@ -455,6 +445,14 @@ func (*GCSFs) IsPermission(err error) bool {
 	return strings.Contains(err.Error(), "403")
 }
 
+// IsNotSupported returns true if the error indicate an unsupported operation
+func (*GCSFs) IsNotSupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	return err == ErrVfsUnsupported
+}
+
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *GCSFs) CheckRootPath(username string, uid int, gid int) bool {
 	// we need a local directory for temporary files
@@ -502,7 +500,7 @@ func (fs *GCSFs) ScanRootDirContents() (int, int64, error) {
 // GetDirSize returns the number of files and the size for a folder
 // including any subfolders
 func (*GCSFs) GetDirSize(dirname string) (int, int64, error) {
-	return 0, 0, errUnsupported
+	return 0, 0, ErrVfsUnsupported
 }
 
 // GetAtomicUploadPath returns the path to use for an atomic upload.
@@ -610,19 +608,6 @@ func (fs *GCSFs) resolve(name string, prefix string) (string, bool) {
 	return result, isDir
 }
 
-func (fs *GCSFs) isEqual(key string, virtualName string) bool {
-	if key == virtualName {
-		return true
-	}
-	if key == virtualName+"/" {
-		return true
-	}
-	if key+"/" == virtualName {
-		return true
-	}
-	return false
-}
-
 func (fs *GCSFs) checkIfBucketExists() error {
 	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
 	defer cancelFn()
@@ -685,19 +670,6 @@ func (fs *GCSFs) getPrefix(name string) string {
 	return prefix
 }
 
-func (fs *GCSFs) getPrefixForStat(name string) string {
-	prefix := path.Dir(name)
-	if prefix == "/" || prefix == "." || prefix == "" {
-		prefix = ""
-	} else {
-		prefix = strings.TrimPrefix(prefix, "/")
-		if !strings.HasSuffix(prefix, "/") {
-			prefix += "/"
-		}
-	}
-	return prefix
-}
-
 func (fs *GCSFs) headObject(name string) (*storage.ObjectAttrs, error) {
 	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
 	defer cancelFn()
@@ -716,4 +688,14 @@ func (fs *GCSFs) GetMimeType(name string) (string, error) {
 		return "", err
 	}
 	return attrs.ContentType, nil
+}
+
+// Close closes the fs
+func (fs *GCSFs) Close() error {
+	return nil
+}
+
+// GetAvailableDiskSize return the available size for the specified path
+func (*GCSFs) GetAvailableDiskSize(dirName string) (int64, error) {
+	return 0, errStorageSizeUnavailable
 }

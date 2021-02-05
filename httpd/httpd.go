@@ -1,65 +1,139 @@
 // Package httpd implements REST API and Web interface for SFTPGo.
-// REST API allows to manage users and quota and to get real time reports for the active connections
-// with possibility of forcibly closing a connection.
 // The OpenAPI 3 schema for the exposed API can be found inside the source tree:
-// https://github.com/drakkan/sftpgo/tree/master/api/schema/openapi.yaml
+// https://github.com/drakkan/sftpgo/blob/master/httpd/schema/openapi.yaml
 // A basic Web interface to manage users and connections is provided too
 package httpd
 
 import (
-	"crypto/tls"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi"
+	"github.com/go-chi/jwtauth"
 
 	"github.com/drakkan/sftpgo/common"
+	"github.com/drakkan/sftpgo/dataprovider"
+	"github.com/drakkan/sftpgo/ftpd"
 	"github.com/drakkan/sftpgo/logger"
+	"github.com/drakkan/sftpgo/sftpd"
 	"github.com/drakkan/sftpgo/utils"
+	"github.com/drakkan/sftpgo/webdavd"
 )
 
 const (
 	logSender                 = "httpd"
-	apiPrefix                 = "/api/v1"
-	activeConnectionsPath     = "/api/v1/connection"
-	quotaScanPath             = "/api/v1/quota_scan"
-	quotaScanVFolderPath      = "/api/v1/folder_quota_scan"
-	userPath                  = "/api/v1/user"
-	versionPath               = "/api/v1/version"
-	folderPath                = "/api/v1/folder"
-	providerStatusPath        = "/api/v1/providerstatus"
-	dumpDataPath              = "/api/v1/dumpdata"
-	loadDataPath              = "/api/v1/loaddata"
-	updateUsedQuotaPath       = "/api/v1/quota_update"
-	updateFolderUsedQuotaPath = "/api/v1/folder_quota_update"
-	metricsPath               = "/metrics"
-	pprofBasePath             = "/debug"
+	tokenPath                 = "/api/v2/token"
+	logoutPath                = "/api/v2/logout"
+	activeConnectionsPath     = "/api/v2/connections"
+	quotaScanPath             = "/api/v2/quota-scans"
+	quotaScanVFolderPath      = "/api/v2/folder-quota-scans"
+	userPath                  = "/api/v2/users"
+	versionPath               = "/api/v2/version"
+	folderPath                = "/api/v2/folders"
+	serverStatusPath          = "/api/v2/status"
+	dumpDataPath              = "/api/v2/dumpdata"
+	loadDataPath              = "/api/v2/loaddata"
+	updateUsedQuotaPath       = "/api/v2/quota-update"
+	updateFolderUsedQuotaPath = "/api/v2/folder-quota-update"
+	defenderBanTime           = "/api/v2/defender/bantime"
+	defenderUnban             = "/api/v2/defender/unban"
+	defenderScore             = "/api/v2/defender/score"
+	adminPath                 = "/api/v2/admins"
+	adminPwdPath              = "/api/v2/changepwd/admin"
+	healthzPath               = "/healthz"
 	webBasePath               = "/web"
+	webLoginPath              = "/web/login"
+	webLogoutPath             = "/web/logout"
 	webUsersPath              = "/web/users"
 	webUserPath               = "/web/user"
 	webConnectionsPath        = "/web/connections"
 	webFoldersPath            = "/web/folders"
 	webFolderPath             = "/web/folder"
+	webStatusPath             = "/web/status"
+	webAdminsPath             = "/web/admins"
+	webAdminPath              = "/web/admin"
+	webMaintenancePath        = "/web/maintenance"
+	webBackupPath             = "/web/backup"
+	webRestorePath            = "/web/restore"
+	webScanVFolderPath        = "/web/folder-quota-scans"
+	webQuotaScanPath          = "/web/quota-scans"
+	webChangeAdminPwdPath     = "/web/changepwd/admin"
+	webTemplateUser           = "/web/template/user"
+	webTemplateFolder         = "/web/template/folder"
 	webStaticFilesPath        = "/static"
 	// MaxRestoreSize defines the max size for the loaddata input file
 	MaxRestoreSize = 10485760 // 10 MB
 	maxRequestSize = 1048576  // 1MB
+	osWindows      = "windows"
 )
 
 var (
-	router      *chi.Mux
-	backupsPath string
-	httpAuth    httpAuthProvider
-	certMgr     *common.CertManager
+	backupsPath            string
+	certMgr                *common.CertManager
+	jwtTokensCleanupTicker *time.Ticker
+	jwtTokensCleanupDone   chan bool
+	invalidatedJWTTokens   sync.Map
+	csrfTokenAuth          *jwtauth.JWTAuth
 )
+
+// Binding defines the configuration for a network listener
+type Binding struct {
+	// The address to listen on. A blank value means listen on all available network interfaces.
+	Address string `json:"address" mapstructure:"address"`
+	// The port used for serving requests
+	Port int `json:"port" mapstructure:"port"`
+	// Enable the built-in admin interface.
+	// You have to define TemplatesPath and StaticFilesPath for this to work
+	EnableWebAdmin bool `json:"enable_web_admin" mapstructure:"enable_web_admin"`
+	// you also need to provide a certificate for enabling HTTPS
+	EnableHTTPS bool `json:"enable_https" mapstructure:"enable_https"`
+	// set to 1 to require client certificate authentication in addition to basic auth.
+	// You need to define at least a certificate authority for this to work
+	ClientAuthType int `json:"client_auth_type" mapstructure:"client_auth_type"`
+}
+
+// GetAddress returns the binding address
+func (b *Binding) GetAddress() string {
+	return fmt.Sprintf("%s:%d", b.Address, b.Port)
+}
+
+// IsValid returns true if the binding is valid
+func (b *Binding) IsValid() bool {
+	if b.Port > 0 {
+		return true
+	}
+	if filepath.IsAbs(b.Address) && runtime.GOOS != osWindows {
+		return true
+	}
+	return false
+}
+
+type defenderStatus struct {
+	IsActive bool `json:"is_active"`
+}
+
+// ServicesStatus keep the state of the running services
+type ServicesStatus struct {
+	SSH          sftpd.ServiceStatus         `json:"ssh"`
+	FTP          ftpd.ServiceStatus          `json:"ftp"`
+	WebDAV       webdavd.ServiceStatus       `json:"webdav"`
+	DataProvider dataprovider.ProviderStatus `json:"data_provider"`
+	Defender     defenderStatus              `json:"defender"`
+}
 
 // Conf httpd daemon configuration
 type Conf struct {
-	// The port used for serving HTTP requests. 0 disable the HTTP server. Default: 8080
+	// Addresses and ports to bind to
+	Bindings []Binding `json:"bindings" mapstructure:"bindings"`
+	// Deprecated: please use Bindings
 	BindPort int `json:"bind_port" mapstructure:"bind_port"`
-	// The address to listen on. A blank value means listen on all available network interfaces. Default: "127.0.0.1"
+	// Deprecated: please use Bindings
 	BindAddress string `json:"bind_address" mapstructure:"bind_address"`
 	// Path to the HTML web templates. This can be an absolute path or a path relative to the config dir
 	TemplatesPath string `json:"templates_path" mapstructure:"templates_path"`
@@ -68,18 +142,17 @@ type Conf struct {
 	StaticFilesPath string `json:"static_files_path" mapstructure:"static_files_path"`
 	// Path to the backup directory. This can be an absolute path or a path relative to the config dir
 	BackupsPath string `json:"backups_path" mapstructure:"backups_path"`
-	// Path to a file used to store usernames and password for basic authentication.
-	// This can be an absolute path or a path relative to the config dir.
-	// We support HTTP basic authentication and the file format must conform to the one generated using the Apache
-	// htpasswd tool. The supported password formats are bcrypt ($2y$ prefix) and md5 crypt ($apr1$ prefix).
-	// If empty HTTP authentication is disabled
-	AuthUserFile string `json:"auth_user_file" mapstructure:"auth_user_file"`
 	// If files containing a certificate and matching private key for the server are provided the server will expect
 	// HTTPS connections.
 	// Certificate and key files can be reloaded on demand sending a "SIGHUP" signal on Unix based systems and a
 	// "paramchange" request to the running service on Windows.
 	CertificateFile    string `json:"certificate_file" mapstructure:"certificate_file"`
 	CertificateKeyFile string `json:"certificate_key_file" mapstructure:"certificate_key_file"`
+	// CACertificates defines the set of root certificate authorities to be used to verify client certificates.
+	CACertificates []string `json:"ca_certificates" mapstructure:"ca_certificates"`
+	// CARevocationLists defines a set a revocation lists, one for each root CA, to be used to check
+	// if a client certificate has been revoked
+	CARevocationLists []string `json:"ca_revocation_lists" mapstructure:"ca_revocation_lists"`
 }
 
 type apiResponse struct {
@@ -87,25 +160,30 @@ type apiResponse struct {
 	Message string `json:"message"`
 }
 
+// ShouldBind returns true if there is at least a valid binding
+func (c *Conf) ShouldBind() bool {
+	for _, binding := range c.Bindings {
+		if binding.IsValid() {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Initialize configures and starts the HTTP server
-func (c Conf) Initialize(configDir string, enableProfiler bool) error {
-	var err error
+func (c *Conf) Initialize(configDir string) error {
 	logger.Debug(logSender, "", "initializing HTTP server with config %+v", c)
 	backupsPath = getConfigPath(c.BackupsPath, configDir)
 	staticFilesPath := getConfigPath(c.StaticFilesPath, configDir)
 	templatesPath := getConfigPath(c.TemplatesPath, configDir)
-	enableWebAdmin := len(staticFilesPath) > 0 || len(templatesPath) > 0
-	if len(backupsPath) == 0 {
+	enableWebAdmin := staticFilesPath != "" || templatesPath != ""
+	if backupsPath == "" {
 		return fmt.Errorf("Required directory is invalid, backup path %#v", backupsPath)
 	}
-	if enableWebAdmin && (len(staticFilesPath) == 0 || len(templatesPath) == 0) {
+	if enableWebAdmin && (staticFilesPath == "" || templatesPath == "") {
 		return fmt.Errorf("Required directory is invalid, static file path: %#v template path: %#v",
 			staticFilesPath, templatesPath)
-	}
-	authUserFile := getConfigPath(c.AuthUserFile, configDir)
-	httpAuth, err = newBasicAuthProvider(authUserFile)
-	if err != nil {
-		return err
 	}
 	certificateFile := getConfigPath(c.CertificateFile, configDir)
 	certificateKeyFile := getConfigPath(c.CertificateKeyFile, configDir)
@@ -114,34 +192,50 @@ func (c Conf) Initialize(configDir string, enableProfiler bool) error {
 	} else {
 		logger.Info(logSender, "", "built-in web interface disabled, please set templates_path and static_files_path to enable it")
 	}
-	initializeRouter(staticFilesPath, enableProfiler, enableWebAdmin)
-	httpServer := &http.Server{
-		Addr:           fmt.Sprintf("%s:%d", c.BindAddress, c.BindPort),
-		Handler:        router,
-		ReadTimeout:    60 * time.Second,
-		WriteTimeout:   60 * time.Second,
-		IdleTimeout:    120 * time.Second,
-		MaxHeaderBytes: 1 << 16, // 64KB
-	}
-	if len(certificateFile) > 0 && len(certificateKeyFile) > 0 {
-		certMgr, err = common.NewCertManager(certificateFile, certificateKeyFile, logSender)
+	if certificateFile != "" && certificateKeyFile != "" {
+		mgr, err := common.NewCertManager(certificateFile, certificateKeyFile, configDir, logSender)
 		if err != nil {
 			return err
 		}
-		config := &tls.Config{
-			GetCertificate: certMgr.GetCertificateFunc(),
-			MinVersion:     tls.VersionTLS12,
+		mgr.SetCACertificates(c.CACertificates)
+		if err := mgr.LoadRootCAs(); err != nil {
+			return err
 		}
-		httpServer.TLSConfig = config
-		return httpServer.ListenAndServeTLS("", "")
+		mgr.SetCARevocationLists(c.CARevocationLists)
+		if err := mgr.LoadCRLs(); err != nil {
+			return err
+		}
+		certMgr = mgr
 	}
-	return httpServer.ListenAndServe()
+
+	csrfTokenAuth = jwtauth.New("HS256", utils.GenerateRandomBytes(32), nil)
+
+	exitChannel := make(chan error, 1)
+
+	for _, binding := range c.Bindings {
+		if !binding.IsValid() {
+			continue
+		}
+
+		go func(b Binding) {
+			server := newHttpdServer(b, staticFilesPath, enableWebAdmin)
+
+			exitChannel <- server.listenAndServe()
+		}(binding)
+	}
+
+	startJWTTokensCleanupTicker(tokenDuration)
+	return <-exitChannel
 }
 
-// ReloadTLSCertificate reloads the TLS certificate and key from the configured paths
-func ReloadTLSCertificate() error {
+func isWebAdminRequest(r *http.Request) bool {
+	return strings.HasPrefix(r.RequestURI, webBasePath+"/")
+}
+
+// ReloadCertificateMgr reloads the certificate manager
+func ReloadCertificateMgr() error {
 	if certMgr != nil {
-		return certMgr.LoadCertificate(logSender)
+		return certMgr.Reload()
 	}
 	return nil
 }
@@ -150,8 +244,93 @@ func getConfigPath(name, configDir string) string {
 	if !utils.IsFileInputValid(name) {
 		return ""
 	}
-	if len(name) > 0 && !filepath.IsAbs(name) {
+	if name != "" && !filepath.IsAbs(name) {
 		return filepath.Join(configDir, name)
 	}
 	return name
+}
+
+func getServicesStatus() ServicesStatus {
+	status := ServicesStatus{
+		SSH:          sftpd.GetStatus(),
+		FTP:          ftpd.GetStatus(),
+		WebDAV:       webdavd.GetStatus(),
+		DataProvider: dataprovider.GetProviderStatus(),
+		Defender: defenderStatus{
+			IsActive: common.Config.DefenderConfig.Enabled,
+		},
+	}
+	return status
+}
+
+func getURLParam(r *http.Request, key string) string {
+	v := chi.URLParam(r, key)
+	unescaped, err := url.PathUnescape(v)
+	if err != nil {
+		return v
+	}
+	return unescaped
+}
+
+func fileServer(r chi.Router, path string, root http.FileSystem) {
+	if path != "/" && path[len(path)-1] != '/' {
+		r.Get(path, http.RedirectHandler(path+"/", http.StatusMovedPermanently).ServeHTTP)
+		path += "/"
+	}
+	path += "*"
+
+	r.Get(path, func(w http.ResponseWriter, r *http.Request) {
+		rctx := chi.RouteContext(r.Context())
+		pathPrefix := strings.TrimSuffix(rctx.RoutePattern(), "/*")
+		fs := http.StripPrefix(pathPrefix, http.FileServer(root))
+		fs.ServeHTTP(w, r)
+	})
+}
+
+// GetHTTPRouter returns an HTTP handler suitable to use for test cases
+func GetHTTPRouter() http.Handler {
+	b := Binding{
+		Address:        "",
+		Port:           8080,
+		EnableWebAdmin: true,
+	}
+	server := newHttpdServer(b, "../static", true)
+	server.initializeRouter()
+	return server.router
+}
+
+// the ticker cannot be started/stopped from multiple goroutines
+func startJWTTokensCleanupTicker(duration time.Duration) {
+	stopJWTTokensCleanupTicker()
+	jwtTokensCleanupTicker = time.NewTicker(duration)
+	jwtTokensCleanupDone = make(chan bool)
+
+	go func() {
+		for {
+			select {
+			case <-jwtTokensCleanupDone:
+				return
+			case <-jwtTokensCleanupTicker.C:
+				cleanupExpiredJWTTokens()
+			}
+		}
+	}()
+}
+
+func stopJWTTokensCleanupTicker() {
+	if jwtTokensCleanupTicker != nil {
+		jwtTokensCleanupTicker.Stop()
+		jwtTokensCleanupDone <- true
+		jwtTokensCleanupTicker = nil
+	}
+}
+
+func cleanupExpiredJWTTokens() {
+	invalidatedJWTTokens.Range(func(key, value interface{}) bool {
+		exp, ok := value.(time.Time)
+		if !ok || exp.Before(time.Now().UTC()) {
+			invalidatedJWTTokens.Delete(key)
+		}
+		return true
+	})
 }

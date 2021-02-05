@@ -24,7 +24,6 @@ import (
 
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/metrics"
-	"github.com/drakkan/sftpgo/utils"
 	"github.com/drakkan/sftpgo/version"
 )
 
@@ -38,7 +37,7 @@ var maxTryTimeout = time.Hour * 24 * 365
 type AzureBlobFs struct {
 	connectionID   string
 	localTempDir   string
-	config         AzBlobFsConfig
+	config         *AzBlobFsConfig
 	svc            *azblob.ServiceURL
 	containerURL   azblob.ContainerURL
 	ctxTimeout     time.Duration
@@ -54,19 +53,18 @@ func NewAzBlobFs(connectionID, localTempDir string, config AzBlobFsConfig) (Fs, 
 	fs := &AzureBlobFs{
 		connectionID:   connectionID,
 		localTempDir:   localTempDir,
-		config:         config,
+		config:         &config,
 		ctxTimeout:     30 * time.Second,
 		ctxLongTimeout: 300 * time.Second,
 	}
-	if err := ValidateAzBlobFsConfig(&fs.config); err != nil {
+	if err := fs.config.Validate(); err != nil {
 		return fs, err
 	}
-	if fs.config.AccountKey != "" {
-		accountKey, err := utils.DecryptData(fs.config.AccountKey)
+	if fs.config.AccountKey.IsEncrypted() {
+		err := fs.config.AccountKey.Decrypt()
 		if err != nil {
 			return fs, err
 		}
-		fs.config.AccountKey = accountKey
 	}
 	fs.setConfigDefaults()
 
@@ -106,7 +104,7 @@ func NewAzBlobFs(connectionID, localTempDir string, config AzBlobFsConfig) (Fs, 
 		return fs, nil
 	}
 
-	credential, err := azblob.NewSharedKeyCredential(fs.config.AccountName, fs.config.AccountKey)
+	credential, err := azblob.NewSharedKeyCredential(fs.config.AccountName, fs.config.AccountKey.GetPayload())
 	if err != nil {
 		return fs, fmt.Errorf("invalid credentials: %v", err)
 	}
@@ -189,14 +187,15 @@ func (fs *AzureBlobFs) Lstat(name string) (os.FileInfo, error) {
 }
 
 // Open opens the named file for reading
-func (fs *AzureBlobFs) Open(name string, offset int64) (*os.File, *pipeat.PipeReaderAt, func(), error) {
+func (fs *AzureBlobFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error) {
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	blobBlockURL := fs.containerURL.NewBlockBlobURL(name)
 	ctx, cancelFn := context.WithCancel(context.Background())
-	blobDownloadResponse, err := blobBlockURL.Download(ctx, offset, azblob.CountToEnd, azblob.BlobAccessConditions{}, false)
+	blobDownloadResponse, err := blobBlockURL.Download(ctx, offset, azblob.CountToEnd, azblob.BlobAccessConditions{}, false,
+		azblob.ClientProvidedKeyOptions{})
 	if err != nil {
 		r.Close()
 		w.Close()
@@ -221,7 +220,7 @@ func (fs *AzureBlobFs) Open(name string, offset int64) (*os.File, *pipeat.PipeRe
 }
 
 // Create creates or opens the named file for writing
-func (fs *AzureBlobFs) Create(name string, flag int) (*os.File, *PipeWriter, func(), error) {
+func (fs *AzureBlobFs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
@@ -304,7 +303,7 @@ func (fs *AzureBlobFs) Rename(source, target string) error {
 	for copyStatus == azblob.CopyStatusPending {
 		// Poll until the copy is complete.
 		time.Sleep(500 * time.Millisecond)
-		propertiesResp, err := dstBlobURL.GetProperties(ctx, azblob.BlobAccessConditions{})
+		propertiesResp, err := dstBlobURL.GetProperties(ctx, azblob.BlobAccessConditions{}, azblob.ClientProvidedKeyOptions{})
 		if err != nil {
 			// A GetProperties failure may be transient, so allow a couple
 			// of them before giving up.
@@ -361,37 +360,34 @@ func (fs *AzureBlobFs) Mkdir(name string) error {
 
 // Symlink creates source as a symbolic link to target.
 func (*AzureBlobFs) Symlink(source, target string) error {
-	return errors.New("403 symlinks are not supported")
+	return ErrVfsUnsupported
 }
 
 // Readlink returns the destination of the named symbolic link
 func (*AzureBlobFs) Readlink(name string) (string, error) {
-	return "", errors.New("403 readlink is not supported")
+	return "", ErrVfsUnsupported
 }
 
 // Chown changes the numeric uid and gid of the named file.
-// Silently ignored.
 func (*AzureBlobFs) Chown(name string, uid int, gid int) error {
-	return nil
+	return ErrVfsUnsupported
 }
 
 // Chmod changes the mode of the named file to mode.
-// Silently ignored.
 func (*AzureBlobFs) Chmod(name string, mode os.FileMode) error {
-	return nil
+	return ErrVfsUnsupported
 }
 
 // Chtimes changes the access and modification times of the named file.
-// Silently ignored.
 func (*AzureBlobFs) Chtimes(name string, atime, mtime time.Time) error {
-	return errors.New("403 chtimes is not supported")
+	return ErrVfsUnsupported
 }
 
 // Truncate changes the size of the named file.
 // Truncate by path is not supported, while truncating an opened
 // file is handled inside base transfer
 func (*AzureBlobFs) Truncate(name string, size int64) error {
-	return errors.New("403 truncate is not supported")
+	return ErrVfsUnsupported
 }
 
 // ReadDir reads the directory named by dirname and returns
@@ -519,6 +515,14 @@ func (*AzureBlobFs) IsPermission(err error) bool {
 	return strings.Contains(err.Error(), "403")
 }
 
+// IsNotSupported returns true if the error indicate an unsupported operation
+func (*AzureBlobFs) IsNotSupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	return err == ErrVfsUnsupported
+}
+
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *AzureBlobFs) CheckRootPath(username string, uid int, gid int) bool {
 	// we need a local directory for temporary files
@@ -575,7 +579,7 @@ func (fs *AzureBlobFs) ScanRootDirContents() (int, int64, error) {
 // GetDirSize returns the number of files and the size for a folder
 // including any subfolders
 func (*AzureBlobFs) GetDirSize(dirname string) (int, int64, error) {
-	return 0, 0, errUnsupported
+	return 0, 0, ErrVfsUnsupported
 }
 
 // GetAtomicUploadPath returns the path to use for an atomic upload.
@@ -678,7 +682,7 @@ func (fs *AzureBlobFs) headObject(name string) (*azblob.BlobGetPropertiesRespons
 	defer cancelFn()
 
 	blobBlockURL := fs.containerURL.NewBlockBlobURL(name)
-	response, err := blobBlockURL.GetProperties(ctx, azblob.BlobAccessConditions{})
+	response, err := blobBlockURL.GetProperties(ctx, azblob.BlobAccessConditions{}, azblob.ClientProvidedKeyOptions{})
 	metrics.AZHeadObjectCompleted(err)
 	return response, err
 }
@@ -690,6 +694,16 @@ func (fs *AzureBlobFs) GetMimeType(name string) (string, error) {
 		return "", err
 	}
 	return response.ContentType(), nil
+}
+
+// Close closes the fs
+func (*AzureBlobFs) Close() error {
+	return nil
+}
+
+// GetAvailableDiskSize return the available size for the specified path
+func (*AzureBlobFs) GetAvailableDiskSize(dirName string) (int64, error) {
+	return 0, errStorageSizeUnavailable
 }
 
 func (fs *AzureBlobFs) isEqual(key string, virtualName string) bool {
@@ -815,7 +829,8 @@ func (fs *AzureBlobFs) handleMultipartUpload(ctx context.Context, reader io.Read
 			innerCtx, cancelFn := context.WithDeadline(poolCtx, time.Now().Add(blockCtxTimeout))
 			defer cancelFn()
 
-			_, err := blockBlobURL.StageBlock(innerCtx, blockID, bufferReader, azblob.LeaseAccessConditions{}, nil)
+			_, err := blockBlobURL.StageBlock(innerCtx, blockID, bufferReader, azblob.LeaseAccessConditions{}, nil,
+				azblob.ClientProvidedKeyOptions{})
 			if err != nil {
 				errOnce.Do(func() {
 					poolError = err
@@ -837,7 +852,7 @@ func (fs *AzureBlobFs) handleMultipartUpload(ctx context.Context, reader io.Read
 	}
 
 	_, err := blockBlobURL.CommitBlockList(ctx, blocks, httpHeaders, azblob.Metadata{}, azblob.BlobAccessConditions{},
-		azblob.AccessTierType(fs.config.AccessTier), nil)
+		azblob.AccessTierType(fs.config.AccessTier), nil, azblob.ClientProvidedKeyOptions{})
 	return err
 }
 

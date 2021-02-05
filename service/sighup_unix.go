@@ -7,10 +7,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/dataprovider"
 	"github.com/drakkan/sftpgo/ftpd"
 	"github.com/drakkan/sftpgo/httpd"
 	"github.com/drakkan/sftpgo/logger"
+	"github.com/drakkan/sftpgo/telemetry"
 	"github.com/drakkan/sftpgo/webdavd"
 )
 
@@ -24,17 +26,25 @@ func registerSigHup() {
 			if err != nil {
 				logger.Warn(logSender, "", "error reloading dataprovider configuration: %v", err)
 			}
-			err = httpd.ReloadTLSCertificate()
+			err = httpd.ReloadCertificateMgr()
 			if err != nil {
-				logger.Warn(logSender, "", "error reloading TLS certificate: %v", err)
+				logger.Warn(logSender, "", "error reloading cert manager: %v", err)
 			}
-			err = ftpd.ReloadTLSCertificate()
+			err = ftpd.ReloadCertificateMgr()
 			if err != nil {
-				logger.Warn(logSender, "", "error reloading FTPD TLS certificate: %v", err)
+				logger.Warn(logSender, "", "error reloading FTPD cert manager: %v", err)
 			}
-			err = webdavd.ReloadTLSCertificate()
+			err = webdavd.ReloadCertificateMgr()
 			if err != nil {
-				logger.Warn(logSender, "", "error reloading WebDav TLS certificate: %v", err)
+				logger.Warn(logSender, "", "error reloading WebDAV cert manager: %v", err)
+			}
+			err = telemetry.ReloadCertificateMgr()
+			if err != nil {
+				logger.Warn(logSender, "", "error reloading telemetry cert manager: %v", err)
+			}
+			err = common.ReloadDefender()
+			if err != nil {
+				logger.Warn(logSender, "", "error reloading defender's lists: %v", err)
 			}
 		}
 	}()

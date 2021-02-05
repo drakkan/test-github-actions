@@ -18,6 +18,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -25,12 +26,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/xid"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/drakkan/sftpgo/logger"
 )
 
-const logSender = "utils"
+const (
+	logSender = "utils"
+)
 
 // IsStringInSlice searches a string in a slice and returns true if the string is found
 func IsStringInSlice(obj string, list []string) bool {
@@ -51,6 +55,22 @@ func IsStringPrefixInSlice(obj string, list []string) bool {
 		}
 	}
 	return false
+}
+
+// RemoveDuplicates returns a new slice removing any duplicate element from the initial one
+func RemoveDuplicates(obj []string) []string {
+	if len(obj) == 0 {
+		return obj
+	}
+	result := make([]string, 0, len(obj))
+	seen := make(map[string]bool)
+	for _, item := range obj {
+		if _, ok := seen[item]; !ok {
+			result = append(result, item)
+		}
+		seen[item] = true
+	}
+	return result
 }
 
 // GetTimeAsMsSinceEpoch returns unix timestamp as milliseconds from a time struct
@@ -177,6 +197,9 @@ func DecryptData(data string) (string, error) {
 		return result, err
 	}
 	nonceSize := gcm.NonceSize()
+	if len(encrypted) < nonceSize {
+		return result, errors.New("malformed ciphertext")
+	}
 	nonce, ciphertext := encrypted[:nonceSize], encrypted[nonceSize:]
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
@@ -361,4 +384,55 @@ func createDirPathIfMissing(file string, perm os.FileMode) error {
 		}
 	}
 	return nil
+}
+
+// GenerateRandomBytes generates the secret to use for JWT auth
+func GenerateRandomBytes(length int) []byte {
+	b := make([]byte, length)
+	_, err := io.ReadFull(rand.Reader, b)
+	if err != nil {
+		return b
+	}
+
+	b = xid.New().Bytes()
+	for len(b) < length {
+		b = append(b, xid.New().Bytes()...)
+	}
+
+	return b[:length]
+}
+
+// HTTPListenAndServe is a wrapper for ListenAndServe that support both tcp
+// and Unix-domain sockets
+func HTTPListenAndServe(srv *http.Server, address string, port int, isTLS bool, logSender string) error {
+	var listener net.Listener
+	var err error
+
+	if filepath.IsAbs(address) && runtime.GOOS != "windows" {
+		if !IsFileInputValid(address) {
+			return fmt.Errorf("invalid socket address %#v", address)
+		}
+		err = createDirPathIfMissing(address, os.ModePerm)
+		if err != nil {
+			logger.ErrorToConsole("error creating Unix-domain socket parent dir: %v", err)
+			logger.Error(logSender, "", "error creating Unix-domain socket parent dir: %v", err)
+		}
+		os.Remove(address)
+
+		listener, err = net.Listen("unix", address)
+	} else {
+		listener, err = net.Listen("tcp", fmt.Sprintf("%s:%d", address, port))
+	}
+	if err != nil {
+		return err
+	}
+
+	logger.Info(logSender, "", "server listener registered, address: %v TLS enabled: %v", listener.Addr().String(), isTLS)
+
+	defer listener.Close()
+
+	if isTLS {
+		return srv.ServeTLS(listener, "", "")
+	}
+	return srv.Serve(listener)
 }

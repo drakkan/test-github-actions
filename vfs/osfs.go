@@ -12,6 +12,7 @@ import (
 
 	"github.com/eikenb/pipeat"
 	"github.com/rs/xid"
+	"github.com/shirou/gopsutil/v3/disk"
 
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/utils"
@@ -81,13 +82,13 @@ func (fs *OsFs) Lstat(name string) (os.FileInfo, error) {
 }
 
 // Open opens the named file for reading
-func (*OsFs) Open(name string, offset int64) (*os.File, *pipeat.PipeReaderAt, func(), error) {
+func (*OsFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error) {
 	f, err := os.Open(name)
 	return f, nil, nil, err
 }
 
 // Create creates or opens the named file for writing
-func (*OsFs) Create(name string, flag int) (*os.File, *PipeWriter, func(), error) {
+func (*OsFs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
 	var err error
 	var f *os.File
 	if flag == 0 {
@@ -185,6 +186,14 @@ func (*OsFs) IsPermission(err error) bool {
 	return os.IsPermission(err)
 }
 
+// IsNotSupported returns true if the error indicate an unsupported operation
+func (*OsFs) IsNotSupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	return err == ErrVfsUnsupported
+}
+
 // CheckRootPath creates the root directory if it does not exists
 func (fs *OsFs) CheckRootPath(username string, uid int, gid int) bool {
 	var err error
@@ -207,8 +216,8 @@ func (fs *OsFs) CheckRootPath(username string, uid int, gid int) bool {
 	return (err == nil)
 }
 
-// ScanRootDirContents returns the number of files contained in a directory and
-// their size
+// ScanRootDirContents returns the number of files contained in the root
+// directory and their size
 func (fs *OsFs) ScanRootDirContents() (int, int64, error) {
 	numFiles, size, err := fs.GetDirSize(fs.rootDir)
 	for _, v := range fs.virtualFolders {
@@ -283,14 +292,15 @@ func (fs *OsFs) ResolvePath(sftpPath string) (string, error) {
 		// path chain until we hit a directory that _does_ exist and can be validated.
 		_, err = fs.findFirstExistingDir(r, basePath)
 		if err != nil {
-			fsLog(fs, logger.LevelWarn, "error resolving non-existent path: %#v", err)
+			fsLog(fs, logger.LevelWarn, "error resolving non-existent path %#v", err)
 		}
 		return r, err
 	}
 
 	err = fs.isSubDir(p, basePath)
 	if err != nil {
-		fsLog(fs, logger.LevelWarn, "Invalid path resolution, dir: %#v outside user home: %#v err: %v", p, fs.rootDir, err)
+		fsLog(fs, logger.LevelWarn, "Invalid path resolution, dir %#v original path %#v resolved %#v err: %v",
+			p, sftpPath, r, err)
 	}
 	return r, err
 }
@@ -419,13 +429,11 @@ func (fs *OsFs) isSubDir(sub, rootPath string) error {
 		return nil
 	}
 	if len(sub) < len(parent) {
-		err = fmt.Errorf("path %#v is not inside: %#v", sub, parent)
-		fsLog(fs, logger.LevelWarn, "error: %v ", err)
+		err = fmt.Errorf("path %#v is not inside %#v", sub, parent)
 		return err
 	}
 	if !strings.HasPrefix(sub, parent+string(os.PathSeparator)) {
-		err = fmt.Errorf("path %#v is not inside: %#v", sub, parent)
-		fsLog(fs, logger.LevelWarn, "error: %v ", err)
+		err = fmt.Errorf("path %#v is not inside %#v", sub, parent)
 		return err
 	}
 	return nil
@@ -464,4 +472,18 @@ func (fs *OsFs) GetMimeType(name string) (string, error) {
 	// Rewind file.
 	_, err = f.Seek(0, io.SeekStart)
 	return ctype, err
+}
+
+// Close closes the fs
+func (*OsFs) Close() error {
+	return nil
+}
+
+// GetAvailableDiskSize return the available size for the specified path
+func (*OsFs) GetAvailableDiskSize(dirName string) (int64, error) {
+	usage, err := disk.Usage(dirName)
+	if err != nil {
+		return 0, err
+	}
+	return int64(usage.Free), nil
 }

@@ -25,9 +25,7 @@ RUN set -xe && \
 
 FROM debian:buster-slim
 
-RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates mime-support && apt-get clean
-
-SHELL ["/bin/bash", "-c"]
+RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates mime-support && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /etc/sftpgo /var/lib/sftpgo /usr/share/sftpgo /srv/sftpgo
 
@@ -35,9 +33,6 @@ RUN groupadd --system -g 1000 sftpgo && \
     useradd --system --gid sftpgo --no-create-home \
     --home-dir /var/lib/sftpgo --shell /usr/sbin/nologin \
     --comment "SFTPGo user" --uid 1000 sftpgo
-
-# Install some optional packages used by SFTPGo features
-RUN apt-get update && apt-get install --no-install-recommends -y git rsync && apt-get clean
 
 COPY --from=builder /workspace/sftpgo.json /etc/sftpgo/sftpgo.json
 COPY --from=builder /workspace/templates /usr/share/sftpgo/templates
@@ -55,11 +50,11 @@ RUN sed -i "s|\"users_base_dir\": \"\",|\"users_base_dir\": \"/srv/sftpgo/data\"
     sed -i "s|\"backups\"|\"/srv/sftpgo/backups\"|" /etc/sftpgo/sftpgo.json && \
     sed -i "s|\"bind_address\": \"127.0.0.1\",|\"bind_address\": \"\",|" /etc/sftpgo/sftpgo.json
 
+COPY ./docker/scripts/entrypoint.sh /docker-entrypoint.sh
+
 RUN chown -R sftpgo:sftpgo /etc/sftpgo && chown sftpgo:sftpgo /var/lib/sftpgo /srv/sftpgo
 
 WORKDIR /var/lib/sftpgo
 USER 1000:1000
 
-VOLUME [ "/var/lib/sftpgo", "/srv/sftpgo" ]
-
-CMD sftpgo serve
+CMD ["sftpgo", "serve"]

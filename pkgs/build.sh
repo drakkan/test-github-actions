@@ -1,6 +1,6 @@
 #!/bin/bash
 
-NFPM_VERSION=1.9.0
+NFPM_VERSION=2.2.3
 NFPM_ARCH=${NFPM_ARCH:-amd64}
 if [ -z ${SFTPGO_VERSION} ]
 then
@@ -35,10 +35,8 @@ platform: "linux"
 version: ${VERSION}
 release: 1
 section: "net"
-priority: "extra"
+priority: "optional"
 maintainer: "Nicola Murino <nicola.murino@gmail.com>"
-provides:
-  - sftpgo
 description: |
   Fully featured and highly configurable SFTP server
   SFTPGo has optional FTP/S and WebDAV support.
@@ -47,17 +45,31 @@ description: |
 vendor: "SFTPGo"
 homepage: "https://github.com/drakkan/sftpgo"
 license: "GPL-3.0"
-files:
-  ${BASE_DIR}/sftpgo${BIN_SUFFIX}: "/usr/bin/sftpgo"
-  ./sftpgo-completion.bash: "/usr/share/bash-completion/completions/sftpgo"
-  ./man1/*: "/usr/share/man/man1/"
-  ${BASE_DIR}/init/sftpgo.service: "/lib/systemd/system/sftpgo.service"
-  ${BASE_DIR}/examples/rest-api-cli/sftpgo_api_cli: "/usr/bin/sftpgo_api_cli"
-  ${BASE_DIR}/templates/*: "/usr/share/sftpgo/templates/"
-  ${BASE_DIR}/static/**/*: "/usr/share/sftpgo/static/"
+provides:
+  - sftpgo
+contents:
+  - src: "${BASE_DIR}/sftpgo${BIN_SUFFIX}"
+    dst: "/usr/bin/sftpgo"
 
-config_files:
-  ./sftpgo.json: "/etc/sftpgo/sftpgo.json"
+  - src: "./sftpgo-completion.bash"
+    dst: "/usr/share/bash-completion/completions/sftpgo"
+
+  - src: "./man1/*"
+    dst: "/usr/share/man/man1/"
+
+  - src: "${BASE_DIR}/init/sftpgo.service"
+    dst: "/lib/systemd/system/sftpgo.service"
+
+  - src: "${BASE_DIR}/templates/*"
+    dst: "/usr/share/sftpgo/templates/"
+
+  - src: "${BASE_DIR}/static/**/*"
+    dst: "/usr/share/sftpgo/static/"
+
+  - src: "./sftpgo.json"
+    dst: "/etc/sftpgo/sftpgo.json"
+    type: "config|noreplace"
+
 
 empty_folders:
   - /var/lib/sftpgo
@@ -67,8 +79,6 @@ overrides:
   deb:
     recommends:
       - bash-completion
-      - python3-requests
-      - python3-pygments
       - mime-support
     scripts:
       postinstall: ../scripts/deb/postinstall.sh
@@ -78,7 +88,6 @@ overrides:
     recommends:
       - bash-completion
       - mailcap
-      # centos 8 has python3-requests, centos 6/7 python-requests
     scripts:
       postinstall: ../scripts/rpm/postinstall
       preremove: ../scripts/rpm/preremove
@@ -87,16 +96,13 @@ overrides:
 rpm:
   compression: lzma
 
-  config_noreplace_files:
-    ./sftpgo.json: "/etc/sftpgo/sftpgo.json"
-
 EOF
 
 curl --retry 5 --retry-delay 2 --connect-timeout 10 -L -O \
   https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz
 tar xvf nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz nfpm
 chmod 755 nfpm
-mkdir deb
-./nfpm -f nfpm.yaml pkg -p deb -t deb
 mkdir rpm
 ./nfpm -f nfpm.yaml pkg -p rpm -t rpm
+mkdir deb
+./nfpm -f nfpm.yaml pkg -p deb -t deb

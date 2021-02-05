@@ -121,6 +121,9 @@ func (f *webDavFile) Stat() (os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	if vfs.IsCryptOsFs(f.Fs) {
+		info = f.Fs.(*vfs.CryptFs).ConvertFileInfo(info)
+	}
 	fi := &webDavFileInfo{
 		FileInfo:    info,
 		Fs:          f.Fs,
@@ -136,8 +139,6 @@ func (f *webDavFile) Read(p []byte) (n int, err error) {
 		return 0, errTransferAborted
 	}
 	if atomic.LoadInt32(&f.readTryed) == 0 {
-		atomic.StoreInt32(&f.readTryed, 1)
-
 		if !f.Connection.User.HasPerm(dataprovider.PermDownload, path.Dir(f.GetVirtualPath())) {
 			return 0, f.Connection.GetPermissionDeniedError()
 		}
@@ -146,6 +147,7 @@ func (f *webDavFile) Read(p []byte) (n int, err error) {
 			f.Connection.Log(logger.LevelWarn, "reading file %#v is not allowed", f.GetVirtualPath())
 			return 0, f.Connection.GetPermissionDeniedError()
 		}
+		atomic.StoreInt32(&f.readTryed, 1)
 	}
 
 	f.Connection.UpdateLastActivity()
@@ -211,6 +213,9 @@ func (f *webDavFile) updateStatInfo() error {
 	info, err := f.Fs.Stat(f.GetFsPath())
 	if err != nil {
 		return err
+	}
+	if vfs.IsCryptOsFs(f.Fs) {
+		info = f.Fs.(*vfs.CryptFs).ConvertFileInfo(info)
 	}
 	f.info = info
 	return nil

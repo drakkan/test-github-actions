@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -42,6 +43,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/drakkan/sftpgo/httpclient"
+	"github.com/drakkan/sftpgo/kms"
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/metrics"
 	"github.com/drakkan/sftpgo/utils"
@@ -59,6 +61,9 @@ const (
 	BoltDataProviderName = "bolt"
 	// MemoryDataProviderName name for memory provider
 	MemoryDataProviderName = "memory"
+	// DumpVersion defines the version for the dump.
+	// For restore/load we support the current version and the previous one
+	DumpVersion = 6
 
 	argonPwdPrefix            = "$argon2id$"
 	bcryptPwdPrefix           = "$2a$"
@@ -69,7 +74,6 @@ const (
 	md5cryptPwdPrefix         = "$1$"
 	md5cryptApr1PwdPrefix     = "$apr1$"
 	sha512cryptPwdPrefix      = "$6$"
-	manageUsersDisabledError  = "please set manage_users to 1 in your configuration to enable this method"
 	trackQuotaDisabledError   = "please enable track_quota in your configuration to use this method"
 	operationAdd              = "add"
 	operationUpdate           = "update"
@@ -102,7 +106,7 @@ var (
 	// ErrNoInitRequired defines the error returned by InitProvider if no inizialization/update is required
 	ErrNoInitRequired = errors.New("The data provider is already up to date")
 	// ErrInvalidCredentials defines the error to return if the supplied credentials are invalid
-	ErrInvalidCredentials = errors.New("Invalid credentials")
+	ErrInvalidCredentials = errors.New("invalid credentials")
 	webDAVUsersCache      sync.Map
 	config                Config
 	provider              Provider
@@ -119,8 +123,11 @@ var (
 	sqlTableUsers           = "users"
 	sqlTableFolders         = "folders"
 	sqlTableFoldersMapping  = "folders_mapping"
+	sqlTableAdmins          = "admins"
 	sqlTableSchemaVersion   = "schema_version"
 	argon2Params            *argon2id.Params
+	lastLoginMinDelay       = 10 * time.Minute
+	usernameRegex           = regexp.MustCompile("^[a-zA-Z0-9-_.~]+$")
 )
 
 type schemaVersion struct {
@@ -145,6 +152,13 @@ type UserActions struct {
 	ExecuteOn []string `json:"execute_on" mapstructure:"execute_on"`
 	// Absolute path to an external program or an HTTP URL
 	Hook string `json:"hook" mapstructure:"hook"`
+}
+
+// ProviderStatus defines the provider status
+type ProviderStatus struct {
+	Driver   string `json:"driver"`
+	IsActive bool   `json:"is_active"`
+	Error    string `json:"error"`
 }
 
 // Config provider configuration
@@ -173,8 +187,6 @@ type Config struct {
 	ConnectionString string `json:"connection_string" mapstructure:"connection_string"`
 	// prefix for SQL tables
 	SQLTablesPrefix string `json:"sql_tables_prefix" mapstructure:"sql_tables_prefix"`
-	// Set to 0 to disable users management, 1 to enable
-	ManageUsers int `json:"manage_users" mapstructure:"manage_users"`
 	// Set the preferred way to track users quota between the following choices:
 	// 0, disable quota tracking. REST API to scan user dir and update quota will do nothing
 	// 1, quota is updated each time a user upload or delete a file even if the user has no quota restrictions
@@ -265,6 +277,58 @@ type Config struct {
 type BackupData struct {
 	Users   []User                  `json:"users"`
 	Folders []vfs.BaseVirtualFolder `json:"folders"`
+	Admins  []Admin                 `json:"admins"`
+	Version int                     `json:"version"`
+}
+
+// HasFolder returns true if the folder with the given name is included
+func (d *BackupData) HasFolder(name string) bool {
+	for _, folder := range d.Folders {
+		if folder.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *BackupData) checkFolderNames() {
+	if len(d.Folders) == 0 {
+		return
+	}
+	if d.Folders[0].Name != "" {
+		return
+	}
+	logger.WarnToConsole("You are loading folders without a name, please update to the latest supported format. This compatibility layer will be removed soon.")
+	providerLog(logger.LevelWarn, "You are loading folders without a name, please update to the latest supported format. This compatibility layer will be removed soon.")
+	folders := make([]vfs.BaseVirtualFolder, 0, len(d.Folders))
+	for idx, folder := range d.Folders {
+		if folder.Name == "" {
+			folder.Name = fmt.Sprintf("Folder%v", idx)
+		}
+		folders = append(folders, folder)
+	}
+	d.Folders = folders
+	users := make([]User, 0, len(d.Users))
+	for _, user := range d.Users {
+		if len(user.VirtualFolders) > 0 {
+			vfolders := make([]vfs.VirtualFolder, 0, len(user.VirtualFolders))
+			for _, vfolder := range user.VirtualFolders {
+				if vfolder.Name == "" {
+					for _, f := range d.Folders {
+						if f.MappedPath == vfolder.MappedPath {
+							vfolder.Name = f.Name
+						}
+					}
+				}
+				if vfolder.Name != "" {
+					vfolders = append(vfolders, vfolder)
+				}
+			}
+			user.VirtualFolders = vfolders
+		}
+		users = append(users, user)
+	}
+	d.Users = users
 }
 
 type keyboardAuthHookRequest struct {
@@ -321,6 +385,13 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("Validation error: %s", e.err)
 }
 
+// NewValidationError returns a validation errors
+func NewValidationError(error string) *ValidationError {
+	return &ValidationError{
+		err: error,
+	}
+}
+
 // MethodDisabledError raised if a method is disabled in config file.
 // For example, if user management is disabled, this error is raised
 // every time a user operation is done using the REST API
@@ -339,7 +410,7 @@ type RecordNotFoundError struct {
 }
 
 func (e *RecordNotFoundError) Error() string {
-	return fmt.Sprintf("Not found: %s", e.err)
+	return fmt.Sprintf("not found: %s", e.err)
 }
 
 // GetQuotaTracking returns the configured mode for user's quota tracking
@@ -354,44 +425,60 @@ type Provider interface {
 	updateQuota(username string, filesAdd int, sizeAdd int64, reset bool) error
 	getUsedQuota(username string) (int, int64, error)
 	userExists(username string) (User, error)
-	addUser(user User) error
-	updateUser(user User) error
-	deleteUser(user User) error
-	getUsers(limit int, offset int, order string, username string) ([]User, error)
+	addUser(user *User) error
+	updateUser(user *User) error
+	deleteUser(user *User) error
+	getUsers(limit int, offset int, order string) ([]User, error)
 	dumpUsers() ([]User, error)
-	getUserByID(ID int64) (User, error)
 	updateLastLogin(username string) error
-	getFolders(limit, offset int, order, folderPath string) ([]vfs.BaseVirtualFolder, error)
-	getFolderByPath(mappedPath string) (vfs.BaseVirtualFolder, error)
-	addFolder(folder vfs.BaseVirtualFolder) error
-	deleteFolder(folder vfs.BaseVirtualFolder) error
-	updateFolderQuota(mappedPath string, filesAdd int, sizeAdd int64, reset bool) error
-	getUsedFolderQuota(mappedPath string) (int, int64, error)
+	getFolders(limit, offset int, order string) ([]vfs.BaseVirtualFolder, error)
+	getFolderByName(name string) (vfs.BaseVirtualFolder, error)
+	addFolder(folder *vfs.BaseVirtualFolder) error
+	updateFolder(folder *vfs.BaseVirtualFolder) error
+	deleteFolder(folder *vfs.BaseVirtualFolder) error
+	updateFolderQuota(name string, filesAdd int, sizeAdd int64, reset bool) error
+	getUsedFolderQuota(name string) (int, int64, error)
 	dumpFolders() ([]vfs.BaseVirtualFolder, error)
+	adminExists(username string) (Admin, error)
+	addAdmin(admin *Admin) error
+	updateAdmin(admin *Admin) error
+	deleteAdmin(admin *Admin) error
+	getAdmins(limit int, offset int, order string) ([]Admin, error)
+	dumpAdmins() ([]Admin, error)
+	validateAdminAndPass(username, password, ip string) (Admin, error)
 	checkAvailability() error
 	close() error
 	reloadConfig() error
 	initializeDatabase() error
 	migrateDatabase() error
+	revertDatabase(targetVersion int) error
 }
 
 // Initialize the data provider.
 // An error is returned if the configured driver is invalid or if the data provider cannot be initialized
-func Initialize(cnf Config, basePath string) error {
+func Initialize(cnf Config, basePath string, checkAdmins bool) error {
 	var err error
 	config = cnf
+
+	if filepath.IsAbs(config.CredentialsPath) {
+		credentialsDirPath = config.CredentialsPath
+	} else {
+		credentialsDirPath = filepath.Join(basePath, config.CredentialsPath)
+	}
 
 	if err = validateHooks(); err != nil {
 		return err
 	}
-	if !cnf.PreferDatabaseCredentials {
-		if err = validateCredentialsDir(basePath); err != nil {
-			return err
-		}
-	}
 	err = createProvider(basePath)
 	if err != nil {
 		return err
+	}
+	argon2Params = &argon2id.Params{
+		Memory:      cnf.PasswordHashing.Argon2Options.Memory,
+		Iterations:  cnf.PasswordHashing.Argon2Options.Iterations,
+		Parallelism: cnf.PasswordHashing.Argon2Options.Parallelism,
+		SaltLength:  16,
+		KeyLength:   32,
 	}
 	if cnf.UpdateMode == 0 {
 		err = provider.initializeDatabase()
@@ -408,15 +495,15 @@ func Initialize(cnf Config, basePath string) error {
 			providerLog(logger.LevelWarn, "database migration error: %v", err)
 			return err
 		}
+		if checkAdmins {
+			err = checkDefaultAdmin()
+			if err != nil {
+				providerLog(logger.LevelWarn, "check default admin error: %v", err)
+				return err
+			}
+		}
 	} else {
 		providerLog(logger.LevelInfo, "database initialization/migration skipped, manual mode is configured")
-	}
-	argon2Params = &argon2id.Params{
-		Memory:      cnf.PasswordHashing.Argon2Options.Memory,
-		Iterations:  cnf.PasswordHashing.Argon2Options.Iterations,
-		Parallelism: cnf.PasswordHashing.Argon2Options.Parallelism,
-		SaltLength:  16,
-		KeyLength:   32,
 	}
 	startAvailabilityTimer()
 	return nil
@@ -424,16 +511,16 @@ func Initialize(cnf Config, basePath string) error {
 
 func validateHooks() error {
 	var hooks []string
-	if len(config.PreLoginHook) > 0 && !strings.HasPrefix(config.PreLoginHook, "http") {
+	if config.PreLoginHook != "" && !strings.HasPrefix(config.PreLoginHook, "http") {
 		hooks = append(hooks, config.PreLoginHook)
 	}
-	if len(config.ExternalAuthHook) > 0 && !strings.HasPrefix(config.ExternalAuthHook, "http") {
+	if config.ExternalAuthHook != "" && !strings.HasPrefix(config.ExternalAuthHook, "http") {
 		hooks = append(hooks, config.ExternalAuthHook)
 	}
-	if len(config.PostLoginHook) > 0 && !strings.HasPrefix(config.PostLoginHook, "http") {
+	if config.PostLoginHook != "" && !strings.HasPrefix(config.PostLoginHook, "http") {
 		hooks = append(hooks, config.PostLoginHook)
 	}
-	if len(config.CheckPasswordHook) > 0 && !strings.HasPrefix(config.CheckPasswordHook, "http") {
+	if config.CheckPasswordHook != "" && !strings.HasPrefix(config.CheckPasswordHook, "http") {
 		hooks = append(hooks, config.CheckPasswordHook)
 	}
 
@@ -461,16 +548,38 @@ func validateSQLTablesPrefix() error {
 		sqlTableUsers = config.SQLTablesPrefix + sqlTableUsers
 		sqlTableFolders = config.SQLTablesPrefix + sqlTableFolders
 		sqlTableFoldersMapping = config.SQLTablesPrefix + sqlTableFoldersMapping
+		sqlTableAdmins = config.SQLTablesPrefix + sqlTableAdmins
 		sqlTableSchemaVersion = config.SQLTablesPrefix + sqlTableSchemaVersion
-		providerLog(logger.LevelDebug, "sql table for users %#v, folders %#v folders mapping %#v schema version %#v",
-			sqlTableUsers, sqlTableFolders, sqlTableFoldersMapping, sqlTableSchemaVersion)
+		providerLog(logger.LevelDebug, "sql table for users %#v, folders %#v folders mapping %#v admins %#v schema version %#v",
+			sqlTableUsers, sqlTableFolders, sqlTableFoldersMapping, sqlTableAdmins, sqlTableSchemaVersion)
 	}
 	return nil
+}
+
+func checkDefaultAdmin() error {
+	admins, err := provider.getAdmins(1, 0, OrderASC)
+	if err != nil {
+		return err
+	}
+	if len(admins) > 0 {
+		return nil
+	}
+	logger.Debug(logSender, "", "no admins found, try to create the default one")
+	// we need to create the default admin
+	admin := &Admin{}
+	admin.setDefaults()
+	return provider.addAdmin(admin)
 }
 
 // InitializeDatabase creates the initial database structure
 func InitializeDatabase(cnf Config, basePath string) error {
 	config = cnf
+
+	if filepath.IsAbs(config.CredentialsPath) {
+		credentialsDirPath = config.CredentialsPath
+	} else {
+		credentialsDirPath = filepath.Join(basePath, config.CredentialsPath)
+	}
 
 	err := createProvider(basePath)
 	if err != nil {
@@ -483,16 +592,42 @@ func InitializeDatabase(cnf Config, basePath string) error {
 	return provider.migrateDatabase()
 }
 
+// RevertDatabase restores schema and/or data to a previous version
+func RevertDatabase(cnf Config, basePath string, targetVersion int) error {
+	config = cnf
+
+	if filepath.IsAbs(config.CredentialsPath) {
+		credentialsDirPath = config.CredentialsPath
+	} else {
+		credentialsDirPath = filepath.Join(basePath, config.CredentialsPath)
+	}
+
+	err := createProvider(basePath)
+	if err != nil {
+		return err
+	}
+	err = provider.initializeDatabase()
+	if err != nil && err != ErrNoInitRequired {
+		return err
+	}
+	return provider.revertDatabase(targetVersion)
+}
+
+// CheckAdminAndPass validates the given admin and password connecting from ip
+func CheckAdminAndPass(username, password, ip string) (Admin, error) {
+	return provider.validateAdminAndPass(username, password, ip)
+}
+
 // CheckUserAndPass retrieves the SFTP user with the given username and password if a match is found or an error
 func CheckUserAndPass(username, password, ip, protocol string) (User, error) {
-	if len(config.ExternalAuthHook) > 0 && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&1 != 0) {
+	if config.ExternalAuthHook != "" && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&1 != 0) {
 		user, err := doExternalAuth(username, password, nil, "", ip, protocol)
 		if err != nil {
 			return user, err
 		}
 		return checkUserAndPass(user, password, ip, protocol)
 	}
-	if len(config.PreLoginHook) > 0 {
+	if config.PreLoginHook != "" {
 		user, err := executePreLoginHook(username, LoginMethodPassword, ip, protocol)
 		if err != nil {
 			return user, err
@@ -504,14 +639,14 @@ func CheckUserAndPass(username, password, ip, protocol string) (User, error) {
 
 // CheckUserAndPubKey retrieves the SFTP user with the given username and public key if a match is found or an error
 func CheckUserAndPubKey(username string, pubKey []byte, ip, protocol string) (User, string, error) {
-	if len(config.ExternalAuthHook) > 0 && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&2 != 0) {
+	if config.ExternalAuthHook != "" && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&2 != 0) {
 		user, err := doExternalAuth(username, "", pubKey, "", ip, protocol)
 		if err != nil {
 			return user, "", err
 		}
 		return checkUserAndPubKey(user, pubKey)
 	}
-	if len(config.PreLoginHook) > 0 {
+	if config.PreLoginHook != "" {
 		user, err := executePreLoginHook(username, SSHLoginMethodPublicKey, ip, protocol)
 		if err != nil {
 			return user, "", err
@@ -526,9 +661,9 @@ func CheckUserAndPubKey(username string, pubKey []byte, ip, protocol string) (Us
 func CheckKeyboardInteractiveAuth(username, authHook string, client ssh.KeyboardInteractiveChallenge, ip, protocol string) (User, error) {
 	var user User
 	var err error
-	if len(config.ExternalAuthHook) > 0 && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&4 != 0) {
+	if config.ExternalAuthHook != "" && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&4 != 0) {
 		user, err = doExternalAuth(username, "", nil, "1", ip, protocol)
-	} else if len(config.PreLoginHook) > 0 {
+	} else if config.PreLoginHook != "" {
 		user, err = executePreLoginHook(username, SSHLoginMethodKeyboardInteractive, ip, protocol)
 	} else {
 		user, err = provider.userExists(username)
@@ -541,10 +676,16 @@ func CheckKeyboardInteractiveAuth(username, authHook string, client ssh.Keyboard
 
 // UpdateLastLogin updates the last login fields for the given SFTP user
 func UpdateLastLogin(user User) error {
-	if config.ManageUsers == 0 {
-		return &MethodDisabledError{err: manageUsersDisabledError}
+	lastLogin := utils.GetTimeFromMsecSinceEpoch(user.LastLogin)
+	diff := -time.Until(lastLogin)
+	if diff < 0 || diff > lastLoginMinDelay {
+		err := provider.updateLastLogin(user.Username)
+		if err == nil {
+			updateWebDavCachedUserLastLogin(user.Username)
+		}
+		return err
 	}
-	return provider.updateLastLogin(user.Username)
+	return nil
 }
 
 // UpdateUserQuota updates the quota for the given SFTP user adding filesAdd and sizeAdd.
@@ -554,9 +695,6 @@ func UpdateUserQuota(user User, filesAdd int, sizeAdd int64, reset bool) error {
 		return &MethodDisabledError{err: trackQuotaDisabledError}
 	} else if config.TrackQuota == 2 && !reset && !user.HasQuotaRestrictions() {
 		return nil
-	}
-	if config.ManageUsers == 0 {
-		return &MethodDisabledError{err: manageUsersDisabledError}
 	}
 	if filesAdd == 0 && sizeAdd == 0 && !reset {
 		return nil
@@ -570,13 +708,10 @@ func UpdateVirtualFolderQuota(vfolder vfs.BaseVirtualFolder, filesAdd int, sizeA
 	if config.TrackQuota == 0 {
 		return &MethodDisabledError{err: trackQuotaDisabledError}
 	}
-	if config.ManageUsers == 0 {
-		return &MethodDisabledError{err: manageUsersDisabledError}
-	}
 	if filesAdd == 0 && sizeAdd == 0 && !reset {
 		return nil
 	}
-	return provider.updateFolderQuota(vfolder.MappedPath, filesAdd, sizeAdd, reset)
+	return provider.updateFolderQuota(vfolder.Name, filesAdd, sizeAdd, reset)
 }
 
 // GetUsedQuota returns the used quota for the given SFTP user.
@@ -588,55 +723,71 @@ func GetUsedQuota(username string) (int, int64, error) {
 }
 
 // GetUsedVirtualFolderQuota returns the used quota for the given virtual folder.
-func GetUsedVirtualFolderQuota(mappedPath string) (int, int64, error) {
+func GetUsedVirtualFolderQuota(name string) (int, int64, error) {
 	if config.TrackQuota == 0 {
 		return 0, 0, &MethodDisabledError{err: trackQuotaDisabledError}
 	}
-	return provider.getUsedFolderQuota(mappedPath)
+	return provider.getUsedFolderQuota(name)
 }
 
-// UserExists checks if the given SFTP username exists, returns an error if no match is found
+// AddAdmin adds a new SFTPGo admin
+func AddAdmin(admin *Admin) error {
+	return provider.addAdmin(admin)
+}
+
+// UpdateAdmin updates an existing SFTPGo admin
+func UpdateAdmin(admin *Admin) error {
+	return provider.updateAdmin(admin)
+}
+
+// DeleteAdmin deletes an existing SFTPGo admin
+func DeleteAdmin(username string) error {
+	admin, err := provider.adminExists(username)
+	if err != nil {
+		return err
+	}
+	return provider.deleteAdmin(&admin)
+}
+
+// AdminExists returns the given admins if it exists
+func AdminExists(username string) (Admin, error) {
+	return provider.adminExists(username)
+}
+
+// UserExists checks if the given SFTPGo username exists, returns an error if no match is found
 func UserExists(username string) (User, error) {
 	return provider.userExists(username)
 }
 
 // AddUser adds a new SFTPGo user.
-// ManageUsers configuration must be set to 1 to enable this method
-func AddUser(user User) error {
-	if config.ManageUsers == 0 {
-		return &MethodDisabledError{err: manageUsersDisabledError}
-	}
+func AddUser(user *User) error {
 	err := provider.addUser(user)
 	if err == nil {
-		go executeAction(operationAdd, user)
+		executeAction(operationAdd, user)
 	}
 	return err
 }
 
 // UpdateUser updates an existing SFTPGo user.
-// ManageUsers configuration must be set to 1 to enable this method
-func UpdateUser(user User) error {
-	if config.ManageUsers == 0 {
-		return &MethodDisabledError{err: manageUsersDisabledError}
-	}
+func UpdateUser(user *User) error {
 	err := provider.updateUser(user)
 	if err == nil {
 		RemoveCachedWebDAVUser(user.Username)
-		go executeAction(operationUpdate, user)
+		executeAction(operationUpdate, user)
 	}
 	return err
 }
 
 // DeleteUser deletes an existing SFTPGo user.
-// ManageUsers configuration must be set to 1 to enable this method
-func DeleteUser(user User) error {
-	if config.ManageUsers == 0 {
-		return &MethodDisabledError{err: manageUsersDisabledError}
+func DeleteUser(username string) error {
+	user, err := provider.userExists(username)
+	if err != nil {
+		return err
 	}
-	err := provider.deleteUser(user)
+	err = provider.deleteUser(&user)
 	if err == nil {
 		RemoveCachedWebDAVUser(user.Username)
-		go executeAction(operationDelete, user)
+		executeAction(operationDelete, &user)
 	}
 	return err
 }
@@ -648,42 +799,43 @@ func ReloadConfig() error {
 	return provider.reloadConfig()
 }
 
-// GetUsers returns an array of users respecting limit and offset and filtered by username exact match if not empty
-func GetUsers(limit, offset int, order string, username string) ([]User, error) {
-	return provider.getUsers(limit, offset, order, username)
+// GetAdmins returns an array of admins respecting limit and offset
+func GetAdmins(limit, offset int, order string) ([]Admin, error) {
+	return provider.getAdmins(limit, offset, order)
 }
 
-// GetUserByID returns the user with the given database ID if a match is found or an error
-func GetUserByID(ID int64) (User, error) {
-	return provider.getUserByID(ID)
+// GetUsers returns an array of users respecting limit and offset and filtered by username exact match if not empty
+func GetUsers(limit, offset int, order string) ([]User, error) {
+	return provider.getUsers(limit, offset, order)
 }
 
 // AddFolder adds a new virtual folder.
-// ManageUsers configuration must be set to 1 to enable this method
-func AddFolder(folder vfs.BaseVirtualFolder) error {
-	if config.ManageUsers == 0 {
-		return &MethodDisabledError{err: manageUsersDisabledError}
-	}
+func AddFolder(folder *vfs.BaseVirtualFolder) error {
 	return provider.addFolder(folder)
 }
 
-// DeleteFolder deletes an existing folder.
-// ManageUsers configuration must be set to 1 to enable this method
-func DeleteFolder(folder vfs.BaseVirtualFolder) error {
-	if config.ManageUsers == 0 {
-		return &MethodDisabledError{err: manageUsersDisabledError}
-	}
-	return provider.deleteFolder(folder)
+// UpdateFolder updates the specified virtual folder
+func UpdateFolder(folder *vfs.BaseVirtualFolder) error {
+	return provider.updateFolder(folder)
 }
 
-// GetFolderByPath returns the folder with the specified path if any
-func GetFolderByPath(mappedPath string) (vfs.BaseVirtualFolder, error) {
-	return provider.getFolderByPath(mappedPath)
+// DeleteFolder deletes an existing folder.
+func DeleteFolder(folderName string) error {
+	folder, err := provider.getFolderByName(folderName)
+	if err != nil {
+		return err
+	}
+	return provider.deleteFolder(&folder)
+}
+
+// GetFolderByName returns the folder with the specified name if any
+func GetFolderByName(name string) (vfs.BaseVirtualFolder, error) {
+	return provider.getFolderByName(name)
 }
 
 // GetFolders returns an array of folders respecting limit and offset
-func GetFolders(limit, offset int, order, folderPath string) ([]vfs.BaseVirtualFolder, error) {
-	return provider.getFolders(limit, offset, order, folderPath)
+func GetFolders(limit, offset int, order string) ([]vfs.BaseVirtualFolder, error) {
+	return provider.getFolders(limit, offset, order)
 }
 
 // DumpData returns all users and folders
@@ -697,14 +849,59 @@ func DumpData() (BackupData, error) {
 	if err != nil {
 		return data, err
 	}
+	admins, err := provider.dumpAdmins()
+	if err != nil {
+		return data, err
+	}
 	data.Users = users
 	data.Folders = folders
+	data.Admins = admins
+	data.Version = DumpVersion
 	return data, err
 }
 
+// ParseDumpData tries to parse data as BackupData
+func ParseDumpData(data []byte) (BackupData, error) {
+	var dump BackupData
+	err := json.Unmarshal(data, &dump)
+	if err == nil {
+		dump.checkFolderNames()
+		return dump, err
+	}
+	dump = BackupData{}
+	// try to parse as version 4
+	var dumpCompat backupDataV4Compat
+	err = json.Unmarshal(data, &dumpCompat)
+	if err != nil {
+		return dump, err
+	}
+	logger.WarnToConsole("You are loading data from an old format, please update to the latest supported one. We only support the current and the previous format.")
+	providerLog(logger.LevelWarn, "You are loading data from an old format, please update to the latest supported one. We only support the current and the previous format.")
+	dump.Folders = dumpCompat.Folders
+	for _, compatUser := range dumpCompat.Users {
+		fsConfig, err := convertFsConfigFromV4(compatUser.FsConfig, compatUser.Username)
+		if err != nil {
+			return dump, err
+		}
+		dump.Users = append(dump.Users, createUserFromV4(compatUser, fsConfig))
+	}
+	dump.checkFolderNames()
+	return dump, err
+}
+
 // GetProviderStatus returns an error if the provider is not available
-func GetProviderStatus() error {
-	return provider.checkAvailability()
+func GetProviderStatus() ProviderStatus {
+	err := provider.checkAvailability()
+	status := ProviderStatus{
+		Driver: config.Driver,
+	}
+	if err == nil {
+		status.IsActive = true
+	} else {
+		status.IsActive = false
+		status.Error = err.Error()
+	}
+	return status
 }
 
 // Close releases all provider resources.
@@ -734,7 +931,7 @@ func createProvider(basePath string) error {
 	} else if config.Driver == BoltDataProviderName {
 		err = initializeBoltProvider(basePath)
 	} else if config.Driver == MemoryDataProviderName {
-		err = initializeMemoryProvider(basePath)
+		initializeMemoryProvider(basePath)
 	} else {
 		err = fmt.Errorf("unsupported data provider: %v", config.Driver)
 	}
@@ -742,9 +939,11 @@ func createProvider(basePath string) error {
 }
 
 func buildUserHomeDir(user *User) {
-	if len(user.HomeDir) == 0 {
-		if len(config.UsersBaseDir) > 0 {
+	if user.HomeDir == "" {
+		if config.UsersBaseDir != "" {
 			user.HomeDir = filepath.Join(config.UsersBaseDir, user.Username)
+		} else if user.FsConfig.Provider == SFTPFilesystemProvider {
+			user.HomeDir = filepath.Join(os.TempDir(), user.Username)
 		}
 	}
 }
@@ -788,13 +987,30 @@ func validateFolderQuotaLimits(folder vfs.VirtualFolder) error {
 		return &ValidationError{err: fmt.Sprintf("invalid quota_size: %v folder path %#v", folder.QuotaSize, folder.MappedPath)}
 	}
 	if folder.QuotaFiles < -1 {
-		return &ValidationError{err: fmt.Sprintf("invalid quota_file: %v folder path %#v", folder.QuotaSize, folder.MappedPath)}
+		return &ValidationError{err: fmt.Sprintf("invalid quota_file: %v folder path %#v", folder.QuotaFiles, folder.MappedPath)}
 	}
 	if (folder.QuotaSize == -1 && folder.QuotaFiles != -1) || (folder.QuotaFiles == -1 && folder.QuotaSize != -1) {
 		return &ValidationError{err: fmt.Sprintf("virtual folder quota_size and quota_files must be both -1 or >= 0, quota_size: %v quota_files: %v",
 			folder.QuotaFiles, folder.QuotaSize)}
 	}
 	return nil
+}
+
+func getVirtualFolderIfInvalid(folder *vfs.BaseVirtualFolder) *vfs.BaseVirtualFolder {
+	if err := ValidateFolder(folder); err == nil {
+		return folder
+	}
+	// we try to get the folder from the data provider if only the Name is populated
+	if folder.MappedPath != "" {
+		return folder
+	}
+	if folder.Name == "" {
+		return folder
+	}
+	if f, err := GetFolderByName(folder.Name); err == nil {
+		return &f
+	}
+	return folder
 }
 
 func validateUserVirtualFolders(user *User) error {
@@ -812,21 +1028,20 @@ func validateUserVirtualFolders(user *User) error {
 		if err := validateFolderQuotaLimits(v); err != nil {
 			return err
 		}
-		cleanedMPath := filepath.Clean(v.MappedPath)
-		if !filepath.IsAbs(cleanedMPath) {
-			return &ValidationError{err: fmt.Sprintf("invalid mapped folder %#v", v.MappedPath)}
+		folder := getVirtualFolderIfInvalid(&v.BaseVirtualFolder)
+		if err := ValidateFolder(folder); err != nil {
+			return err
 		}
+		cleanedMPath := folder.MappedPath
 		if isMappedDirOverlapped(cleanedMPath, user.GetHomeDir()) {
 			return &ValidationError{err: fmt.Sprintf("invalid mapped folder %#v cannot be inside or contain the user home dir %#v",
-				v.MappedPath, user.GetHomeDir())}
+				folder.MappedPath, user.GetHomeDir())}
 		}
 		virtualFolders = append(virtualFolders, vfs.VirtualFolder{
-			BaseVirtualFolder: vfs.BaseVirtualFolder{
-				MappedPath: cleanedMPath,
-			},
-			VirtualPath: cleanedVPath,
-			QuotaSize:   v.QuotaSize,
-			QuotaFiles:  v.QuotaFiles,
+			BaseVirtualFolder: *folder,
+			VirtualPath:       cleanedVPath,
+			QuotaSize:         v.QuotaSize,
+			QuotaFiles:        v.QuotaFiles,
 		})
 		for k, virtual := range mappedPaths {
 			if GetQuotaTracking() > 0 {
@@ -883,7 +1098,7 @@ func validatePermissions(user *User) error {
 		if utils.IsStringInSlice(PermAny, perms) {
 			permissions[cleanedDir] = []string{PermAny}
 		} else {
-			permissions[cleanedDir] = perms
+			permissions[cleanedDir] = utils.RemoveDuplicates(perms)
 		}
 	}
 	user.Permissions = permissions
@@ -900,6 +1115,50 @@ func validatePublicKeys(user *User) error {
 			return &ValidationError{err: fmt.Sprintf("could not parse key nr. %d: %s", i, err)}
 		}
 	}
+	return nil
+}
+
+func validateFiltersPatternExtensions(user *User) error {
+	if len(user.Filters.FilePatterns) == 0 {
+		user.Filters.FilePatterns = []PatternsFilter{}
+		return nil
+	}
+	filteredPaths := []string{}
+	var filters []PatternsFilter
+	for _, f := range user.Filters.FilePatterns {
+		cleanedPath := filepath.ToSlash(path.Clean(f.Path))
+		if !path.IsAbs(cleanedPath) {
+			return &ValidationError{err: fmt.Sprintf("invalid path %#v for file patterns filter", f.Path)}
+		}
+		if utils.IsStringInSlice(cleanedPath, filteredPaths) {
+			return &ValidationError{err: fmt.Sprintf("duplicate file patterns filter for path %#v", f.Path)}
+		}
+		if len(f.AllowedPatterns) == 0 && len(f.DeniedPatterns) == 0 {
+			return &ValidationError{err: fmt.Sprintf("empty file patterns filter for path %#v", f.Path)}
+		}
+		f.Path = cleanedPath
+		allowed := make([]string, 0, len(f.AllowedPatterns))
+		denied := make([]string, 0, len(f.DeniedPatterns))
+		for _, pattern := range f.AllowedPatterns {
+			_, err := path.Match(pattern, "abc")
+			if err != nil {
+				return &ValidationError{err: fmt.Sprintf("invalid file pattern filter %#v", pattern)}
+			}
+			allowed = append(allowed, strings.ToLower(pattern))
+		}
+		for _, pattern := range f.DeniedPatterns {
+			_, err := path.Match(pattern, "abc")
+			if err != nil {
+				return &ValidationError{err: fmt.Sprintf("invalid file pattern filter %#v", pattern)}
+			}
+			denied = append(denied, strings.ToLower(pattern))
+		}
+		f.AllowedPatterns = allowed
+		f.DeniedPatterns = denied
+		filters = append(filters, f)
+		filteredPaths = append(filteredPaths, cleanedPath)
+	}
+	user.Filters.FilePatterns = filters
 	return nil
 }
 
@@ -922,11 +1181,28 @@ func validateFiltersFileExtensions(user *User) error {
 			return &ValidationError{err: fmt.Sprintf("empty file extensions filter for path %#v", f.Path)}
 		}
 		f.Path = cleanedPath
+		allowed := make([]string, 0, len(f.AllowedExtensions))
+		denied := make([]string, 0, len(f.DeniedExtensions))
+		for _, ext := range f.AllowedExtensions {
+			allowed = append(allowed, strings.ToLower(ext))
+		}
+		for _, ext := range f.DeniedExtensions {
+			denied = append(denied, strings.ToLower(ext))
+		}
+		f.AllowedExtensions = allowed
+		f.DeniedExtensions = denied
 		filters = append(filters, f)
 		filteredPaths = append(filteredPaths, cleanedPath)
 	}
 	user.Filters.FileExtensions = filters
 	return nil
+}
+
+func validateFileFilters(user *User) error {
+	if err := validateFiltersFileExtensions(user); err != nil {
+		return err
+	}
+	return validateFiltersPatternExtensions(user)
 }
 
 func validateFilters(user *User) error {
@@ -970,77 +1246,124 @@ func validateFilters(user *User) error {
 			return &ValidationError{err: fmt.Sprintf("invalid protocol: %#v", p)}
 		}
 	}
-	return validateFiltersFileExtensions(user)
+	return validateFileFilters(user)
 }
 
 func saveGCSCredentials(user *User) error {
 	if user.FsConfig.Provider != GCSFilesystemProvider {
 		return nil
 	}
-	if len(user.FsConfig.GCSConfig.Credentials) == 0 {
+	if user.FsConfig.GCSConfig.Credentials.GetPayload() == "" {
 		return nil
 	}
 	if config.PreferDatabaseCredentials {
+		if user.FsConfig.GCSConfig.Credentials.IsPlain() {
+			user.FsConfig.GCSConfig.Credentials.SetAdditionalData(user.Username)
+			err := user.FsConfig.GCSConfig.Credentials.Encrypt()
+			if err != nil {
+				return err
+			}
+		}
 		return nil
 	}
-	err := ioutil.WriteFile(user.getGCSCredentialsFilePath(), user.FsConfig.GCSConfig.Credentials, 0600)
+	if user.FsConfig.GCSConfig.Credentials.IsPlain() {
+		user.FsConfig.GCSConfig.Credentials.SetAdditionalData(user.Username)
+		err := user.FsConfig.GCSConfig.Credentials.Encrypt()
+		if err != nil {
+			return &ValidationError{err: fmt.Sprintf("could not encrypt GCS credentials: %v", err)}
+		}
+	}
+	creds, err := json.Marshal(user.FsConfig.GCSConfig.Credentials)
+	if err != nil {
+		return &ValidationError{err: fmt.Sprintf("could not marshal GCS credentials: %v", err)}
+	}
+	credentialsFilePath := user.getGCSCredentialsFilePath()
+	err = os.MkdirAll(filepath.Dir(credentialsFilePath), 0700)
+	if err != nil {
+		return &ValidationError{err: fmt.Sprintf("could not create GCS credentials dir: %v", err)}
+	}
+	err = ioutil.WriteFile(credentialsFilePath, creds, 0600)
 	if err != nil {
 		return &ValidationError{err: fmt.Sprintf("could not save GCS credentials: %v", err)}
 	}
-	user.FsConfig.GCSConfig.Credentials = nil
+	user.FsConfig.GCSConfig.Credentials = kms.NewEmptySecret()
 	return nil
 }
 
 func validateFilesystemConfig(user *User) error {
 	if user.FsConfig.Provider == S3FilesystemProvider {
-		err := vfs.ValidateS3FsConfig(&user.FsConfig.S3Config)
-		if err != nil {
+		if err := user.FsConfig.S3Config.Validate(); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate s3config: %v", err)}
 		}
-		if user.FsConfig.S3Config.AccessSecret != "" {
-			vals := strings.Split(user.FsConfig.S3Config.AccessSecret, "$")
-			if !strings.HasPrefix(user.FsConfig.S3Config.AccessSecret, "$aes$") || len(vals) != 4 {
-				accessSecret, err := utils.EncryptData(user.FsConfig.S3Config.AccessSecret)
-				if err != nil {
-					return &ValidationError{err: fmt.Sprintf("could not encrypt s3 access secret: %v", err)}
-				}
-				user.FsConfig.S3Config.AccessSecret = accessSecret
-			}
+		if err := user.FsConfig.S3Config.EncryptCredentials(user.Username); err != nil {
+			return &ValidationError{err: fmt.Sprintf("could not encrypt s3 access secret: %v", err)}
 		}
+		user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
+		user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
+		user.FsConfig.CryptConfig = vfs.CryptFsConfig{}
+		user.FsConfig.SFTPConfig = vfs.SFTPFsConfig{}
 		return nil
 	} else if user.FsConfig.Provider == GCSFilesystemProvider {
-		err := vfs.ValidateGCSFsConfig(&user.FsConfig.GCSConfig, user.getGCSCredentialsFilePath())
-		if err != nil {
+		if err := user.FsConfig.GCSConfig.Validate(user.getGCSCredentialsFilePath()); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate GCS config: %v", err)}
 		}
+		user.FsConfig.S3Config = vfs.S3FsConfig{}
+		user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
+		user.FsConfig.CryptConfig = vfs.CryptFsConfig{}
+		user.FsConfig.SFTPConfig = vfs.SFTPFsConfig{}
 		return nil
 	} else if user.FsConfig.Provider == AzureBlobFilesystemProvider {
-		err := vfs.ValidateAzBlobFsConfig(&user.FsConfig.AzBlobConfig)
-		if err != nil {
+		if err := user.FsConfig.AzBlobConfig.Validate(); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate Azure Blob config: %v", err)}
 		}
-		if user.FsConfig.AzBlobConfig.AccountKey != "" {
-			vals := strings.Split(user.FsConfig.AzBlobConfig.AccountKey, "$")
-			if !strings.HasPrefix(user.FsConfig.AzBlobConfig.AccountKey, "$aes$") || len(vals) != 4 {
-				accountKey, err := utils.EncryptData(user.FsConfig.AzBlobConfig.AccountKey)
-				if err != nil {
-					return &ValidationError{err: fmt.Sprintf("could not encrypt Azure blob account key: %v", err)}
-				}
-				user.FsConfig.AzBlobConfig.AccountKey = accountKey
-			}
+		if err := user.FsConfig.AzBlobConfig.EncryptCredentials(user.Username); err != nil {
+			return &ValidationError{err: fmt.Sprintf("could not encrypt Azure blob account key: %v", err)}
 		}
+		user.FsConfig.S3Config = vfs.S3FsConfig{}
+		user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
+		user.FsConfig.CryptConfig = vfs.CryptFsConfig{}
+		user.FsConfig.SFTPConfig = vfs.SFTPFsConfig{}
+		return nil
+	} else if user.FsConfig.Provider == CryptedFilesystemProvider {
+		if err := user.FsConfig.CryptConfig.Validate(); err != nil {
+			return &ValidationError{err: fmt.Sprintf("could not validate Crypt fs config: %v", err)}
+		}
+		if err := user.FsConfig.CryptConfig.EncryptCredentials(user.Username); err != nil {
+			return &ValidationError{err: fmt.Sprintf("could not encrypt Crypt fs passphrase: %v", err)}
+		}
+		user.FsConfig.S3Config = vfs.S3FsConfig{}
+		user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
+		user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
+		user.FsConfig.SFTPConfig = vfs.SFTPFsConfig{}
+		return nil
+	} else if user.FsConfig.Provider == SFTPFilesystemProvider {
+		if err := user.FsConfig.SFTPConfig.Validate(); err != nil {
+			return &ValidationError{err: fmt.Sprintf("could not validate SFTP fs config: %v", err)}
+		}
+		if err := user.FsConfig.SFTPConfig.EncryptCredentials(user.Username); err != nil {
+			return &ValidationError{err: fmt.Sprintf("could not encrypt SFTP fs credentials: %v", err)}
+		}
+		user.FsConfig.S3Config = vfs.S3FsConfig{}
+		user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
+		user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
+		user.FsConfig.CryptConfig = vfs.CryptFsConfig{}
 		return nil
 	}
 	user.FsConfig.Provider = LocalFilesystemProvider
 	user.FsConfig.S3Config = vfs.S3FsConfig{}
 	user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
 	user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
+	user.FsConfig.CryptConfig = vfs.CryptFsConfig{}
+	user.FsConfig.SFTPConfig = vfs.SFTPFsConfig{}
 	return nil
 }
 
 func validateBaseParams(user *User) error {
 	if user.Username == "" {
 		return &ValidationError{err: "username is mandatory"}
+	}
+	if !usernameRegex.MatchString(user.Username) {
+		return &ValidationError{err: fmt.Sprintf("username %#v is not valid", user.Username)}
 	}
 	if user.HomeDir == "" {
 		return &ValidationError{err: "home_dir is mandatory"}
@@ -1055,7 +1378,7 @@ func validateBaseParams(user *User) error {
 }
 
 func createUserPasswordHash(user *User) error {
-	if len(user.Password) > 0 && !utils.IsStringPrefixInSlice(user.Password, hashPwdPrefixes) {
+	if user.Password != "" && !utils.IsStringPrefixInSlice(user.Password, hashPwdPrefixes) {
 		pwd, err := argon2id.CreateHash(user.Password, argon2Params)
 		if err != nil {
 			return err
@@ -1065,16 +1388,27 @@ func createUserPasswordHash(user *User) error {
 	return nil
 }
 
-func validateFolder(folder *vfs.BaseVirtualFolder) error {
+// ValidateFolder returns an error if the folder is not valid
+// FIXME: this should be defined as Folder struct method
+func ValidateFolder(folder *vfs.BaseVirtualFolder) error {
+	if folder.Name == "" {
+		return &ValidationError{err: "folder name is mandatory"}
+	}
+	if !usernameRegex.MatchString(folder.Name) {
+		return &ValidationError{err: fmt.Sprintf("folder name %#v is not valid", folder.Name)}
+	}
 	cleanedMPath := filepath.Clean(folder.MappedPath)
 	if !filepath.IsAbs(cleanedMPath) {
-		return &ValidationError{err: fmt.Sprintf("invalid mapped folder %#v", folder.MappedPath)}
+		return &ValidationError{err: fmt.Sprintf("invalid folder mapped path %#v", folder.MappedPath)}
 	}
 	folder.MappedPath = cleanedMPath
 	return nil
 }
 
-func validateUser(user *User) error {
+// ValidateUser returns an error if the user is not valid
+// FIXME: this should be defined as User struct method
+func ValidateUser(user *User) error {
+	user.SetEmptySecretsIfNil()
 	buildUserHomeDir(user)
 	if err := validateBaseParams(user); err != nil {
 		return err
@@ -1106,7 +1440,7 @@ func validateUser(user *User) error {
 	return nil
 }
 
-func checkLoginConditions(user User) error {
+func checkLoginConditions(user *User) error {
 	if user.Status < 1 {
 		return fmt.Errorf("user %#v is disabled", user.Username)
 	}
@@ -1147,11 +1481,11 @@ func isPasswordOK(user *User, password string) (bool, error) {
 }
 
 func checkUserAndPass(user User, password, ip, protocol string) (User, error) {
-	err := checkLoginConditions(user)
+	err := checkLoginConditions(&user)
 	if err != nil {
 		return user, err
 	}
-	if len(user.Password) == 0 {
+	if user.Password == "" {
 		return user, errors.New("Credentials cannot be null or empty")
 	}
 	hookResponse, err := executeCheckPasswordHook(user.Username, password, ip, protocol)
@@ -1181,7 +1515,7 @@ func checkUserAndPass(user User, password, ip, protocol string) (User, error) {
 }
 
 func checkUserAndPubKey(user User, pubKey []byte) (User, string, error) {
-	err := checkLoginConditions(user)
+	err := checkLoginConditions(&user)
 	if err != nil {
 		return user, "", err
 	}
@@ -1260,19 +1594,6 @@ func comparePbkdf2PasswordAndHash(password, hashedPassword string) (bool, error)
 	return subtle.ConstantTimeCompare(df, expected) == 1, nil
 }
 
-// HideUserSensitiveData hides user sensitive data
-func HideUserSensitiveData(user *User) User {
-	user.Password = ""
-	if user.FsConfig.Provider == S3FilesystemProvider {
-		user.FsConfig.S3Config.AccessSecret = utils.RemoveDecryptionKey(user.FsConfig.S3Config.AccessSecret)
-	} else if user.FsConfig.Provider == GCSFilesystemProvider {
-		user.FsConfig.GCSConfig.Credentials = nil
-	} else if user.FsConfig.Provider == AzureBlobFilesystemProvider {
-		user.FsConfig.AzBlobConfig.AccountKey = utils.RemoveDecryptionKey(user.FsConfig.AzBlobConfig.AccountKey)
-	}
-	return *user
-}
-
 func addCredentialsToUser(user *User) error {
 	if user.FsConfig.Provider != GCSFilesystemProvider {
 		return nil
@@ -1282,7 +1603,7 @@ func addCredentialsToUser(user *User) error {
 	}
 
 	// Don't read from file if credentials have already been set
-	if len(user.FsConfig.GCSConfig.Credentials) > 0 {
+	if user.FsConfig.GCSConfig.Credentials.IsValid() {
 		return nil
 	}
 
@@ -1290,8 +1611,7 @@ func addCredentialsToUser(user *User) error {
 	if err != nil {
 		return err
 	}
-	user.FsConfig.GCSConfig.Credentials = cred
-	return nil
+	return json.Unmarshal(cred, &user.FsConfig.GCSConfig.Credentials)
 }
 
 func getSSLMode() string {
@@ -1333,25 +1653,6 @@ func startAvailabilityTimer() {
 			}
 		}
 	}()
-}
-
-func validateCredentialsDir(basePath string) error {
-	if filepath.IsAbs(config.CredentialsPath) {
-		credentialsDirPath = config.CredentialsPath
-	} else {
-		credentialsDirPath = filepath.Join(basePath, config.CredentialsPath)
-	}
-	fi, err := os.Stat(credentialsDirPath)
-	if err == nil {
-		if !fi.IsDir() {
-			return errors.New("Credential path is not a valid directory")
-		}
-		return nil
-	}
-	if !os.IsNotExist(err) {
-		return err
-	}
-	return os.MkdirAll(credentialsDirPath, 0700)
 }
 
 func checkDataprovider() {
@@ -1567,7 +1868,7 @@ func doKeyboardInteractiveAuth(user User, authHook string, client ssh.KeyboardIn
 	if authResult != 1 {
 		return user, fmt.Errorf("keyboard interactive auth failed, result: %v", authResult)
 	}
-	err = checkLoginConditions(user)
+	err = checkLoginConditions(&user)
 	if err != nil {
 		return user, err
 	}
@@ -1575,7 +1876,7 @@ func doKeyboardInteractiveAuth(user User, authHook string, client ssh.KeyboardIn
 }
 
 func isCheckPasswordHookDefined(protocol string) bool {
-	if len(config.CheckPasswordHook) == 0 {
+	if config.CheckPasswordHook == "" {
 		return false
 	}
 	if config.CheckPasswordScope == 0 {
@@ -1736,20 +2037,23 @@ func executePreLoginHook(username, loginMethod, ip, protocol string) (User, erro
 	u.LastQuotaUpdate = userLastQuotaUpdate
 	u.LastLogin = userLastLogin
 	if userID == 0 {
-		err = provider.addUser(u)
+		err = provider.addUser(&u)
 	} else {
-		err = provider.updateUser(u)
+		err = provider.updateUser(&u)
 	}
 	if err != nil {
 		return u, err
 	}
 	providerLog(logger.LevelDebug, "user %#v added/updated from pre-login hook response, id: %v", username, userID)
-	return provider.userExists(username)
+	if userID == 0 {
+		return provider.userExists(username)
+	}
+	return u, nil
 }
 
 // ExecutePostLoginHook executes the post login hook if defined
-func ExecutePostLoginHook(username, loginMethod, ip, protocol string, err error) {
-	if len(config.PostLoginHook) == 0 {
+func ExecutePostLoginHook(user *User, loginMethod, ip, protocol string, err error) {
+	if config.PostLoginHook == "" {
 		return
 	}
 	if config.PostLoginScope == 1 && err == nil {
@@ -1759,10 +2063,17 @@ func ExecutePostLoginHook(username, loginMethod, ip, protocol string, err error)
 		return
 	}
 
-	go func(username, loginMethod, ip, protocol string, err error) {
-		status := 0
+	go func() {
+		status := "0"
 		if err == nil {
-			status = 1
+			status = "1"
+		}
+
+		user.HideConfidentialData()
+		userAsJSON, err := json.Marshal(user)
+		if err != nil {
+			providerLog(logger.LevelWarn, "error serializing user in post login hook: %v", err)
+			return
 		}
 		if strings.HasPrefix(config.PostLoginHook, "http") {
 			var url *url.URL
@@ -1771,22 +2082,17 @@ func ExecutePostLoginHook(username, loginMethod, ip, protocol string, err error)
 				providerLog(logger.LevelDebug, "Invalid post-login hook %#v", config.PostLoginHook)
 				return
 			}
-			postReq := make(map[string]interface{})
-			postReq["username"] = username
-			postReq["login_method"] = loginMethod
-			postReq["ip"] = ip
-			postReq["protocol"] = protocol
-			postReq["status"] = status
+			q := url.Query()
+			q.Add("login_method", loginMethod)
+			q.Add("ip", ip)
+			q.Add("protocol", protocol)
+			q.Add("status", status)
+			url.RawQuery = q.Encode()
 
-			postAsJSON, err := json.Marshal(postReq)
-			if err != nil {
-				providerLog(logger.LevelWarn, "error serializing post login request: %v", err)
-				return
-			}
 			startTime := time.Now()
 			respCode := 0
 			httpClient := httpclient.GetHTTPClient()
-			resp, err := httpClient.Post(url.String(), "application/json", bytes.NewBuffer(postAsJSON))
+			resp, err := httpClient.Post(url.String(), "application/json", bytes.NewBuffer(userAsJSON))
 			if err == nil {
 				respCode = resp.StatusCode
 				resp.Body.Close()
@@ -1799,7 +2105,7 @@ func ExecutePostLoginHook(username, loginMethod, ip, protocol string, err error)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, config.PostLoginHook)
 		cmd.Env = append(os.Environ(),
-			fmt.Sprintf("SFTPGO_LOGIND_USER=%v", username),
+			fmt.Sprintf("SFTPGO_LOGIND_USER=%v", string(userAsJSON)),
 			fmt.Sprintf("SFTPGO_LOGIND_IP=%v", ip),
 			fmt.Sprintf("SFTPGO_LOGIND_METHOD=%v", loginMethod),
 			fmt.Sprintf("SFTPGO_LOGIND_STATUS=%v", status),
@@ -1807,7 +2113,7 @@ func ExecutePostLoginHook(username, loginMethod, ip, protocol string, err error)
 		startTime := time.Now()
 		err = cmd.Run()
 		providerLog(logger.LevelDebug, "post login hook executed, elapsed %v err: %v", time.Since(startTime), err)
-	}(username, loginMethod, ip, protocol, err)
+	}()
 }
 
 func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol string) ([]byte, error) {
@@ -1883,7 +2189,7 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 	if len(pkey) > 0 && !utils.IsStringPrefixInSlice(pkey, user.PublicKeys) {
 		user.PublicKeys = append(user.PublicKeys, pkey)
 	}
-	// some users want to map multiple login usernames with a single SGTPGo account
+	// some users want to map multiple login usernames with a single SFTPGo account
 	// for example an SFTP user logins using "user1" or "user2" and the external auth
 	// returns "user" in both cases, so we use the username returned from
 	// external auth and not the one used to login
@@ -1894,10 +2200,10 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 		user.UsedQuotaFiles = u.UsedQuotaFiles
 		user.LastQuotaUpdate = u.LastQuotaUpdate
 		user.LastLogin = u.LastLogin
-		err = provider.updateUser(user)
-	} else {
-		err = provider.addUser(user)
+		err = provider.updateUser(&user)
+		return user, err
 	}
+	err = provider.addUser(&user)
 	if err != nil {
 		return user, err
 	}
@@ -1908,17 +2214,21 @@ func providerLog(level logger.LogLevel, format string, v ...interface{}) {
 	logger.Log(level, logSender, "", format, v...)
 }
 
-func executeNotificationCommand(operation string, user User) error {
+func executeNotificationCommand(operation string, commandArgs []string, userAsJSON []byte) error {
 	if !filepath.IsAbs(config.Actions.Hook) {
 		err := fmt.Errorf("invalid notification command %#v", config.Actions.Hook)
 		logger.Warn(logSender, "", "unable to execute notification command: %v", err)
 		return err
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	commandArgs := user.getNotificationFieldsAsSlice(operation)
+
 	cmd := exec.CommandContext(ctx, config.Actions.Hook, commandArgs...)
-	cmd.Env = append(os.Environ(), user.getNotificationFieldsAsEnvVars(operation)...)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("SFTPGO_USER_ACTION=%v", operation),
+		fmt.Sprintf("SFTPGO_USER=%v", string(userAsJSON)))
+
 	startTime := time.Now()
 	err := cmd.Run()
 	providerLog(logger.LevelDebug, "executed command %#v with arguments: %+v, elapsed: %v, error: %v",
@@ -1926,54 +2236,58 @@ func executeNotificationCommand(operation string, user User) error {
 	return err
 }
 
-// executed in a goroutine
-func executeAction(operation string, user User) {
+func executeAction(operation string, user *User) {
 	if !utils.IsStringInSlice(operation, config.Actions.ExecuteOn) {
 		return
 	}
-	if len(config.Actions.Hook) == 0 {
+	if config.Actions.Hook == "" {
 		return
 	}
-	if operation != operationDelete {
-		var err error
-		user, err = provider.userExists(user.Username)
-		if err != nil {
-			providerLog(logger.LevelWarn, "unable to get the user to notify for operation %#v: %v", operation, err)
-			return
+
+	go func() {
+		if operation != operationDelete {
+			var err error
+			u, err := provider.userExists(user.Username)
+			if err != nil {
+				providerLog(logger.LevelWarn, "unable to get the user to notify for operation %#v: %v", operation, err)
+				return
+			}
+			user = &u
 		}
-	}
-	if strings.HasPrefix(config.Actions.Hook, "http") {
-		var url *url.URL
-		url, err := url.Parse(config.Actions.Hook)
-		if err != nil {
-			providerLog(logger.LevelWarn, "Invalid http_notification_url %#v for operation %#v: %v", config.Actions.Hook, operation, err)
-			return
-		}
-		q := url.Query()
-		q.Add("action", operation)
-		url.RawQuery = q.Encode()
-		HideUserSensitiveData(&user)
+		user.HideConfidentialData()
 		userAsJSON, err := json.Marshal(user)
 		if err != nil {
+			providerLog(logger.LevelWarn, "unable to serialize user as JSON for operation %#v: %v", operation, err)
 			return
 		}
-		startTime := time.Now()
-		httpClient := httpclient.GetHTTPClient()
-		resp, err := httpClient.Post(url.String(), "application/json", bytes.NewBuffer(userAsJSON))
-		respCode := 0
-		if err == nil {
-			respCode = resp.StatusCode
-			resp.Body.Close()
+		if strings.HasPrefix(config.Actions.Hook, "http") {
+			var url *url.URL
+			url, err := url.Parse(config.Actions.Hook)
+			if err != nil {
+				providerLog(logger.LevelWarn, "Invalid http_notification_url %#v for operation %#v: %v", config.Actions.Hook, operation, err)
+				return
+			}
+			q := url.Query()
+			q.Add("action", operation)
+			url.RawQuery = q.Encode()
+			startTime := time.Now()
+			httpClient := httpclient.GetHTTPClient()
+			resp, err := httpClient.Post(url.String(), "application/json", bytes.NewBuffer(userAsJSON))
+			respCode := 0
+			if err == nil {
+				respCode = resp.StatusCode
+				resp.Body.Close()
+			}
+			providerLog(logger.LevelDebug, "notified operation %#v to URL: %v status code: %v, elapsed: %v err: %v",
+				operation, url.String(), respCode, time.Since(startTime), err)
+		} else {
+			executeNotificationCommand(operation, user.getNotificationFieldsAsSlice(operation), userAsJSON) //nolint:errcheck // the error is used in test cases only
 		}
-		providerLog(logger.LevelDebug, "notified operation %#v to URL: %v status code: %v, elapsed: %v err: %v",
-			operation, url.String(), respCode, time.Since(startTime), err)
-	} else {
-		executeNotificationCommand(operation, user) //nolint:errcheck // the error is used in test cases only
-	}
+	}()
 }
 
 // after migrating database to v4 we have to update the quota for the imported folders
-func updateVFoldersQuotaAfterRestore(foldersToScan []string) {
+/*func updateVFoldersQuotaAfterRestore(foldersToScan []string) {
 	fs := vfs.NewOsFs("", "", nil).(*vfs.OsFs)
 	for _, folder := range foldersToScan {
 		providerLog(logger.LevelDebug, "starting quota scan after migration for folder %#v", folder)
@@ -1990,6 +2304,15 @@ func updateVFoldersQuotaAfterRestore(foldersToScan []string) {
 		err = UpdateVirtualFolderQuota(vfolder, numFiles, size, true)
 		providerLog(logger.LevelDebug, "quota updated for virtual folder %#v, error: %v", vfolder.MappedPath, err)
 	}
+}*/
+
+func updateWebDavCachedUserLastLogin(username string) {
+	result, ok := webDAVUsersCache.Load(username)
+	if ok {
+		cachedUser := result.(*CachedUser)
+		cachedUser.User.LastLogin = utils.GetTimeAsMsSinceEpoch(time.Now())
+		webDAVUsersCache.Store(cachedUser.User.Username, cachedUser)
+	}
 }
 
 // CacheWebDAVUser add a user to the WebDAV cache
@@ -2001,7 +2324,7 @@ func CacheWebDAVUser(cachedUser *CachedUser, maxSize int) {
 
 		webDAVUsersCache.Range(func(k, v interface{}) bool {
 			cacheSize++
-			if len(userToRemove) == 0 {
+			if userToRemove == "" {
 				userToRemove = k.(string)
 				expirationTime = v.(*CachedUser).Expiration
 				return true
@@ -2019,7 +2342,7 @@ func CacheWebDAVUser(cachedUser *CachedUser, maxSize int) {
 		}
 	}
 
-	if len(cachedUser.User.Username) > 0 {
+	if cachedUser.User.Username != "" {
 		webDAVUsersCache.Store(cachedUser.User.Username, cachedUser)
 	}
 }
@@ -2031,7 +2354,7 @@ func GetCachedWebDAVUser(username string) (interface{}, bool) {
 
 // RemoveCachedWebDAVUser removes a cached WebDAV user
 func RemoveCachedWebDAVUser(username string) {
-	if len(username) > 0 {
+	if username != "" {
 		webDAVUsersCache.Delete(username)
 	}
 }

@@ -24,8 +24,8 @@ Flags:
 
 The `serve` command supports the following flags:
 
-- `--config-dir` string. Location of the config dir. This directory should contain the configuration file and is used as the base directory for any files that use a relative path (eg. the private keys for the SFTP server, the SQLite or bblot database if you use SQLite or bbolt as data provider). The default value is "." or the value of `SFTPGO_CONFIG_DIR` environment variable.
-- `--config-file` string. Name of the configuration file. It must be the name of a file stored in `config-dir`, not the absolute path to the configuration file. The specified file name must have no extension because we automatically append JSON, YAML, TOML, HCL and Java extensions when we search for the file. The default value is "sftpgo" (and therefore `sftpgo.json`, `sftpgo.yaml` and so on are searched) or the value of `SFTPGO_CONFIG_FILE` environment variable.
+- `--config-dir` string. Location of the config dir. This directory is used as the base for files with a relative path, eg. the private keys for the SFTP server or the SQLite database if you use SQLite as data provider. The configuration file, if not explicitly set, is looked for in this dir. We support reading from JSON, TOML, YAML, HCL, envfile and Java properties config files. The default config file name is `sftpgo` and therefore `sftpgo.json`, `sftpgo.yaml` and so on are searched. The default value is the working directory (".") or the value of `SFTPGO_CONFIG_DIR` environment variable.
+- `--config-file` string. This flag explicitly defines the path, name and extension of the config file. If must be an absolute path or a path relative to the configuration directory. The specified file name must have a supported extension (JSON, YAML, TOML, HCL or Java properties). The default value is empty or the value of `SFTPGO_CONFIG_FILE` environment variable.
 - `--loaddata-from` string. Load users and folders from this file. The file must be specified as absolute path and it must contain a backup obtained using the `dumpdata` REST API or compatible content. The default value is empty or the value of `SFTPGO_LOADDATA_FROM` environment variable.
 - `--loaddata-clean` boolean. Determine if the loaddata-from file should be removed after a successful load. Default `false` or the value of `SFTPGO_LOADDATA_CLEAN` environment variable (1 or `true`, 0 or `false`).
 - `--loaddata-mode`, integer. Restore mode for data to load. 0 means new users are added, existing users are updated. 1 means new users are added, existing users are not modified. Default 1 or the value of `SFTPGO_LOADDATA_MODE` environment variable.
@@ -54,7 +54,7 @@ The configuration file contains the following sections:
   - `actions`, struct. It contains the command to execute and/or the HTTP URL to notify and the trigger conditions. See [Custom Actions](./custom-actions.md) for more details
     - `execute_on`, list of strings. Valid values are `download`, `upload`, `pre-delete`, `delete`, `rename`, `ssh_cmd`. Leave empty to disable actions.
     - `hook`, string. Absolute path to the command to execute or HTTP URL to notify.
-  - `setstat_mode`, integer. 0 means "normal mode": requests for changing permissions, owner/group and access/modification times are executed. 1 means "ignore mode": requests for changing permissions, owner/group and access/modification times are silently ignored.
+  - `setstat_mode`, integer. 0 means "normal mode": requests for changing permissions, owner/group and access/modification times are executed. 1 means "ignore mode": requests for changing permissions, owner/group and access/modification times are silently ignored. 2 means "ignore mode for cloud based filesystems": requests for changing permissions, owner/group and access/modification times are silently ignored for cloud filesystems and executed for local filesystem.
   - `proxy_protocol`, integer. Support for [HAProxy PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt). If you are running SFTPGo behind a proxy server such as HAProxy, AWS ELB or NGNIX, you can enable the proxy protocol. It provides a convenient way to safely transport connection information such as a client's address across multiple layers of NAT or TCP proxies to get the real client IP address instead of the proxy IP. Both protocol versions 1 and 2 are supported. If the proxy protocol is enabled in SFTPGo then you have to enable the protocol in your proxy configuration too. For example, for HAProxy, add `send-proxy` or `send-proxy-v2` to each server configuration line. The following modes are supported:
     - 0, disabled
     - 1, enabled. Proxy header will be used and requests without proxy header will be accepted
@@ -63,9 +63,26 @@ The configuration file contains the following sections:
     - If `proxy_protocol` is set to 1 and we receive a proxy header from an IP that is not in the list then the connection will be accepted and the header will be ignored
     - If `proxy_protocol` is set to 2 and we receive a proxy header from an IP that is not in the list then the connection will be rejected
   - `post_connect_hook`, string. Absolute path to the command to execute or HTTP URL to notify. See [Post connect hook](./post-connect-hook.md) for more details. Leave empty to disable
+  - `max_total_connections`, integer. Maximum number of concurrent client connections. 0 means unlimited
+  - `defender`, struct containing the defender configuration. See [Defender](./defender.md) for more details.
+    - `enabled`, boolean. Default `false`.
+    - `ban_time`, integer. Ban time in minutes.
+    - `ban_time_increment`, integer. Ban time increment, as a percentage, if a banned host tries to connect again.
+    - `threshold`, integer. Threshold value for banning a client.
+    - `score_invalid`, integer. Score for invalid login attempts, eg. non-existent user accounts or client disconnected for inactivity without authentication attempts.
+    - `score_valid`, integer. Score for valid login attempts, eg. user accounts that exist.
+    - `observation_time`, integer. Defines the time window, in minutes, for tracking client errors. A host is banned if it has exceeded the defined threshold during the last observation time minutes.
+    - `entries_soft_limit`, integer.
+    - `entries_hard_limit`, integer. The number of banned IPs and host scores kept in memory will vary between the soft and hard limit.
+    - `safelist_file`, string. Path to a file containing a list of ip addresses and/or networks to never ban.
+    - `blocklist_file`, string. Path to a file containing a list of ip addresses and/or networks to always ban. The lists can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows. An host that is already banned will not be automatically unbanned if you put it inside the safe list, you have to unban it using the REST API.
 - **"sftpd"**, the configuration for the SFTP server
-  - `bind_port`, integer. The port used for serving SFTP requests. Default: 2022
-  - `bind_address`, string. Leave blank to listen on all available network interfaces. Default: ""
+  - `bindings`, list of structs. Each struct has the following fields:
+    - `port`, integer. The port used for serving SFTP requests. 0 means disabled. Default: 2022
+    - `address`, string. Leave blank to listen on all available network interfaces. Default: ""
+    - `apply_proxy_config`, boolean. If enabled the common proxy configuration, if any, will be applied. Default `true`
+  - `bind_port`, integer. Deprecated, please use `bindings`
+  - `bind_address`, string. Deprecated, please use `bindings`
   - `idle_timeout`, integer. Deprecated, please use the same key in `common` section.
   - `max_auth_tries` integer. Maximum number of authentication attempts permitted per connection. If set to a negative number, the number of attempts is unlimited. If set to zero, the number of attempts is limited to 6.
   - `banner`, string. Identification string used by the server. Leave empty to use the default banner. Default `SFTPGo_<version>`, for example `SSH-2.0-SFTPGo_0.9.5`
@@ -86,21 +103,41 @@ The configuration file contains the following sections:
   - `proxy_protocol`, integer.  Deprecated, please use the same key in `common` section.
   - `proxy_allowed`, list of strings. Deprecated, please use the same key in `common` section.
 - **"ftpd"**, the configuration for the FTP server
-  - `bind_port`, integer. The port used for serving FTP requests. 0 means disabled. Default: 0.
-  - `bind_address`, string. Leave blank to listen on all available network interfaces. Default: "".
+  - `bindings`, list of structs. Each struct has the following fields:
+    - `port`, integer. The port used for serving FTP requests. 0 means disabled. Default: 0.
+    - `address`, string. Leave blank to listen on all available network interfaces. Default: "".
+    - `apply_proxy_config`, boolean. If enabled the common proxy configuration, if any, will be applied. Default `true`.
+    - `tls_mode`, integer. 0 means accept both cleartext and encrypted sessions. 1 means TLS is required for both control and data connection. 2 means implicit TLS. Do not enable this blindly, please check that a proper TLS config is in place if you set `tls_mode` is different from 0.
+    - `force_passive_ip`, ip address. External IP address to expose for passive connections. Leavy empty to autodetect. Defaut: "".
+    - `client_auth_type`, integer. Set to `1` to require client certificate authentication in addition to FTP authentication. You need to define at least a certificate authority for this to work. Default: 0.
+  - `bind_port`, integer. Deprecated, please use `bindings`
+  - `bind_address`, string. Deprecated, please use `bindings`
   - `banner`, string. Greeting banner displayed when a connection first comes in. Leave empty to use the default banner. Default `SFTPGo <version> ready`, for example `SFTPGo 1.0.0-dev ready`.
   - `banner_file`, path to the banner file. The contents of the specified file, if any, are displayed when someone connects to the server. It can be a path relative to the config dir or an absolute one. If set, it overrides the banner string provided by the `banner` option. Leave empty to disable.
   - `active_transfers_port_non_20`, boolean. Do not impose the port 20 for active data transfers. Enabling this option allows to run SFTPGo with less privilege. Default: false.
-  - `force_passive_ip`, ip address. External IP address to expose for passive connections. Leavy empty to autodetect. Defaut: "".
+  - `force_passive_ip`, ip address.  Deprecated, please use `bindings`
   - `passive_port_range`, struct containing the key `start` and `end`. Port Range for data connections. Random if not specified. Default range is 50000-50100.
+  - `disable_active_mode`, boolean. Set to `true` to disable active FTP, default `false`.
+  - `enable_site`, boolean. Set to true to enable the FTP SITE command. We support `chmod` and `symlink` if SITE support is enabled. Default `false`
+  - `hash_support`, integer. Set to `1` to enable FTP commands that allow to calculate the hash value of files. These FTP commands will be enabled: `HASH`, `XCRC`, `MD5/XMD5`, `XSHA/XSHA1`, `XSHA256`, `XSHA512`. Please keep in mind that to calculate the hash we need to read the whole file, for remote backends this means downloading the file, for the encrypted backend this means decrypting the file. Default `0`.
+  - `combine_support`, integer. Set to 1 to enable support for the non standard `COMB` FTP command. Combine is only supported for local filesystem, for cloud backends it has no advantage as it will download the partial files and will upload the combined one. Cloud backends natively support multipart uploads. Default `0`.
   - `certificate_file`, string. Certificate for FTPS. This can be an absolute path or a path relative to the config dir.
-  - `certificate_key_file`, string. Private key matching the above certificate. This can be an absolute path or a path relative to the config dir. If both the certificate and the private key are provided the server will accept both plain FTP an explicit FTP over TLS. Certificate and key files can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
-  - `tls_mode`, integer. 0 means accept both cleartext and encrypted sessions. 1 means TLS is required for both control and data connection. Do not enable this blindly, please check that a proper TLS config is in place or no login will be allowed if `tls_mode` is 1.
-- **webdavd**, the configuration for the WebDAV server, more info [here](./webdav.md)
-  - `bind_port`, integer. The port used for serving WebDAV requests. 0 means disabled. Default: 0.
-  - `bind_address`, string. Leave blank to listen on all available network interfaces. Default: "".
+  - `certificate_key_file`, string. Private key matching the above certificate. This can be an absolute path or a path relative to the config dir. A certificate and the private key are required to enable explicit and implicit TLS. Certificate and key files can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
+  - `ca_certificates`, list of strings. Set of root certificate authorities to be used to verify client certificates.
+  - `ca_revocation_lists`, list of strings. Set a revocation lists, one for each root CA, to be used to check if a client certificate has been revoked. The revocation lists can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
+  - `tls_mode`, integer. Deprecated, please use `bindings`
+- **"webdavd"**, the configuration for the WebDAV server, more info [here](./webdav.md)
+  - `bindings`, list of structs. Each struct has the following fields:
+    - `port`, integer. The port used for serving WebDAV requests. 0 means disabled. Default: 0.
+    - `address`, string. Leave blank to listen on all available network interfaces. Default: "".
+    - `enable_https`, boolean. Set to `true` and provide both a certificate and a key file to enable HTTPS connection for this binding. Default `false`.
+    - `client_auth_type`, integer. Set to `1` to require client certificate authentication in addition to basic authentication. You need to define at least a certificate authority for this to work. Default: 0.
+  - `bind_port`, integer. Deprecated, please use `bindings`.
+  - `bind_address`, string. Deprecated, please use `bindings`.
   - `certificate_file`, string. Certificate for WebDAV over HTTPS. This can be an absolute path or a path relative to the config dir.
-  - `certificate_key_file`, string. Private key matching the above certificate. This can be an absolute path or a path relative to the config dir. If both the certificate and the private key are provided the server will expect HTTPS connections. Certificate and key files can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
+  - `certificate_key_file`, string. Private key matching the above certificate. This can be an absolute path or a path relative to the config dir. A certificate and a private key are required to enable HTTPS connections. Certificate and key files can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
+  - `ca_certificates`, list of strings. Set of root certificate authorities to be used to verify client certificates.
+  - `ca_revocation_lists`, list of strings. Set a revocation lists, one for each root CA, to be used to check if a client certificate has been revoked. The revocation lists can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
   - `cors` struct containing CORS configuration. SFTPGo uses [Go CORS handler](https://github.com/rs/cors), please refer to upstream documentation for fields meaning and their default values.
     - `enabled`, boolean, set to true to enable CORS.
     - `allowed_origins`, list of strings.
@@ -115,7 +152,7 @@ The configuration file contains the following sections:
     - `max_size`, integer. Maximum number of users to cache. 0 means unlimited. Default: 50.
 - **"data_provider"**, the configuration for the data provider
   - `driver`, string. Supported drivers are `sqlite`, `mysql`, `postgresql`, `bolt`, `memory`
-  - `name`, string. Database name. For driver `sqlite` this can be the database name relative to the config dir or the absolute path to the SQLite database. For driver `memory` this is the (optional) path relative to the config dir or the absolute path to the users dump, obtained using the `dumpdata` REST API, to load. This dump will be loaded at startup and can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows. The `memory` provider will not modify the provided file so quota usage and last login will not be persisted
+  - `name`, string. Database name. For driver `sqlite` this can be the database name relative to the config dir or the absolute path to the SQLite database. For driver `memory` this is the (optional) path relative to the config dir or the absolute path to the provider dump, obtained using the `dumpdata` REST API, to load. This dump will be loaded at startup and can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows. The `memory` provider will not modify the provided file so quota usage and last login will not be persisted. If you plan to use a SQLite database over a `cifs` network share (this is not recommended in general) you must use the `nobrl` mount option otherwise you will get the `database is locked` error. Some users reported that the `bolt` provider works fine over `cifs` shares.
   - `host`, string. Database host. Leave empty for drivers `sqlite`, `bolt` and `memory`
   - `port`, integer. Database port. Leave empty for drivers `sqlite`, `bolt` and `memory`
   - `username`, string. Database user. Leave empty for drivers `sqlite`, `bolt` and `memory`
@@ -123,7 +160,6 @@ The configuration file contains the following sections:
   - `sslmode`, integer. Used for drivers `mysql` and `postgresql`. 0 disable SSL/TLS connections, 1 require ssl, 2 set ssl mode to `verify-ca` for driver `postgresql` and `skip-verify` for driver `mysql`, 3 set ssl mode to `verify-full` for driver `postgresql` and `preferred` for driver `mysql`
   - `connectionstring`, string. Provide a custom database connection string. If not empty, this connection string will be used instead of building one using the previous parameters. Leave empty for drivers `bolt` and `memory`
   - `sql_tables_prefix`, string. Prefix for SQL tables
-  - `manage_users`, integer. Set to 0 to disable users management, 1 to enable
   - `track_quota`, integer. Set the preferred mode to track users quota between the following choices:
     - 0, disable quota tracking. REST API to scan users home directories/virtual folders and update quota will do nothing
     - 1, quota is updated each time a user uploads or deletes a file, even if the user has no quota restrictions
@@ -151,18 +187,36 @@ The configuration file contains the following sections:
       - `parallelism`. unsigned 8 bit integer. The number of threads (or lanes) used by the algorithm. Default: 2.
   - `update_mode`, integer. Defines how the database will be initialized/updated. 0 means automatically. 1 means manually using the initprovider sub-command.
 - **"httpd"**, the configuration for the HTTP server used to serve REST API and to expose the built-in web interface
-  - `bind_port`, integer. The port used for serving HTTP requests. Set to 0 to disable HTTP server. Default: 8080
-  - `bind_address`, string. Leave blank to listen on all available network interfaces. Default: "127.0.0.1"
+  - `bindings`, list of structs. Each struct has the following fields:
+    - `port`, integer. The port used for serving HTTP requests. Default: 8080.
+    - `address`, string. Leave blank to listen on all available network interfaces. On *NIX you can specify an absolute path to listen on a Unix-domain socket Default: "127.0.0.1".
+    - `enable_web_admin`, boolean. Set to `false` to disable the built-in web admin for this binding. You also need to define `templates_path` and `static_files_path` to enable the built-in web admin interface. Default `true`.
+    - `enable_https`, boolean. Set to `true` and provide both a certificate and a key file to enable HTTPS connection for this binding. Default `false`.
+    - `client_auth_type`, integer. Set to `1` to require client certificate authentication in addition to JWT/Web authentication. You need to define at least a certificate authority for this to work. Default: 0.
+  - `bind_port`, integer. Deprecated, please use `bindings`.
+  - `bind_address`, string. Deprecated, please use `bindings`. Leave blank to listen on all available network interfaces. On \*NIX you can specify an absolute path to listen on a Unix-domain socket. Default: "127.0.0.1"
   - `templates_path`, string. Path to the HTML web templates. This can be an absolute path or a path relative to the config dir
   - `static_files_path`, string. Path to the static files for the web interface. This can be an absolute path or a path relative to the config dir. If both `templates_path` and `static_files_path` are empty the built-in web interface will be disabled
   - `backups_path`, string. Path to the backup directory. This can be an absolute path or a path relative to the config dir. We don't allow backups in arbitrary paths for security reasons
-  - `auth_user_file`, string. Path to a file used to store usernames and passwords for basic authentication. This can be an absolute path or a path relative to the config dir. We support HTTP basic authentication, and the file format must conform to the one generated using the Apache `htpasswd` tool. The supported password formats are bcrypt (`$2y$` prefix) and md5 crypt (`$apr1$` prefix). If empty, HTTP authentication is disabled.
+  - `certificate_file`, string. Certificate for HTTPS. This can be an absolute path or a path relative to the config dir.
+  - `certificate_key_file`, string. Private key matching the above certificate. This can be an absolute path or a path relative to the config dir. If both the certificate and the private key are provided, the server will expect HTTPS connections. Certificate and key files can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
+  - `ca_certificates`, list of strings. Set of root certificate authorities to be used to verify client certificates.
+  - `ca_revocation_lists`, list of strings. Set a revocation lists, one for each root CA, to be used to check if a client certificate has been revoked. The revocation lists can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
+- **"telemetry"**, the configuration for the telemetry server, more details [below](#telemetry-server)
+  - `bind_port`, integer. The port used for serving HTTP requests. Set to 0 to disable HTTP server. Default: 10000
+  - `bind_address`, string. Leave blank to listen on all available network interfaces. On \*NIX you can specify an absolute path to listen on a Unix-domain socket. Default: "127.0.0.1"
+  - `enable_profiler`, boolean. Enable the built-in profiler. Default `false`
+  - `auth_user_file`, string. Path to a file used to store usernames and passwords for basic authentication. This can be an absolute path or a path relative to the config dir. We support HTTP basic authentication, and the file format must conform to the one generated using the Apache `htpasswd` tool. The supported password formats are bcrypt (`$2y$` prefix) and md5 crypt (`$apr1$` prefix). If empty, HTTP authentication is disabled. Authentication will be always disabled for the `/healthz` endpoint.
   - `certificate_file`, string. Certificate for HTTPS. This can be an absolute path or a path relative to the config dir.
   - `certificate_key_file`, string. Private key matching the above certificate. This can be an absolute path or a path relative to the config dir. If both the certificate and the private key are provided, the server will expect HTTPS connections. Certificate and key files can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
 - **"http"**, the configuration for HTTP clients. HTTP clients are used for executing hooks such as the ones used for custom actions, external authentication and pre-login user modifications
   - `timeout`, integer. Timeout specifies a time limit, in seconds, for requests.
   - `ca_certificates`, list of strings. List of paths to extra CA certificates to trust. The paths can be absolute or relative to the config dir. Adding trusted CA certificates is a convenient way to use self-signed certificates without defeating the purpose of using TLS.
   - `skip_tls_verify`, boolean. if enabled the HTTP client accepts any TLS certificate presented by the server and any host name in that certificate. In this mode, TLS is susceptible to man-in-the-middle attacks. This should be used only for testing.
+- **kms**, configuration for the Key Management Service, more details can be found [here](./kms.md)
+  - `secrets`
+    - `url`
+    - `master_key_path`
 
 A full example showing the default config (in JSON format) can be found [here](../sftpgo.json).
 
@@ -198,5 +252,13 @@ You can also override all the available configuration options using environment 
 
 Let's see some examples:
 
-- To set sftpd `bind_port`, you need to define the env var `SFTPGO_SFTPD__BIND_PORT`
+- To set the `port` for the first sftpd binding, you need to define the env var `SFTPGO_SFTPD__BINDINGS__0__PORT`
 - To set the `execute_on` actions, you need to define the env var `SFTPGO_COMMON__ACTIONS__EXECUTE_ON`. For example `SFTPGO_COMMON__ACTIONS__EXECUTE_ON=upload,download`
+
+## Telemetry Server
+
+The telemetry server exposes the following endpoints:
+
+- `/healthz`, health information (for health checks)
+- `/metrics`, Prometheus metrics
+- `/debug/pprof`, if enabled via the `enable_profiler` configuration key, for profiling, more details [here](./profiling.md)

@@ -2,7 +2,6 @@ package common
 
 import (
 	"errors"
-	"os"
 	"path"
 	"sync"
 	"sync/atomic"
@@ -22,27 +21,27 @@ var (
 // BaseTransfer contains protocols common transfer details for an upload or a download.
 type BaseTransfer struct { //nolint:maligned
 	ID             uint64
+	BytesSent      int64
+	BytesReceived  int64
 	Fs             vfs.Fs
-	File           *os.File
+	File           vfs.File
 	Connection     *BaseConnection
 	cancelFn       func()
 	fsPath         string
+	requestPath    string
 	start          time.Time
-	transferType   int
+	MaxWriteSize   int64
 	MinWriteOffset int64
 	InitialSize    int64
 	isNewFile      bool
-	requestPath    string
-	BytesSent      int64
-	BytesReceived  int64
-	MaxWriteSize   int64
+	transferType   int
 	AbortTransfer  int32
 	sync.Mutex
 	ErrTransfer error
 }
 
 // NewBaseTransfer returns a new BaseTransfer and adds it to the given connection
-func NewBaseTransfer(file *os.File, conn *BaseConnection, cancelFn func(), fsPath, requestPath string, transferType int,
+func NewBaseTransfer(file vfs.File, conn *BaseConnection, cancelFn func(), fsPath, requestPath string, transferType int,
 	minWriteOffset, initialSize, maxWriteSize int64, isNewFile bool, fs vfs.Fs) *BaseTransfer {
 	t := &BaseTransfer{
 		ID:             conn.GetTransferID(),
@@ -174,6 +173,21 @@ func (t *BaseTransfer) TransferError(err error) {
 		atomic.LoadInt64(&t.BytesReceived), elapsed)
 }
 
+func (t *BaseTransfer) getUploadFileSize() (int64, error) {
+	var fileSize int64
+	info, err := t.Fs.Stat(t.fsPath)
+	if err == nil {
+		fileSize = info.Size()
+	}
+	if vfs.IsCryptOsFs(t.Fs) && t.ErrTransfer != nil {
+		errDelete := t.Connection.Fs.Remove(t.fsPath, false)
+		if errDelete != nil {
+			t.Connection.Log(logger.LevelWarn, "error removing partial crypto file %#v: %v", t.fsPath, errDelete)
+		}
+	}
+	return fileSize, err
+}
+
 // Close it is called when the transfer is completed.
 // It logs the transfer info, updates the user quota (for uploads)
 // and executes any defined action.
@@ -190,7 +204,7 @@ func (t *BaseTransfer) Close() error {
 	metrics.TransferCompleted(atomic.LoadInt64(&t.BytesSent), atomic.LoadInt64(&t.BytesReceived), t.transferType, t.ErrTransfer)
 	if t.ErrTransfer == ErrQuotaExceeded && t.File != nil {
 		// if quota is exceeded we try to remove the partial file for uploads to local filesystem
-		err = os.Remove(t.File.Name())
+		err = t.Connection.Fs.Remove(t.File.Name(), false)
 		if err == nil {
 			numFiles--
 			atomic.StoreInt64(&t.BytesReceived, 0)
@@ -200,11 +214,11 @@ func (t *BaseTransfer) Close() error {
 			t.File.Name(), err)
 	} else if t.transferType == TransferUpload && t.File != nil && t.File.Name() != t.fsPath {
 		if t.ErrTransfer == nil || Config.UploadMode == UploadModeAtomicWithResume {
-			err = os.Rename(t.File.Name(), t.fsPath)
+			err = t.Connection.Fs.Rename(t.File.Name(), t.fsPath)
 			t.Connection.Log(logger.LevelDebug, "atomic upload completed, rename: %#v -> %#v, error: %v",
 				t.File.Name(), t.fsPath, err)
 		} else {
-			err = os.Remove(t.File.Name())
+			err = t.Connection.Fs.Remove(t.File.Name(), false)
 			t.Connection.Log(logger.LevelWarn, "atomic upload completed with error: \"%v\", delete temporary file: %#v, "+
 				"deletion error: %v", t.ErrTransfer, t.File.Name(), err)
 			if err == nil {
@@ -223,11 +237,10 @@ func (t *BaseTransfer) Close() error {
 		go actionHandler.Handle(action) //nolint:errcheck
 	} else {
 		fileSize := atomic.LoadInt64(&t.BytesReceived) + t.MinWriteOffset
-		info, err := t.Fs.Stat(t.fsPath)
-		if err == nil {
-			fileSize = info.Size()
+		if statSize, err := t.getUploadFileSize(); err == nil {
+			fileSize = statSize
 		}
-		t.Connection.Log(logger.LevelDebug, "uploaded file size %v stat error: %v", fileSize, err)
+		t.Connection.Log(logger.LevelDebug, "uploaded file size %v", fileSize)
 		t.updateQuota(numFiles, fileSize)
 		logger.TransferLog(uploadLogSender, t.fsPath, elapsed, atomic.LoadInt64(&t.BytesReceived), t.Connection.User.Username,
 			t.Connection.ID, t.Connection.protocol)
@@ -280,8 +293,8 @@ func (t *BaseTransfer) HandleThrottle() {
 	if wantedBandwidth > 0 {
 		// real and wanted elapsed as milliseconds, bytes as kilobytes
 		realElapsed := time.Since(t.start).Nanoseconds() / 1000000
-		// trasferredBytes / 1000 = KB/s, we multiply for 1000 to get milliseconds
-		wantedElapsed := 1000 * (trasferredBytes / 1000) / wantedBandwidth
+		// trasferredBytes / 1024 = KB/s, we multiply for 1000 to get milliseconds
+		wantedElapsed := 1000 * (trasferredBytes / 1024) / wantedBandwidth
 		if wantedElapsed > realElapsed {
 			toSleep := time.Duration(wantedElapsed - realElapsed)
 			time.Sleep(toSleep * time.Millisecond)

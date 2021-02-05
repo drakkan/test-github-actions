@@ -1,10 +1,7 @@
-package httpd
+package common
 
 import (
 	"encoding/csv"
-	"errors"
-	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -18,20 +15,20 @@ import (
 )
 
 const (
-	authenticationHeader = "WWW-Authenticate"
-	authenticationRealm  = "SFTPGo Web"
-	unauthResponse       = "Unauthorized"
-	md5CryptPwdPrefix    = "$1$"
-	apr1CryptPwdPrefix   = "$apr1$"
+	// HTTPAuthenticationHeader defines the HTTP authentication
+	HTTPAuthenticationHeader = "WWW-Authenticate"
+	md5CryptPwdPrefix        = "$1$"
+	apr1CryptPwdPrefix       = "$apr1$"
 )
 
 var (
 	bcryptPwdPrefixes = []string{"$2a$", "$2$", "$2x$", "$2y$", "$2b$"}
 )
 
-type httpAuthProvider interface {
-	getHashedPassword(username string) (string, bool)
-	isEnabled() bool
+// HTTPAuthProvider defines the interface for HTTP auth providers
+type HTTPAuthProvider interface {
+	ValidateCredentials(username, password string) bool
+	IsEnabled() bool
 }
 
 type basicAuthProvider struct {
@@ -41,7 +38,8 @@ type basicAuthProvider struct {
 	Users map[string]string
 }
 
-func newBasicAuthProvider(authUserFile string) (httpAuthProvider, error) {
+// NewBasicAuthProvider returns an HTTPAuthProvider implementing Basic Auth
+func NewBasicAuthProvider(authUserFile string) (HTTPAuthProvider, error) {
 	basicAuthProvider := basicAuthProvider{
 		Path:  authUserFile,
 		Info:  nil,
@@ -50,18 +48,19 @@ func newBasicAuthProvider(authUserFile string) (httpAuthProvider, error) {
 	return &basicAuthProvider, basicAuthProvider.loadUsers()
 }
 
-func (p *basicAuthProvider) isEnabled() bool {
-	return len(p.Path) > 0
+func (p *basicAuthProvider) IsEnabled() bool {
+	return p.Path != ""
 }
 
 func (p *basicAuthProvider) isReloadNeeded(info os.FileInfo) bool {
 	p.RLock()
 	defer p.RUnlock()
+
 	return p.Info == nil || p.Info.ModTime() != info.ModTime() || p.Info.Size() != info.Size()
 }
 
 func (p *basicAuthProvider) loadUsers() error {
-	if !p.isEnabled() {
+	if !p.IsEnabled() {
 		return nil
 	}
 	info, err := os.Stat(p.Path)
@@ -87,6 +86,7 @@ func (p *basicAuthProvider) loadUsers() error {
 		}
 		p.Lock()
 		defer p.Unlock()
+
 		p.Users = make(map[string]string)
 		for _, record := range records {
 			if len(record) == 2 {
@@ -106,34 +106,14 @@ func (p *basicAuthProvider) getHashedPassword(username string) (string, bool) {
 	}
 	p.RLock()
 	defer p.RUnlock()
+
 	pwd, ok := p.Users[username]
 	return pwd, ok
 }
 
-func checkAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !validateCredentials(r) {
-			w.Header().Set(authenticationHeader, fmt.Sprintf("Basic realm=\"%v\"", authenticationRealm))
-			if strings.HasPrefix(r.RequestURI, apiPrefix) {
-				sendAPIResponse(w, r, errors.New(unauthResponse), "", http.StatusUnauthorized)
-			} else {
-				http.Error(w, unauthResponse, http.StatusUnauthorized)
-			}
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func validateCredentials(r *http.Request) bool {
-	if !httpAuth.isEnabled() {
-		return true
-	}
-	username, password, ok := r.BasicAuth()
-	if !ok {
-		return false
-	}
-	if hashedPwd, ok := httpAuth.getHashedPassword(username); ok {
+// ValidateCredentials returns true if the credentials are valid
+func (p *basicAuthProvider) ValidateCredentials(username, password string) bool {
+	if hashedPwd, ok := p.getHashedPassword(username); ok {
 		if utils.IsStringPrefixInSlice(hashedPwd, bcryptPwdPrefixes) {
 			err := bcrypt.CompareHashAndPassword([]byte(hashedPwd), []byte(password))
 			return err == nil
@@ -149,5 +129,6 @@ func validateCredentials(r *http.Request) bool {
 			return err == nil
 		}
 	}
+
 	return false
 }

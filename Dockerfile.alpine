@@ -28,9 +28,7 @@ RUN set -xe && \
 
 FROM alpine:3.12
 
-RUN apk add --update --no-cache ca-certificates tzdata bash mailcap
-
-SHELL ["/bin/bash", "-c"]
+RUN apk add --update --no-cache ca-certificates tzdata mailcap
 
 # set up nsswitch.conf for Go's "netgo" implementation
 # https://github.com/gliderlabs/docker-alpine/issues/367#issuecomment-424546457
@@ -39,10 +37,7 @@ RUN test ! -e /etc/nsswitch.conf && echo 'hosts: files dns' > /etc/nsswitch.conf
 RUN mkdir -p /etc/sftpgo /var/lib/sftpgo /usr/share/sftpgo /srv/sftpgo
 
 RUN addgroup -g 1000 -S sftpgo && \
-    adduser -u 1000 -h /var/lib/sftpgo -s /sbin/nologin -G sftpgo -S -D -H sftpgo
-
-# Install some optional packages used by SFTPGo features
-RUN apk add --update --no-cache rsync git
+    adduser -u 1000 -h /var/lib/sftpgo -s /sbin/nologin -G sftpgo -S -D -H -g "SFTPGo user" sftpgo
 
 COPY --from=builder /workspace/sftpgo.json /etc/sftpgo/sftpgo.json
 COPY --from=builder /workspace/templates /usr/share/sftpgo/templates
@@ -65,6 +60,4 @@ RUN chown -R sftpgo:sftpgo /etc/sftpgo && chown sftpgo:sftpgo /var/lib/sftpgo /s
 WORKDIR /var/lib/sftpgo
 USER 1000:1000
 
-VOLUME [ "/var/lib/sftpgo", "/srv/sftpgo" ]
-
-CMD sftpgo serve
+CMD ["sftpgo", "serve"]

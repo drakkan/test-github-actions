@@ -1,5 +1,7 @@
 # REST API CLI client
 
+:warning: This sample client is deprecated and it will work only with API V1 (SFTPGo <= 1.2.2). You can easily build your own client from the [OpenAPI](../../httpd/schema/openapi.yaml) schema or use [Swagger UI](https://github.com/swagger-api/swagger-ui).
+
 `sftpgo_api_cli` is a very simple command line client for `SFTPGo` REST API written in python.
 
 It has the following requirements:
@@ -33,7 +35,7 @@ Basically there is a sub command for each REST API and the following global argu
 
 For each subcommand `--help` shows the available arguments, try for example:
 
-```python sftpgo_api_cli add_user --help```
+```python sftpgo_api_cli add-user --help```
 
 Additionally it can convert users to the SFTPGo format from some supported users stores
 
@@ -44,21 +46,33 @@ Let's see a sample usage for each REST API.
 Command:
 
 ```console
-python sftpgo_api_cli add-user test_username --password "test_pwd" --home-dir="/tmp/test_home_dir" --uid 33 --gid 1000 --max-sessions 2 --quota-size 0 --quota-files 3 --permissions "list" "download" "upload" "delete" "rename" "create_dirs" "overwrite" --subdirs-permissions "/dir1::list,download" "/dir2::*" --upload-bandwidth 100 --download-bandwidth 60 --status 0 --expiration-date 2019-01-01 --allowed-ip "192.168.1.1/32" --fs S3 --s3-bucket test --s3-region eu-west-1 --s3-access-key accesskey --s3-access-secret secret --s3-endpoint "http://127.0.0.1:9000" --s3-storage-class Standard --s3-key-prefix "vfolder/" --s3-upload-part-size 10 --s3-upload-concurrency 4 --denied-login-methods "password" "keyboard-interactive" --allowed-extensions "/dir1::.jpg,.png" "/dir2::.rar,.png" --denied-extensions "/dir3::.zip,.rar" --denied-protocols DAV FTP
+python sftpgo_api_cli add-user test_username --password "test_pwd" --home-dir="/tmp/test_home_dir" --uid 33 --gid 1000 --max-sessions 2 --quota-size 0 --quota-files 3 --permissions "list" "download" "upload" "delete" "rename" "create_dirs" "overwrite" --subdirs-permissions "/dir1::list,download" "/dir2::*" --upload-bandwidth 100 --download-bandwidth 60 --status 0 --expiration-date 2019-01-01 --allowed-ip "192.168.1.1/32" --fs S3 --s3-bucket test --s3-region eu-west-1 --s3-access-key accesskey --s3-access-secret secret --s3-endpoint "http://127.0.0.1:9000" --s3-storage-class Standard --s3-key-prefix "vfolder/" --s3-upload-part-size 10 --s3-upload-concurrency 4 --denied-login-methods "password" "keyboard-interactive" --allowed-patterns "/dir1::*.jpg,*.png" "/dir2::*.rar,*.png" --denied-patterns "/dir3::*.zip,*.rar" --denied-protocols DAV FTP --additional-info "sample info"
 ```
 
 Output:
 
 ```json
 {
+  "additional_info": "sample info",
   "download_bandwidth": 60,
   "expiration_date": 1546297200000,
   "filesystem": {
-    "gcsconfig": {},
+    "azblobconfig": {
+      "account_key": {}
+    },
+    "cryptconfig": {
+      "passphrase": {}
+    },
+    "gcsconfig": {
+      "credentials": {}
+    },
     "provider": 1,
     "s3config": {
       "access_key": "accesskey",
-      "access_secret": "$aes$6c088ba12b0b261247c8cf331c46d9260b8e58002957d89ad1c0495e3af665cd0227",
+      "access_secret": {
+        "payload": "ALVIG4egZxRjKH8/8NsJViA7EH5MqsweqmwLhGj4M4AGYgMM2ygF7kbCw+R5aQ==",
+        "status": "Secretbox"
+      },
       "bucket": "test",
       "endpoint": "http://127.0.0.1:9000",
       "key_prefix": "vfolder/",
@@ -66,6 +80,10 @@ Output:
       "storage_class": "Standard",
       "upload_concurrency": 4,
       "upload_part_size": 10
+    },
+    "sftpconfig": {
+      "password": {},
+      "private_key": {}
     }
   },
   "filters": {
@@ -80,25 +98,25 @@ Output:
       "DAV",
       "FTP"
     ],
-    "file_extensions": [
+    "file_patterns": [
       {
-        "allowed_extensions": [
-          ".jpg",
-          ".png"
+        "allowed_patterns": [
+          "*.jpg",
+          "*.png"
         ],
         "path": "/dir1"
       },
       {
-        "allowed_extensions": [
-          ".rar",
-          ".png"
+        "allowed_patterns": [
+          "*.rar",
+          "*.png"
         ],
         "path": "/dir2"
       },
       {
-        "denied_extensions": [
-          ".zip",
-          ".rar"
+        "denied_patterns": [
+          "*.zip",
+          "*.rar"
         ],
         "path": "/dir3"
       }
@@ -144,7 +162,7 @@ Output:
 Command:
 
 ```console
-python sftpgo_api_cli update-user 9576 test_username --password "test_pwd" --home-dir="/tmp/test_home_dir" --uid 0 --gid 33 --max-sessions 3 --quota-size 0 --quota-files 4 --permissions "*" --subdirs-permissions "/dir1::list,download,create_symlinks" --upload-bandwidth 90 --download-bandwidth 80 --status 1 --expiration-date "" --allowed-ip "" --denied-ip "192.168.1.0/24" --denied-login-methods "" --fs local --virtual-folders "/vdir1::/tmp/mapped1::-1::-1" "/vdir2::/tmp/mapped2::100::104857600" --allowed-extensions "" --denied-extensions "" --max-upload-file-size 104857600 --denied-protocols ""
+python sftpgo_api_cli update-user 9576 test_username --password "test_pwd" --home-dir="/tmp/test_home_dir" --uid 0 --gid 33 --max-sessions 3 --quota-size 0 --quota-files 4 --permissions "*" --subdirs-permissions "/dir1::list,download,create_symlinks" --upload-bandwidth 90 --download-bandwidth 80 --status 1 --expiration-date "" --allowed-ip "" --denied-ip "192.168.1.0/24" --denied-login-methods "" --fs local --virtual-folders "/vdir1::/tmp/mapped1::-1::-1" "/vdir2::/tmp/mapped2::100::104857600" --allowed-patterns "" --denied-patterns "" --max-upload-file-size 104857600 --denied-protocols ""
 ```
 
 Output:
@@ -174,36 +192,27 @@ Output:
   "download_bandwidth": 80,
   "expiration_date": 0,
   "filesystem": {
-    "gcsconfig": {},
+    "azblobconfig": {
+      "account_key": {}
+    },
+    "cryptconfig": {
+      "passphrase": {}
+    },
+    "gcsconfig": {
+      "credentials": {}
+    },
     "provider": 0,
-    "s3config": {}
+    "s3config": {
+      "access_secret": {}
+    },
+    "sftpconfig": {
+      "password": {},
+      "private_key": {}
+    }
   },
   "filters": {
     "denied_ip": [
       "192.168.1.0/24"
-    ],
-    "file_extensions": [
-      {
-        "allowed_extensions": [
-          ".jpg",
-          ".png"
-        ],
-        "path": "/dir1"
-      },
-      {
-        "allowed_extensions": [
-          ".rar",
-          ".png"
-        ],
-        "path": "/dir2"
-      },
-      {
-        "denied_extensions": [
-          ".zip",
-          ".rar"
-        ],
-        "path": "/dir3"
-      }
     ],
     "max_upload_file_size": 104857600
   },
@@ -272,14 +281,29 @@ Output:
     "download_bandwidth": 80,
     "expiration_date": 0,
     "filesystem": {
-      "gcsconfig": {},
+      "azblobconfig": {
+        "account_key": {}
+      },
+      "cryptconfig": {
+        "passphrase": {}
+      },
+      "gcsconfig": {
+        "credentials": {}
+      },
       "provider": 0,
-      "s3config": {}
+      "s3config": {
+        "access_secret": {}
+      },
+      "sftpconfig": {
+        "password": {},
+        "private_key": {}
+      }
     },
     "filters": {
       "denied_ip": [
         "192.168.1.0/24"
-      ]
+      ],
+      "max_upload_file_size": 104857600
     },
     "gid": 33,
     "home_dir": "/tmp/test_home_dir",

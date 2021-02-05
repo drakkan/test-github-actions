@@ -66,7 +66,15 @@ Command-line flags should be specified in the Subsystem declaration.
 			// idle connection are managed externally
 			commonConfig.IdleTimeout = 0
 			config.SetCommonConfig(commonConfig)
-			common.Initialize(config.GetCommonConfig())
+			if err := common.Initialize(config.GetCommonConfig()); err != nil {
+				logger.Error(logSender, connectionID, "%v", err)
+				os.Exit(1)
+			}
+			kmsConfig := config.GetKMSConfig()
+			if err := kmsConfig.Initialize(); err != nil {
+				logger.Error(logSender, connectionID, "unable to initialize KMS: %v", err)
+				os.Exit(1)
+			}
 			dataProviderConf := config.GetProviderConf()
 			if dataProviderConf.Driver == dataprovider.SQLiteDataProviderName || dataProviderConf.Driver == dataprovider.BoltDataProviderName {
 				logger.Debug(logSender, connectionID, "data provider %#v not supported in subsystem mode, using %#v provider",
@@ -76,7 +84,7 @@ Command-line flags should be specified in the Subsystem declaration.
 				dataProviderConf.PreferDatabaseCredentials = true
 			}
 			config.SetProviderConf(dataProviderConf)
-			err = dataprovider.Initialize(dataProviderConf, configDir)
+			err = dataprovider.Initialize(dataProviderConf, configDir, false)
 			if err != nil {
 				logger.Error(logSender, connectionID, "unable to initialize the data provider: %v", err)
 				os.Exit(1)
@@ -88,7 +96,7 @@ Command-line flags should be specified in the Subsystem declaration.
 				if user.HomeDir != filepath.Clean(homedir) && !preserveHomeDir {
 					// update the user
 					user.HomeDir = filepath.Clean(homedir)
-					err = dataprovider.UpdateUser(user)
+					err = dataprovider.UpdateUser(&user)
 					if err != nil {
 						logger.Error(logSender, connectionID, "unable to update user %#v: %v", username, err)
 						os.Exit(1)
@@ -105,7 +113,7 @@ Command-line flags should be specified in the Subsystem declaration.
 				user.Password = connectionID
 				user.Permissions = make(map[string][]string)
 				user.Permissions["/"] = []string{dataprovider.PermAny}
-				err = dataprovider.AddUser(user)
+				err = dataprovider.AddUser(&user)
 				if err != nil {
 					logger.Error(logSender, connectionID, "unable to add user %#v: %v", username, err)
 					os.Exit(1)
@@ -140,33 +148,8 @@ $ journalctl -o verbose -f
 To see full logs.
 If not set, the logs will be sent to the standard
 error`)
-	viper.SetDefault(configDirKey, defaultConfigDir)
-	viper.BindEnv(configDirKey, "SFTPGO_CONFIG_DIR") //nolint:errcheck // err is not nil only if the key to bind is missing
-	subsystemCmd.Flags().StringVarP(&configDir, configDirFlag, "c", viper.GetString(configDirKey),
-		`Location for SFTPGo config dir. This directory
-should contain the "sftpgo" configuration file
-or the configured config-file and it is used as
-the base for files with a relative path (eg. the
-private keys for the SFTP server, the SQLite
-database if you use SQLite as data provider).
-This flag can be set using SFTPGO_CONFIG_DIR
-env var too.`)
-	viper.BindPFlag(configDirKey, subsystemCmd.Flags().Lookup(configDirFlag)) //nolint:errcheck
 
-	viper.SetDefault(configFileKey, defaultConfigName)
-	viper.BindEnv(configFileKey, "SFTPGO_CONFIG_FILE") //nolint:errcheck
-	subsystemCmd.Flags().StringVarP(&configFile, configFileFlag, "f", viper.GetString(configFileKey),
-		`Name for SFTPGo configuration file. It must be
-the name of a file stored in config-dir not the
-absolute path to the configuration file. The
-specified file name must have no extension we
-automatically load JSON, YAML, TOML, HCL and
-Java properties. Therefore if you set "sftpgo"
-then "sftpgo.json", "sftpgo.yaml" and so on
-are searched.
-This flag can be set using SFTPGO_CONFIG_FILE
-env var too.`)
-	viper.BindPFlag(configFileKey, subsystemCmd.Flags().Lookup(configFileFlag)) //nolint:errcheck
+	addConfigFlags(subsystemCmd)
 
 	viper.SetDefault(logVerboseKey, defaultLogVerbose)
 	viper.BindEnv(logVerboseKey, "SFTPGO_LOG_VERBOSE") //nolint:errcheck

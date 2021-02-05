@@ -15,10 +15,13 @@ import (
 
 	"github.com/drakkan/sftpgo/config"
 	"github.com/drakkan/sftpgo/dataprovider"
+	"github.com/drakkan/sftpgo/ftpd"
+	"github.com/drakkan/sftpgo/kms"
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/sftpd"
 	"github.com/drakkan/sftpgo/utils"
 	"github.com/drakkan/sftpgo/version"
+	"github.com/drakkan/sftpgo/webdavd"
 )
 
 // StartPortableMode starts the service in portable mode
@@ -32,51 +35,51 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort int, enabledS
 	if err != nil {
 		fmt.Printf("error loading configuration file: %v using defaults\n", err)
 	}
-	if len(s.PortableUser.Username) == 0 {
-		s.PortableUser.Username = "user"
+	kmsConfig := config.GetKMSConfig()
+	err = kmsConfig.Initialize()
+	if err != nil {
+		return err
 	}
-	printablePassword := ""
-	if len(s.PortableUser.Password) > 0 {
-		printablePassword = "[redacted]"
-	}
-	if len(s.PortableUser.PublicKeys) == 0 && len(s.PortableUser.Password) == 0 {
-		var b strings.Builder
-		for i := 0; i < 8; i++ {
-			b.WriteRune(chars[rand.Intn(len(chars))])
-		}
-		s.PortableUser.Password = b.String()
-		printablePassword = s.PortableUser.Password
-	}
+	printablePassword := s.configurePortableUser()
 	dataProviderConf := config.GetProviderConf()
 	dataProviderConf.Driver = dataprovider.MemoryDataProviderName
 	dataProviderConf.Name = ""
 	dataProviderConf.PreferDatabaseCredentials = true
 	config.SetProviderConf(dataProviderConf)
 	httpdConf := config.GetHTTPDConfig()
-	httpdConf.BindPort = 0
+	httpdConf.Bindings = nil
 	config.SetHTTPDConfig(httpdConf)
 	sftpdConf := config.GetSFTPDConfig()
 	sftpdConf.MaxAuthTries = 12
-	if sftpdPort > 0 {
-		sftpdConf.BindPort = sftpdPort
-	} else {
-		// dynamic ports starts from 49152
-		sftpdConf.BindPort = 49152 + rand.Intn(15000)
+	sftpdConf.Bindings = []sftpd.Binding{
+		{
+			Port: sftpdPort,
+		},
 	}
-	if utils.IsStringInSlice("*", enabledSSHCommands) {
-		sftpdConf.EnabledSSHCommands = sftpd.GetSupportedSSHCommands()
-	} else {
-		sftpdConf.EnabledSSHCommands = enabledSSHCommands
+	if sftpdPort >= 0 {
+		if sftpdPort > 0 {
+			sftpdConf.Bindings[0].Port = sftpdPort
+		} else {
+			// dynamic ports starts from 49152
+			sftpdConf.Bindings[0].Port = 49152 + rand.Intn(15000)
+		}
+		if utils.IsStringInSlice("*", enabledSSHCommands) {
+			sftpdConf.EnabledSSHCommands = sftpd.GetSupportedSSHCommands()
+		} else {
+			sftpdConf.EnabledSSHCommands = enabledSSHCommands
+		}
 	}
 	config.SetSFTPDConfig(sftpdConf)
 
 	if ftpPort >= 0 {
 		ftpConf := config.GetFTPDConfig()
+		binding := ftpd.Binding{}
 		if ftpPort > 0 {
-			ftpConf.BindPort = ftpPort
+			binding.Port = ftpPort
 		} else {
-			ftpConf.BindPort = 49152 + rand.Intn(15000)
+			binding.Port = 49152 + rand.Intn(15000)
 		}
+		ftpConf.Bindings = []ftpd.Binding{binding}
 		ftpConf.Banner = fmt.Sprintf("SFTPGo portable %v ready", version.Get().Version)
 		ftpConf.CertificateFile = ftpsCert
 		ftpConf.CertificateKeyFile = ftpsKey
@@ -85,10 +88,11 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort int, enabledS
 
 	if webdavPort >= 0 {
 		webDavConf := config.GetWebDAVDConfig()
+		binding := webdavd.Binding{}
 		if webdavPort > 0 {
-			webDavConf.BindPort = webdavPort
+			binding.Port = webdavPort
 		} else {
-			webDavConf.BindPort = 49152 + rand.Intn(15000)
+			binding.Port = 49152 + rand.Intn(15000)
 		}
 		webDavConf.CertificateFile = webDavCert
 		webDavConf.CertificateKeyFile = webDavKey
@@ -102,28 +106,28 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort int, enabledS
 
 	s.advertiseServices(advertiseService, advertiseCredentials)
 
-	logger.InfoToConsole("Portable mode ready, SFTP port: %v, user: %#v, password: %#v, public keys: %v, directory: %#v, "+
-		"permissions: %+v, enabled ssh commands: %v file extensions filters: %+v %v", sftpdConf.BindPort, s.PortableUser.Username,
+	logger.InfoToConsole("Portable mode ready, user: %#v, password: %#v, public keys: %v, directory: %#v, "+
+		"permissions: %+v, enabled ssh commands: %v file patterns filters: %+v %v", s.PortableUser.Username,
 		printablePassword, s.PortableUser.PublicKeys, s.getPortableDirToServe(), s.PortableUser.Permissions,
-		sftpdConf.EnabledSSHCommands, s.PortableUser.Filters.FileExtensions, s.getServiceOptionalInfoString())
+		sftpdConf.EnabledSSHCommands, s.PortableUser.Filters.FilePatterns, s.getServiceOptionalInfoString())
 	return nil
 }
 
 func (s *Service) getServiceOptionalInfoString() string {
 	var info strings.Builder
-	if config.GetFTPDConfig().BindPort > 0 {
-		info.WriteString(fmt.Sprintf("FTP port: %v ", config.GetFTPDConfig().BindPort))
+	if config.GetSFTPDConfig().Bindings[0].IsValid() {
+		info.WriteString(fmt.Sprintf("SFTP port: %v ", config.GetSFTPDConfig().Bindings[0].Port))
 	}
-	if config.GetWebDAVDConfig().BindPort > 0 {
-		if info.Len() == 0 {
-			info.WriteString(" ")
-		}
+	if config.GetFTPDConfig().Bindings[0].IsValid() {
+		info.WriteString(fmt.Sprintf("FTP port: %v ", config.GetFTPDConfig().Bindings[0].Port))
+	}
+	if config.GetWebDAVDConfig().Bindings[0].IsValid() {
 		scheme := "http"
-		if len(config.GetWebDAVDConfig().CertificateFile) > 0 && len(config.GetWebDAVDConfig().CertificateKeyFile) > 0 {
+		if config.GetWebDAVDConfig().CertificateFile != "" && config.GetWebDAVDConfig().CertificateKeyFile != "" {
 			scheme = "https"
 		}
 		info.WriteString(fmt.Sprintf("WebDAV URL: %v://<your IP>:%v/%v",
-			scheme, config.GetWebDAVDConfig().BindPort, s.PortableUser.Username))
+			scheme, config.GetWebDAVDConfig().Bindings[0].Port, s.PortableUser.Username))
 	}
 	return info.String()
 }
@@ -148,14 +152,14 @@ func (s *Service) advertiseServices(advertiseService, advertiseCredentials bool)
 			}
 		}
 		sftpdConf := config.GetSFTPDConfig()
-		if sftpdConf.BindPort > 0 {
+		if sftpdConf.Bindings[0].IsValid() {
 			mDNSServiceSFTP, err = zeroconf.Register(
-				fmt.Sprintf("SFTPGo portable %v", sftpdConf.BindPort), // service instance name
-				"_sftp-ssh._tcp",   // service type and protocol
-				"local.",           // service domain
-				sftpdConf.BindPort, // service port
-				meta,               // service metadata
-				nil,                // register on all network interfaces
+				fmt.Sprintf("SFTPGo portable %v", sftpdConf.Bindings[0].Port), // service instance name
+				"_sftp-ssh._tcp",           // service type and protocol
+				"local.",                   // service domain
+				sftpdConf.Bindings[0].Port, // service port
+				meta,                       // service metadata
+				nil,                        // register on all network interfaces
 			)
 			if err != nil {
 				mDNSServiceSFTP = nil
@@ -165,12 +169,13 @@ func (s *Service) advertiseServices(advertiseService, advertiseCredentials bool)
 			}
 		}
 		ftpdConf := config.GetFTPDConfig()
-		if ftpdConf.BindPort > 0 {
+		if ftpdConf.Bindings[0].IsValid() {
+			port := ftpdConf.Bindings[0].Port
 			mDNSServiceFTP, err = zeroconf.Register(
-				fmt.Sprintf("SFTPGo portable %v", ftpdConf.BindPort),
+				fmt.Sprintf("SFTPGo portable %v", port),
 				"_ftp._tcp",
 				"local.",
-				ftpdConf.BindPort,
+				port,
 				meta,
 				nil,
 			)
@@ -182,12 +187,12 @@ func (s *Service) advertiseServices(advertiseService, advertiseCredentials bool)
 			}
 		}
 		webdavConf := config.GetWebDAVDConfig()
-		if webdavConf.BindPort > 0 {
+		if webdavConf.Bindings[0].IsValid() {
 			mDNSServiceDAV, err = zeroconf.Register(
-				fmt.Sprintf("SFTPGo portable %v", webdavConf.BindPort),
+				fmt.Sprintf("SFTPGo portable %v", webdavConf.Bindings[0].Port),
 				"_http._tcp",
 				"local.",
-				webdavConf.BindPort,
+				webdavConf.Bindings[0].Port,
 				meta,
 				nil,
 			)
@@ -229,4 +234,66 @@ func (s *Service) getPortableDirToServe() string {
 		dirToServe = s.PortableUser.HomeDir
 	}
 	return dirToServe
+}
+
+// configures the portable user and return the printable password if any
+func (s *Service) configurePortableUser() string {
+	if s.PortableUser.Username == "" {
+		s.PortableUser.Username = "user"
+	}
+	printablePassword := ""
+	if len(s.PortableUser.Password) > 0 {
+		printablePassword = "[redacted]"
+	}
+	if len(s.PortableUser.PublicKeys) == 0 && s.PortableUser.Password == "" {
+		var b strings.Builder
+		for i := 0; i < 8; i++ {
+			b.WriteRune(chars[rand.Intn(len(chars))])
+		}
+		s.PortableUser.Password = b.String()
+		printablePassword = s.PortableUser.Password
+	}
+	s.configurePortableSecrets()
+	return printablePassword
+}
+
+func (s *Service) configurePortableSecrets() {
+	// we created the user before to initialize the KMS so we need to create the secret here
+	switch s.PortableUser.FsConfig.Provider {
+	case dataprovider.S3FilesystemProvider:
+		payload := s.PortableUser.FsConfig.S3Config.AccessSecret.GetPayload()
+		s.PortableUser.FsConfig.S3Config.AccessSecret = kms.NewEmptySecret()
+		if payload != "" {
+			s.PortableUser.FsConfig.S3Config.AccessSecret = kms.NewPlainSecret(payload)
+		}
+	case dataprovider.GCSFilesystemProvider:
+		payload := s.PortableUser.FsConfig.GCSConfig.Credentials.GetPayload()
+		s.PortableUser.FsConfig.GCSConfig.Credentials = kms.NewEmptySecret()
+		if payload != "" {
+			s.PortableUser.FsConfig.GCSConfig.Credentials = kms.NewPlainSecret(payload)
+		}
+	case dataprovider.AzureBlobFilesystemProvider:
+		payload := s.PortableUser.FsConfig.AzBlobConfig.AccountKey.GetPayload()
+		s.PortableUser.FsConfig.AzBlobConfig.AccountKey = kms.NewEmptySecret()
+		if payload != "" {
+			s.PortableUser.FsConfig.AzBlobConfig.AccountKey = kms.NewPlainSecret(payload)
+		}
+	case dataprovider.CryptedFilesystemProvider:
+		payload := s.PortableUser.FsConfig.CryptConfig.Passphrase.GetPayload()
+		s.PortableUser.FsConfig.CryptConfig.Passphrase = kms.NewEmptySecret()
+		if payload != "" {
+			s.PortableUser.FsConfig.CryptConfig.Passphrase = kms.NewPlainSecret(payload)
+		}
+	case dataprovider.SFTPFilesystemProvider:
+		payload := s.PortableUser.FsConfig.SFTPConfig.Password.GetPayload()
+		s.PortableUser.FsConfig.SFTPConfig.Password = kms.NewEmptySecret()
+		if payload != "" {
+			s.PortableUser.FsConfig.SFTPConfig.Password = kms.NewPlainSecret(payload)
+		}
+		payload = s.PortableUser.FsConfig.SFTPConfig.PrivateKey.GetPayload()
+		s.PortableUser.FsConfig.SFTPConfig.PrivateKey = kms.NewEmptySecret()
+		if payload != "" {
+			s.PortableUser.FsConfig.SFTPConfig.PrivateKey = kms.NewPlainSecret(payload)
+		}
+	}
 }

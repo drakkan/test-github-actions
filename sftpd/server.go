@@ -36,13 +36,40 @@ var (
 	sftpExtensions = []string{"posix-rename@openssh.com"}
 )
 
+// Binding defines the configuration for a network listener
+type Binding struct {
+	// The address to listen on. A blank value means listen on all available network interfaces.
+	Address string `json:"address" mapstructure:"address"`
+	// The port used for serving requests
+	Port int `json:"port" mapstructure:"port"`
+	// Apply the proxy configuration, if any, for this binding
+	ApplyProxyConfig bool `json:"apply_proxy_config" mapstructure:"apply_proxy_config"`
+}
+
+// GetAddress returns the binding address
+func (b *Binding) GetAddress() string {
+	return fmt.Sprintf("%s:%d", b.Address, b.Port)
+}
+
+// IsValid returns true if the binding port is > 0
+func (b *Binding) IsValid() bool {
+	return b.Port > 0
+}
+
+// HasProxy returns true if the proxy protocol is active for this binding
+func (b *Binding) HasProxy() bool {
+	return b.ApplyProxyConfig && common.Config.ProxyProtocol > 0
+}
+
 // Configuration for the SFTP server
 type Configuration struct {
 	// Identification string used by the server
 	Banner string `json:"banner" mapstructure:"banner"`
-	// The port used for serving SFTP requests
+	// Addresses and ports to bind to
+	Bindings []Binding `json:"bindings" mapstructure:"bindings"`
+	// Deprecated: please use Bindings
 	BindPort int `json:"bind_port" mapstructure:"bind_port"`
-	// The address to listen on. A blank value means listen on all available network interfaces.
+	// Deprecated: please use Bindings
 	BindAddress string `json:"bind_address" mapstructure:"bind_address"`
 	// Deprecated: please use the same key in common configuration
 	IdleTimeout int `json:"idle_timeout" mapstructure:"idle_timeout"`
@@ -127,8 +154,19 @@ func (e *authenticationError) Error() string {
 	return fmt.Sprintf("Authentication error: %s", e.err)
 }
 
+// ShouldBind returns true if there is at least a valid binding
+func (c *Configuration) ShouldBind() bool {
+	for _, binding := range c.Bindings {
+		if binding.IsValid() {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Initialize the SFTP server and add a persistent listener to handle inbound SFTP connections.
-func (c Configuration) Initialize(configDir string) error {
+func (c *Configuration) Initialize(configDir string) error {
 	serverConfig := &ssh.ServerConfig{
 		NoClientAuth: false,
 		MaxAuthTries: c.MaxAuthTries,
@@ -165,7 +203,12 @@ func (c Configuration) Initialize(configDir string) error {
 		}
 	}
 
+	if !c.ShouldBind() {
+		return common.ErrNoBinding
+	}
+
 	if err := c.checkAndLoadHostKeys(configDir, serverConfig); err != nil {
+		serviceStatus.HostKeys = nil
 		return err
 	}
 
@@ -180,32 +223,75 @@ func (c Configuration) Initialize(configDir string) error {
 	c.configureLoginBanner(serverConfig, configDir)
 	c.checkSSHCommands()
 
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", c.BindAddress, c.BindPort))
-	if err != nil {
-		logger.Warn(logSender, "", "error starting listener on address %s:%d: %v", c.BindAddress, c.BindPort, err)
-		return err
+	exitChannel := make(chan error, 1)
+	serviceStatus.Bindings = nil
+
+	for _, binding := range c.Bindings {
+		if !binding.IsValid() {
+			continue
+		}
+		serviceStatus.Bindings = append(serviceStatus.Bindings, binding)
+
+		go func(binding Binding) {
+			addr := binding.GetAddress()
+			listener, err := net.Listen("tcp", addr)
+			if err != nil {
+				logger.Warn(logSender, "", "error starting listener on address %v: %v", addr, err)
+				exitChannel <- err
+				return
+			}
+
+			if binding.ApplyProxyConfig {
+				proxyListener, err := common.Config.GetProxyListener(listener)
+				if err != nil {
+					logger.Warn(logSender, "", "error enabling proxy listener: %v", err)
+					exitChannel <- err
+					return
+				}
+				if proxyListener != nil {
+					listener = proxyListener
+				}
+			}
+
+			exitChannel <- c.serve(listener, serverConfig)
+		}(binding)
 	}
-	proxyListener, err := common.Config.GetProxyListener(listener)
-	if err != nil {
-		logger.Warn(logSender, "", "error enabling proxy listener: %v", err)
-		return err
-	}
-	logger.Info(logSender, "", "server listener registered address: %v", listener.Addr().String())
+
+	serviceStatus.IsActive = true
+	serviceStatus.SSHCommands = c.EnabledSSHCommands
+
+	return <-exitChannel
+}
+
+func (c *Configuration) serve(listener net.Listener, serverConfig *ssh.ServerConfig) error {
+	logger.Info(logSender, "", "server listener registered, address: %v", listener.Addr().String())
+	var tempDelay time.Duration // how long to sleep on accept failure
 
 	for {
-		var conn net.Conn
-		if proxyListener != nil {
-			conn, err = proxyListener.Accept()
-		} else {
-			conn, err = listener.Accept()
+		conn, err := listener.Accept()
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+				if max := 1 * time.Second; tempDelay > max {
+					tempDelay = max
+				}
+				logger.Warn(logSender, "", "accept error: %v; retrying in %v", err, tempDelay)
+				time.Sleep(tempDelay)
+				continue
+			}
+			logger.Warn(logSender, "", "unrecoverable accept error: %v", err)
+			return err
 		}
-		if conn != nil && err == nil {
-			go c.AcceptInboundConnection(conn, serverConfig)
-		}
+
+		go c.AcceptInboundConnection(conn, serverConfig)
 	}
 }
 
-func (c Configuration) configureSecurityOptions(serverConfig *ssh.ServerConfig) {
+func (c *Configuration) configureSecurityOptions(serverConfig *ssh.ServerConfig) {
 	if len(c.KexAlgorithms) > 0 {
 		serverConfig.KeyExchanges = c.KexAlgorithms
 	}
@@ -217,7 +303,7 @@ func (c Configuration) configureSecurityOptions(serverConfig *ssh.ServerConfig) 
 	}
 }
 
-func (c Configuration) configureLoginBanner(serverConfig *ssh.ServerConfig, configDir string) {
+func (c *Configuration) configureLoginBanner(serverConfig *ssh.ServerConfig, configDir string) {
 	if len(c.LoginBannerFile) > 0 {
 		bannerFilePath := c.LoginBannerFile
 		if !filepath.IsAbs(bannerFilePath) {
@@ -236,8 +322,8 @@ func (c Configuration) configureLoginBanner(serverConfig *ssh.ServerConfig, conf
 	}
 }
 
-func (c Configuration) configureKeyboardInteractiveAuth(serverConfig *ssh.ServerConfig) {
-	if len(c.KeyboardInteractiveHook) == 0 {
+func (c *Configuration) configureKeyboardInteractiveAuth(serverConfig *ssh.ServerConfig) {
+	if c.KeyboardInteractiveHook == "" {
 		return
 	}
 	if !strings.HasPrefix(c.KeyboardInteractiveHook, "http") {
@@ -265,30 +351,41 @@ func (c Configuration) configureKeyboardInteractiveAuth(serverConfig *ssh.Server
 	}
 }
 
+func canAcceptConnection(ip string) bool {
+	if common.IsBanned(ip) {
+		logger.Log(logger.LevelDebug, common.ProtocolSSH, "", "connection refused, ip %#v is banned", ip)
+		return false
+	}
+	if !common.Connections.IsNewConnectionAllowed() {
+		logger.Log(logger.LevelDebug, common.ProtocolSSH, "", "connection refused, configured limit reached")
+		return false
+	}
+	if err := common.Config.ExecutePostConnectHook(ip, common.ProtocolSSH); err != nil {
+		return false
+	}
+	return true
+}
+
 // AcceptInboundConnection handles an inbound connection to the server instance and determines if the request should be served or not.
-func (c Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.ServerConfig) {
+func (c *Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.ServerConfig) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error(logSender, "", "panic in AcceptInboundConnection: %#v stack strace: %v", r, string(debug.Stack()))
 		}
 	}()
-	// Before beginning a handshake must be performed on the incoming net.Conn
-	// we'll set a Deadline for handshake to complete, the default is 2 minutes as OpenSSH
-	conn.SetDeadline(time.Now().Add(handshakeTimeout)) //nolint:errcheck
-	remoteAddr := conn.RemoteAddr()
-	if err := common.Config.ExecutePostConnectHook(remoteAddr.String(), common.ProtocolSSH); err != nil {
+	ipAddr := utils.GetIPFromRemoteAddress(conn.RemoteAddr().String())
+	if !canAcceptConnection(ipAddr) {
 		conn.Close()
 		return
 	}
+	// Before beginning a handshake must be performed on the incoming net.Conn
+	// we'll set a Deadline for handshake to complete, the default is 2 minutes as OpenSSH
+	conn.SetDeadline(time.Now().Add(handshakeTimeout)) //nolint:errcheck
+
 	sconn, chans, reqs, err := ssh.NewServerConn(conn, config)
 	if err != nil {
 		logger.Debug(logSender, "", "failed to accept an incoming connection: %v", err)
-		if _, ok := err.(*ssh.ServerAuthError); !ok {
-			ip := utils.GetIPFromRemoteAddress(remoteAddr.String())
-			logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTryed, common.ProtocolSSH, err.Error())
-			metrics.AddNoAuthTryed()
-			dataprovider.ExecutePostLoginHook("", dataprovider.LoginMethodNoAuthTryed, ip, common.ProtocolSSH, err)
-		}
+		checkAuthError(ipAddr, err)
 		return
 	}
 	// handshake completed so remove the deadline, we'll use IdleTimeout configuration from now on
@@ -304,18 +401,13 @@ func (c Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Server
 	loginType := sconn.Permissions.Extensions["sftpgo_login_method"]
 	connectionID := hex.EncodeToString(sconn.SessionID())
 
-	fs, err := user.GetFilesystem(connectionID)
-
-	if err != nil {
-		logger.Warn(logSender, "", "could not create filesystem for user %#v err: %v", user.Username, err)
+	if err = checkRootPath(&user, connectionID); err != nil {
 		return
 	}
 
-	fs.CheckRootPath(user.Username, user.GetUID(), user.GetGID())
-
 	logger.Log(logger.LevelInfo, common.ProtocolSSH, connectionID,
 		"User id: %d, logged in with: %#v, username: %#v, home_dir: %#v remote addr: %#v",
-		user.ID, loginType, user.Username, user.HomeDir, remoteAddr.String())
+		user.ID, loginType, user.Username, user.HomeDir, ipAddr)
 	dataprovider.UpdateLastLogin(user) //nolint:errcheck
 
 	sshConnection := common.NewSSHConnection(connectionID, conn)
@@ -354,32 +446,44 @@ func (c Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Server
 				switch req.Type {
 				case "subsystem":
 					if string(req.Payload[4:]) == "sftp" {
-						ok = true
-						connection := Connection{
-							BaseConnection: common.NewBaseConnection(connID, common.ProtocolSFTP, user, fs),
-							ClientVersion:  string(sconn.ClientVersion()),
-							RemoteAddr:     remoteAddr,
-							channel:        channel,
+						fs, err := user.GetFilesystem(connID)
+						if err == nil {
+							ok = true
+							connection := Connection{
+								BaseConnection: common.NewBaseConnection(connID, common.ProtocolSFTP, user, fs),
+								ClientVersion:  string(sconn.ClientVersion()),
+								RemoteAddr:     conn.RemoteAddr(),
+								channel:        channel,
+							}
+							go c.handleSftpConnection(channel, &connection)
+						} else {
+							logger.Debug(logSender, connID, "unable to create filesystem: %v", err)
 						}
-						go c.handleSftpConnection(channel, &connection)
 					}
 				case "exec":
 					// protocol will be set later inside processSSHCommand it could be SSH or SCP
-					connection := Connection{
-						BaseConnection: common.NewBaseConnection(connID, "sshd_exec", user, fs),
-						ClientVersion:  string(sconn.ClientVersion()),
-						RemoteAddr:     remoteAddr,
-						channel:        channel,
+					fs, err := user.GetFilesystem(connID)
+					if err == nil {
+						connection := Connection{
+							BaseConnection: common.NewBaseConnection(connID, "sshd_exec", user, fs),
+							ClientVersion:  string(sconn.ClientVersion()),
+							RemoteAddr:     conn.RemoteAddr(),
+							channel:        channel,
+						}
+						ok = processSSHCommand(req.Payload, &connection, c.EnabledSSHCommands)
+					} else {
+						logger.Debug(sshCommandLogSender, connID, "unable to create filesystem: %v", err)
 					}
-					ok = processSSHCommand(req.Payload, &connection, c.EnabledSSHCommands)
 				}
-				req.Reply(ok, nil) //nolint:errcheck
+				if req.WantReply {
+					req.Reply(ok, nil) //nolint:errcheck
+				}
 			}
 		}(requests, channelCounter)
 	}
 }
 
-func (c Configuration) handleSftpConnection(channel ssh.Channel, connection *Connection) {
+func (c *Configuration) handleSftpConnection(channel ssh.Channel, connection *Connection) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error(logSender, "", "panic in handleSftpConnection: %#v stack strace: %v", r, string(debug.Stack()))
@@ -394,24 +498,63 @@ func (c Configuration) handleSftpConnection(channel ssh.Channel, connection *Con
 	// Create the server instance for the channel using the handler we created above.
 	server := sftp.NewRequestServer(channel, handler, sftp.WithRSAllocator())
 
+	defer server.Close()
 	if err := server.Serve(); err == io.EOF {
 		connection.Log(logger.LevelDebug, "connection closed, sending exit status")
 		exitStatus := sshSubsystemExitStatus{Status: uint32(0)}
 		_, err = channel.SendRequest("exit-status", false, ssh.Marshal(&exitStatus))
 		connection.Log(logger.LevelDebug, "sent exit status %+v error: %v", exitStatus, err)
-		server.Close()
 	} else if err != nil {
 		connection.Log(logger.LevelWarn, "connection closed with error: %v", err)
 	}
 }
 
-func (c Configuration) createHandler(connection *Connection) sftp.Handlers {
+func (c *Configuration) createHandler(connection *Connection) sftp.Handlers {
 	return sftp.Handlers{
 		FileGet:  connection,
 		FilePut:  connection,
 		FileCmd:  connection,
 		FileList: connection,
 	}
+}
+
+func checkAuthError(ip string, err error) {
+	if authErrors, ok := err.(*ssh.ServerAuthError); ok {
+		// check public key auth errors here
+		for _, err := range authErrors.Errors {
+			if err != nil {
+				// these checks should be improved, we should check for error type and not error strings
+				if strings.Contains(err.Error(), "public key credentials") {
+					event := common.HostEventLoginFailed
+					if strings.Contains(err.Error(), "not found") {
+						event = common.HostEventUserNotFound
+					}
+					common.AddDefenderEvent(ip, event)
+					break
+				}
+			}
+		}
+	} else {
+		logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTryed, common.ProtocolSSH, err.Error())
+		metrics.AddNoAuthTryed()
+		common.AddDefenderEvent(ip, common.HostEventNoLoginTried)
+		dataprovider.ExecutePostLoginHook(&dataprovider.User{}, dataprovider.LoginMethodNoAuthTryed, ip, common.ProtocolSSH, err)
+	}
+}
+
+func checkRootPath(user *dataprovider.User, connectionID string) error {
+	if user.FsConfig.Provider != dataprovider.SFTPFilesystemProvider {
+		// for sftp fs check root path does nothing so don't open a useless SFTP connection
+		fs, err := user.GetFilesystem(connectionID)
+		if err != nil {
+			logger.Warn(logSender, "", "could not create filesystem for user %#v err: %v", user.Username, err)
+			return err
+		}
+
+		fs.CheckRootPath(user.Username, user.GetUID(), user.GetGID())
+		fs.Close()
+	}
+	return nil
 }
 
 func loginUser(user dataprovider.User, loginMethod, publicKey string, conn ssh.ConnMetadata) (*ssh.Permissions, error) {
@@ -563,8 +706,8 @@ func (c *Configuration) checkAndLoadHostKeys(configDir string, serverConfig *ssh
 	if err := c.checkHostKeyAutoGeneration(configDir); err != nil {
 		return err
 	}
-	for _, k := range c.HostKeys {
-		hostKey := k
+	serviceStatus.HostKeys = nil
+	for _, hostKey := range c.HostKeys {
 		if !utils.IsFileInputValid(hostKey) {
 			logger.Warn(logSender, "", "unable to load invalid host key %#v", hostKey)
 			logger.WarnToConsole("unable to load invalid host key %#v", hostKey)
@@ -584,8 +727,13 @@ func (c *Configuration) checkAndLoadHostKeys(configDir string, serverConfig *ssh
 		if err != nil {
 			return err
 		}
+		k := HostKey{
+			Path:        hostKey,
+			Fingerprint: ssh.FingerprintSHA256(private.PublicKey()),
+		}
+		serviceStatus.HostKeys = append(serviceStatus.HostKeys, k)
 		logger.Info(logSender, "", "Host key %#v loaded, type %#v, fingerprint %#v", hostKey,
-			private.PublicKey().Type(), ssh.FingerprintSHA256(private.PublicKey()))
+			private.PublicKey().Type(), k.Fingerprint)
 
 		// Add private key to the server configuration.
 		serverConfig.AddHostKey(private)
@@ -633,7 +781,7 @@ func (c *Configuration) initializeCertChecker(configDir string) error {
 	return nil
 }
 
-func (c Configuration) validatePublicKeyCredentials(conn ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
+func (c *Configuration) validatePublicKeyCredentials(conn ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
 	var err error
 	var user dataprovider.User
 	var keyID string
@@ -642,25 +790,28 @@ func (c Configuration) validatePublicKeyCredentials(conn ssh.ConnMetadata, pubKe
 
 	connectionID := hex.EncodeToString(conn.SessionID())
 	method := dataprovider.SSHLoginMethodPublicKey
+	ipAddr := utils.GetIPFromRemoteAddress(conn.RemoteAddr().String())
 	cert, ok := pubKey.(*ssh.Certificate)
 	if ok {
 		if cert.CertType != ssh.UserCert {
 			err = fmt.Errorf("ssh: cert has type %d", cert.CertType)
-			updateLoginMetrics(conn, method, err)
+			user.Username = conn.User()
+			updateLoginMetrics(&user, ipAddr, method, err)
 			return nil, err
 		}
 		if !c.certChecker.IsUserAuthority(cert.SignatureKey) {
 			err = fmt.Errorf("ssh: certificate signed by unrecognized authority")
-			updateLoginMetrics(conn, method, err)
+			user.Username = conn.User()
+			updateLoginMetrics(&user, ipAddr, method, err)
 			return nil, err
 		}
 		if err := c.certChecker.CheckCert(conn.User(), cert); err != nil {
-			updateLoginMetrics(conn, method, err)
+			user.Username = conn.User()
+			updateLoginMetrics(&user, ipAddr, method, err)
 			return nil, err
 		}
 		certPerm = &cert.Permissions
 	}
-	ipAddr := utils.GetIPFromRemoteAddress(conn.RemoteAddr().String())
 	if user, keyID, err = dataprovider.CheckUserAndPubKey(conn.User(), pubKey.Marshal(), ipAddr, common.ProtocolSSH); err == nil {
 		if user.IsPartialAuth(method) {
 			logger.Debug(logSender, connectionID, "user %#v authenticated with partial success", conn.User())
@@ -678,11 +829,12 @@ func (c Configuration) validatePublicKeyCredentials(conn ssh.ConnMetadata, pubKe
 			}
 		}
 	}
-	updateLoginMetrics(conn, method, err)
+	user.Username = conn.User()
+	updateLoginMetrics(&user, ipAddr, method, err)
 	return sshPerm, err
 }
 
-func (c Configuration) validatePasswordCredentials(conn ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+func (c *Configuration) validatePasswordCredentials(conn ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
 	var err error
 	var user dataprovider.User
 	var sshPerm *ssh.Permissions
@@ -695,11 +847,12 @@ func (c Configuration) validatePasswordCredentials(conn ssh.ConnMetadata, pass [
 	if user, err = dataprovider.CheckUserAndPass(conn.User(), string(pass), ipAddr, common.ProtocolSSH); err == nil {
 		sshPerm, err = loginUser(user, method, "", conn)
 	}
-	updateLoginMetrics(conn, method, err)
+	user.Username = conn.User()
+	updateLoginMetrics(&user, ipAddr, method, err)
 	return sshPerm, err
 }
 
-func (c Configuration) validateKeyboardInteractiveCredentials(conn ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+func (c *Configuration) validateKeyboardInteractiveCredentials(conn ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
 	var err error
 	var user dataprovider.User
 	var sshPerm *ssh.Permissions
@@ -713,16 +866,26 @@ func (c Configuration) validateKeyboardInteractiveCredentials(conn ssh.ConnMetad
 		ipAddr, common.ProtocolSSH); err == nil {
 		sshPerm, err = loginUser(user, method, "", conn)
 	}
-	updateLoginMetrics(conn, method, err)
+	user.Username = conn.User()
+	updateLoginMetrics(&user, ipAddr, method, err)
 	return sshPerm, err
 }
 
-func updateLoginMetrics(conn ssh.ConnMetadata, method string, err error) {
+func updateLoginMetrics(user *dataprovider.User, ip, method string, err error) {
 	metrics.AddLoginAttempt(method)
-	ip := utils.GetIPFromRemoteAddress(conn.RemoteAddr().String())
 	if err != nil {
-		logger.ConnectionFailedLog(conn.User(), ip, method, common.ProtocolSSH, err.Error())
+		logger.ConnectionFailedLog(user.Username, ip, method, common.ProtocolSSH, err.Error())
+		if method != dataprovider.SSHLoginMethodPublicKey {
+			// some clients try all available public keys for a user, we
+			// record failed login key auth only once for session if the
+			// authentication fails in checkAuthError
+			event := common.HostEventLoginFailed
+			if _, ok := err.(*dataprovider.RecordNotFoundError); ok {
+				event = common.HostEventUserNotFound
+			}
+			common.AddDefenderEvent(ip, event)
+		}
 	}
 	metrics.AddLoginResult(method, err)
-	dataprovider.ExecutePostLoginHook(conn.User(), method, ip, common.ProtocolSSH, err)
+	dataprovider.ExecutePostLoginHook(user, method, ip, common.ProtocolSSH, err)
 }

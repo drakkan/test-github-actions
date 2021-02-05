@@ -4,10 +4,14 @@ SFTPGo provides an official Docker image, it is available on both [Docker Hub](h
 
 ## Supported tags and respective Dockerfile links
 
-- [v1.1.1, v1.1, v1, latest](https://github.com/drakkan/sftpgo/blob/v1.1.1/Dockerfile)
-- [v1.1.1-alpine, v1.1-alpine, v1-alpine, alpine](https://github.com/drakkan/sftpgo/blob/v1.1.1/Dockerfile.alpine)
-- [edge](../Dockerfile)
-- [edge-alpine](../Dockerfile.alpine)
+- [v1.2.2, v1.2, v1, latest](https://github.com/drakkan/sftpgo/blob/v1.2.2/Dockerfile.full)
+- [v1.2.2-alpine, v1.2-alpine, v1-alpine, alpine](https://github.com/drakkan/sftpgo/blob/v1.2.2/Dockerfile.full.alpine)
+- [v1.2.2-slim, v1.2-slim, v1-slim, slim](https://github.com/drakkan/sftpgo/blob/v1.2.2/Dockerfile)
+- [v1.2.2-alpine-slim, v1.2-alpine-slim, v1-alpine-slim, alpine-slim](https://github.com/drakkan/sftpgo/blob/v1.2.2/Dockerfile.alpine)
+- [edge](../Dockerfile.full)
+- [edge-alpine](../Dockerfile.full.alpine)
+- [edge-slim](../Dockerfile)
+- [edge-alpine-slim](../Dockerfile.alpine)
 
 ## How to use the SFTPGo image
 
@@ -27,10 +31,10 @@ If you prefer GitHub Container Registry to Docker Hub replace `drakkan/sftpgo:ta
 
 ### Container shell access and viewing SFTPGo logs
 
-The docker exec command allows you to run commands inside a Docker container. The following command line will give you a bash shell inside your `sftpgo` container:
+The docker exec command allows you to run commands inside a Docker container. The following command line will give you a shell inside your `sftpgo` container:
 
 ```shell
-docker exec -it some-sftpgo bash
+docker exec -it some-sftpgo sh
 ```
 
 The logs are available through Docker's container log:
@@ -75,15 +79,24 @@ Please take a look [here](../docs/full-configuration.md#environment-variables) t
 
 Alternately you can mount your custom configuration file to `/var/lib/sftpgo` or `/var/lib/sftpgo/.config/sftpgo`.
 
+### Loading initial data
+
+Initial data can be loaded in the following ways:
+
+- via the `--loaddata-from` flag or the `SFTPGO_LOADDATA_FROM` environment variable
+- by providing a dump file to the memory provider
+
+Please take a look [here](../docs/full-configuration.md) for more details.
+
 ### Running as an arbitrary user
 
 The SFTPGo image runs using `1000` as UID/GID by default. If you know the permissions of your data and/or configuration directory are already set appropriately or you have need of running SFTPGo with a specific UID/GID, it is possible to invoke this image with `--user` set to any value (other than `root/0`) in order to achieve the desired access/configuration:
 
 ```shell
 $ ls -lnd data
-drwxr-xr-x 2 1100 11000 6  6 nov 09.09 data
+drwxr-xr-x 2 1100 1100 6  7 nov 09.09 data
 $ ls -lnd config
-drwxr-xr-x 2 1100 11000 6  6 nov 09.19 config
+drwxr-xr-x 2 1100 1100 6  7 nov 09.19 config
 ```
 
 With the above directory permissions, you can start a SFTPGo instance like this:
@@ -96,6 +109,15 @@ docker run --name some-sftpgo \
     --mount type=bind,source="${PWD}/data",target=/srv/sftpgo \
     --mount type=bind,source="${PWD}/config",target=/var/lib/sftpgo \
     -d "drakkan/sftpgo:tag"
+```
+
+Alternately build your own image using the official one as a base, here is a sample Dockerfile:
+
+```shell
+FROM drakkan/sftpgo:tag
+USER root
+RUN chown -R 1100:1100 /etc/sftpgo && chown 1100:1100 /var/lib/sftpgo /srv/sftpgo
+USER 1100:1100
 ```
 
 ## Image Variants
@@ -111,6 +133,10 @@ This is the defacto image, it is based on [Debian](https://www.debian.org/), ava
 This image is based on the popular [Alpine Linux project](https://alpinelinux.org/), available in [the `alpine` official image](https://hub.docker.com/_/alpine). Alpine Linux is much smaller than most distribution base images (~5MB), and thus leads to much slimmer images in general.
 
 This variant is highly recommended when final image size being as small as possible is desired. The main caveat to note is that it does use [musl libc](https://musl.libc.org/) instead of [glibc and friends](https://www.etalabs.net/compare_libcs.html), so certain software might run into issues depending on the depth of their libc requirements. However, most software doesn't have an issue with this, so this variant is usually a very safe choice. See [this Hacker News comment thread](https://news.ycombinator.com/item?id=10782897) for more discussion of the issues that might arise and some pro/con comparisons of using Alpine-based images.
+
+### `sftpgo:<suite>-slim`
+
+These tags provide a slimmer image that does not include the optional `git` and `rsync` dependencies.
 
 ## Helm Chart
 

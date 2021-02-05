@@ -64,7 +64,7 @@ func getCustomServeFlags() []string {
 		result = append(result, "--"+configDirFlag)
 		result = append(result, configDir)
 	}
-	if configFile != defaultConfigName {
+	if configFile != defaultConfigFile {
 		result = append(result, "--"+configFileFlag)
 		result = append(result, configFile)
 	}
@@ -89,9 +89,6 @@ func getCustomServeFlags() []string {
 	}
 	if logCompress != defaultLogCompress {
 		result = append(result, "--"+logCompressFlag+"=true")
-	}
-	if profiler != defaultProfiler {
-		result = append(result, "--"+profilerFlag+"=true")
 	}
 	return result
 }

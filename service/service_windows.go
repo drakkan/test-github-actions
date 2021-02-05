@@ -11,10 +11,12 @@ import (
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/dataprovider"
 	"github.com/drakkan/sftpgo/ftpd"
 	"github.com/drakkan/sftpgo/httpd"
 	"github.com/drakkan/sftpgo/logger"
+	"github.com/drakkan/sftpgo/telemetry"
 	"github.com/drakkan/sftpgo/webdavd"
 )
 
@@ -66,12 +68,37 @@ func (s Status) String() string {
 	}
 }
 
+func (s *WindowsService) handleExit(wasStopped chan bool) {
+	s.Service.Wait()
+
+	select {
+	case <-wasStopped:
+		// the service was stopped nothing to do
+		logger.Debug(logSender, "", "Windows Service was stopped")
+		return
+	default:
+		// the server failed while running, we must be sure to exit the process.
+		// The defined recovery action will be executed.
+		logger.Debug(logSender, "", "Service wait ended, error: %v", s.Service.Error)
+		if s.Service.Error == nil {
+			os.Exit(0)
+		} else {
+			os.Exit(1)
+		}
+	}
+}
+
 func (s *WindowsService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
 	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptParamChange | acceptRotateLog
 	changes <- svc.Status{State: svc.StartPending}
 	if err := s.Service.Start(); err != nil {
 		return true, 1
 	}
+
+	wasStopped := make(chan bool, 1)
+
+	go s.handleExit(wasStopped)
+
 	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
 loop:
 	for {
@@ -83,6 +110,7 @@ loop:
 		case svc.Stop, svc.Shutdown:
 			logger.Debug(logSender, "", "Received service stop request")
 			changes <- svc.Status{State: svc.StopPending}
+			wasStopped <- true
 			s.Service.Stop()
 			break loop
 		case svc.ParamChange:
@@ -91,17 +119,25 @@ loop:
 			if err != nil {
 				logger.Warn(logSender, "", "error reloading dataprovider configuration: %v", err)
 			}
-			err = httpd.ReloadTLSCertificate()
+			err = httpd.ReloadCertificateMgr()
 			if err != nil {
-				logger.Warn(logSender, "", "error reloading TLS certificate: %v", err)
+				logger.Warn(logSender, "", "error reloading cert manager: %v", err)
 			}
-			err = ftpd.ReloadTLSCertificate()
+			err = ftpd.ReloadCertificateMgr()
 			if err != nil {
-				logger.Warn(logSender, "", "error reloading FTPD TLS certificate: %v", err)
+				logger.Warn(logSender, "", "error reloading FTPD cert manager: %v", err)
 			}
-			err = webdavd.ReloadTLSCertificate()
+			err = webdavd.ReloadCertificateMgr()
 			if err != nil {
-				logger.Warn(logSender, "", "error reloading WebDav TLS certificate: %v", err)
+				logger.Warn(logSender, "", "error reloading WebDAV cert manager: %v", err)
+			}
+			err = telemetry.ReloadCertificateMgr()
+			if err != nil {
+				logger.Warn(logSender, "", "error reloading telemetry cert manager: %v", err)
+			}
+			err = common.ReloadDefender()
+			if err != nil {
+				logger.Warn(logSender, "", "error reloading defender's lists: %v", err)
 			}
 		case rotateLogCmd:
 			logger.Debug(logSender, "", "Received log file rotation request")
@@ -227,17 +263,18 @@ func (s *WindowsService) Install(args ...string) error {
 	recoveryActions := []mgr.RecoveryAction{
 		{
 			Type:  mgr.ServiceRestart,
-			Delay: 0,
+			Delay: 5 * time.Second,
 		},
 		{
 			Type:  mgr.ServiceRestart,
 			Delay: 60 * time.Second,
 		},
 		{
-			Type: mgr.NoAction,
+			Type:  mgr.ServiceRestart,
+			Delay: 90 * time.Second,
 		},
 	}
-	err = service.SetRecoveryActions(recoveryActions, uint32(3600))
+	err = service.SetRecoveryActions(recoveryActions, uint32(300))
 	if err != nil {
 		service.Delete()
 		return fmt.Errorf("unable to set recovery actions: %v", err)

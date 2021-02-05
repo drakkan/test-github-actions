@@ -2,8 +2,12 @@
 package webdavd
 
 import (
+	"fmt"
 	"path/filepath"
 
+	"github.com/go-chi/chi/middleware"
+
+	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/utils"
 )
@@ -20,8 +24,16 @@ const (
 )
 
 var (
-	server *webDavServer
+	//server *webDavServer
+	certMgr       *common.CertManager
+	serviceStatus ServiceStatus
 )
+
+// ServiceStatus defines the service status
+type ServiceStatus struct {
+	IsActive bool      `json:"is_active"`
+	Bindings []Binding `json:"bindings"`
+}
 
 // Cors configuration
 type Cors struct {
@@ -52,11 +64,36 @@ type Cache struct {
 	MimeTypes MimeCacheConfig  `json:"mime_types" mapstructure:"mime_types"`
 }
 
+// Binding defines the configuration for a network listener
+type Binding struct {
+	// The address to listen on. A blank value means listen on all available network interfaces.
+	Address string `json:"address" mapstructure:"address"`
+	// The port used for serving requests
+	Port int `json:"port" mapstructure:"port"`
+	// you also need to provide a certificate for enabling HTTPS
+	EnableHTTPS bool `json:"enable_https" mapstructure:"enable_https"`
+	// set to 1 to require client certificate authentication in addition to basic auth.
+	// You need to define at least a certificate authority for this to work
+	ClientAuthType int `json:"client_auth_type" mapstructure:"client_auth_type"`
+}
+
+// GetAddress returns the binding address
+func (b *Binding) GetAddress() string {
+	return fmt.Sprintf("%s:%d", b.Address, b.Port)
+}
+
+// IsValid returns true if the binding port is > 0
+func (b *Binding) IsValid() bool {
+	return b.Port > 0
+}
+
 // Configuration defines the configuration for the WevDAV server
 type Configuration struct {
-	// The port used for serving FTP requests
+	// Addresses and ports to bind to
+	Bindings []Binding `json:"bindings" mapstructure:"bindings"`
+	// Deprecated: please use Bindings
 	BindPort int `json:"bind_port" mapstructure:"bind_port"`
-	// The address to listen on. A blank value means listen on all available network interfaces.
+	// Deprecated: please use Bindings
 	BindAddress string `json:"bind_address" mapstructure:"bind_address"`
 	// If files containing a certificate and matching private key for the server are provided the server will expect
 	// HTTPS connections.
@@ -64,16 +101,36 @@ type Configuration struct {
 	// "paramchange" request to the running service on Windows.
 	CertificateFile    string `json:"certificate_file" mapstructure:"certificate_file"`
 	CertificateKeyFile string `json:"certificate_key_file" mapstructure:"certificate_key_file"`
+	// CACertificates defines the set of root certificate authorities to be used to verify client certificates.
+	CACertificates []string `json:"ca_certificates" mapstructure:"ca_certificates"`
+	// CARevocationLists defines a set a revocation lists, one for each root CA, to be used to check
+	// if a client certificate has been revoked
+	CARevocationLists []string `json:"ca_revocation_lists" mapstructure:"ca_revocation_lists"`
 	// CORS configuration
 	Cors Cors `json:"cors" mapstructure:"cors"`
 	// Cache configuration
 	Cache Cache `json:"cache" mapstructure:"cache"`
 }
 
-// Initialize configures and starts the WebDav server
+// GetStatus returns the server status
+func GetStatus() ServiceStatus {
+	return serviceStatus
+}
+
+// ShouldBind returns true if there is at least a valid binding
+func (c *Configuration) ShouldBind() bool {
+	for _, binding := range c.Bindings {
+		if binding.IsValid() {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Initialize configures and starts the WebDAV server
 func (c *Configuration) Initialize(configDir string) error {
-	var err error
-	logger.Debug(logSender, "", "initializing WevDav server with config %+v", *c)
+	logger.Debug(logSender, "", "initializing WebDAV server with config %+v", *c)
 	mimeTypeCache = mimeCache{
 		maxSize:   c.Cache.MimeTypes.MaxSize,
 		mimeTypes: make(map[string]string),
@@ -81,17 +138,58 @@ func (c *Configuration) Initialize(configDir string) error {
 	if !c.Cache.MimeTypes.Enabled {
 		mimeTypeCache.maxSize = 0
 	}
-	server, err = newServer(c, configDir)
-	if err != nil {
-		return err
+	if !c.ShouldBind() {
+		return common.ErrNoBinding
 	}
-	return server.listenAndServe()
+
+	certificateFile := getConfigPath(c.CertificateFile, configDir)
+	certificateKeyFile := getConfigPath(c.CertificateKeyFile, configDir)
+	if certificateFile != "" && certificateKeyFile != "" {
+		mgr, err := common.NewCertManager(certificateFile, certificateKeyFile, configDir, logSender)
+		if err != nil {
+			return err
+		}
+		mgr.SetCACertificates(c.CACertificates)
+		if err := mgr.LoadRootCAs(); err != nil {
+			return err
+		}
+		mgr.SetCARevocationLists(c.CARevocationLists)
+		if err := mgr.LoadCRLs(); err != nil {
+			return err
+		}
+		certMgr = mgr
+	}
+	compressor := middleware.NewCompressor(5, "text/*")
+
+	serviceStatus = ServiceStatus{
+		Bindings: nil,
+	}
+
+	exitChannel := make(chan error, 1)
+
+	for _, binding := range c.Bindings {
+		if !binding.IsValid() {
+			continue
+		}
+
+		go func(binding Binding) {
+			server := webDavServer{
+				config:  c,
+				binding: binding,
+			}
+			exitChannel <- server.listenAndServe(compressor)
+		}(binding)
+	}
+
+	serviceStatus.IsActive = true
+
+	return <-exitChannel
 }
 
-// ReloadTLSCertificate reloads the TLS certificate and key from the configured paths
-func ReloadTLSCertificate() error {
-	if server != nil && server.certMgr != nil {
-		return server.certMgr.LoadCertificate(logSender)
+// ReloadCertificateMgr reloads the certificate manager
+func ReloadCertificateMgr() error {
+	if certMgr != nil {
+		return certMgr.Reload()
 	}
 	return nil
 }
@@ -100,7 +198,7 @@ func getConfigPath(name, configDir string) string {
 	if !utils.IsFileInputValid(name) {
 		return ""
 	}
-	if len(name) > 0 && !filepath.IsAbs(name) {
+	if name != "" && !filepath.IsAbs(name) {
 		return filepath.Join(configDir, name)
 	}
 	return name

@@ -2,7 +2,7 @@
 package service
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -39,7 +39,6 @@ type Service struct {
 	PortableUser      dataprovider.User
 	LogCompress       bool
 	LogVerbose        bool
-	Profiler          bool
 	LoadDataClean     bool
 	LoadDataFrom      string
 	LoadDataMode      int
@@ -65,21 +64,40 @@ func (s *Service) Start() error {
 		}
 	}
 	logger.Info(logSender, "", "starting SFTPGo %v, config dir: %v, config file: %v, log max size: %v log max backups: %v "+
-		"log max age: %v log verbose: %v, log compress: %v, profile: %v load data from: %#v", version.GetAsString(), s.ConfigDir, s.ConfigFile,
-		s.LogMaxSize, s.LogMaxBackups, s.LogMaxAge, s.LogVerbose, s.LogCompress, s.Profiler, s.LoadDataFrom)
+		"log max age: %v log verbose: %v, log compress: %v, load data from: %#v", version.GetAsString(), s.ConfigDir, s.ConfigFile,
+		s.LogMaxSize, s.LogMaxBackups, s.LogMaxAge, s.LogVerbose, s.LogCompress, s.LoadDataFrom)
 	// in portable mode we don't read configuration from file
 	if s.PortableMode != 1 {
 		err := config.LoadConfig(s.ConfigDir, s.ConfigFile)
 		if err != nil {
 			logger.Error(logSender, "", "error loading configuration: %v", err)
+			return err
 		}
 	}
+	if !config.HasServicesToStart() {
+		infoString := "No service configured, nothing to do"
+		logger.Info(logSender, "", infoString)
+		logger.InfoToConsole(infoString)
+		return errors.New(infoString)
+	}
 
-	common.Initialize(config.GetCommonConfig())
+	err := common.Initialize(config.GetCommonConfig())
+	if err != nil {
+		logger.Error(logSender, "", "%v", err)
+		logger.ErrorToConsole("%v", err)
+		os.Exit(1)
+	}
+	kmsConfig := config.GetKMSConfig()
+	err = kmsConfig.Initialize()
+	if err != nil {
+		logger.Error(logSender, "", "unable to initialize KMS: %v", err)
+		logger.ErrorToConsole("unable to initialize KMS: %v", err)
+		os.Exit(1)
+	}
 
 	providerConf := config.GetProviderConf()
 
-	err := dataprovider.Initialize(providerConf, s.ConfigDir)
+	err = dataprovider.Initialize(providerConf, s.ConfigDir, s.PortableMode == 0)
 	if err != nil {
 		logger.Error(logSender, "", "error initializing data provider: %v", err)
 		logger.ErrorToConsole("error initializing data provider: %v", err)
@@ -88,7 +106,7 @@ func (s *Service) Start() error {
 
 	if s.PortableMode == 1 {
 		// create the user for portable mode
-		err = dataprovider.AddUser(s.PortableUser)
+		err = dataprovider.AddUser(&s.PortableUser)
 		if err != nil {
 			logger.ErrorToConsole("error adding portable user: %v", err)
 			return err
@@ -99,7 +117,6 @@ func (s *Service) Start() error {
 	if err != nil {
 		logger.Error(logSender, "", "unable to load initial data: %v", err)
 		logger.ErrorToConsole("unable to load initial data: %v", err)
-		return err
 	}
 
 	httpConfig := config.GetHTTPConfig()
@@ -115,20 +132,25 @@ func (s *Service) startServices() {
 	ftpdConf := config.GetFTPDConfig()
 	httpdConf := config.GetHTTPDConfig()
 	webDavDConf := config.GetWebDAVDConfig()
+	telemetryConf := config.GetTelemetryConfig()
 
-	go func() {
-		logger.Debug(logSender, "", "initializing SFTP server with config %+v", sftpdConf)
-		if err := sftpdConf.Initialize(s.ConfigDir); err != nil {
-			logger.Error(logSender, "", "could not start SFTP server: %v", err)
-			logger.ErrorToConsole("could not start SFTP server: %v", err)
-			s.Error = err
-		}
-		s.Shutdown <- true
-	}()
-
-	if httpdConf.BindPort > 0 {
+	if sftpdConf.ShouldBind() {
 		go func() {
-			if err := httpdConf.Initialize(s.ConfigDir, s.Profiler); err != nil {
+			logger.Debug(logSender, "", "initializing SFTP server with config %+v", sftpdConf)
+			if err := sftpdConf.Initialize(s.ConfigDir); err != nil {
+				logger.Error(logSender, "", "could not start SFTP server: %v", err)
+				logger.ErrorToConsole("could not start SFTP server: %v", err)
+				s.Error = err
+			}
+			s.Shutdown <- true
+		}()
+	} else {
+		logger.Debug(logSender, "", "SFTP server not started, disabled in config file")
+	}
+
+	if httpdConf.ShouldBind() {
+		go func() {
+			if err := httpdConf.Initialize(s.ConfigDir); err != nil {
 				logger.Error(logSender, "", "could not start HTTP server: %v", err)
 				logger.ErrorToConsole("could not start HTTP server: %v", err)
 				s.Error = err
@@ -141,7 +163,7 @@ func (s *Service) startServices() {
 			logger.DebugToConsole("HTTP server not started, disabled in config file")
 		}
 	}
-	if ftpdConf.BindPort > 0 {
+	if ftpdConf.ShouldBind() {
 		go func() {
 			if err := ftpdConf.Initialize(s.ConfigDir); err != nil {
 				logger.Error(logSender, "", "could not start FTP server: %v", err)
@@ -153,7 +175,7 @@ func (s *Service) startServices() {
 	} else {
 		logger.Debug(logSender, "", "FTP server not started, disabled in config file")
 	}
-	if webDavDConf.BindPort > 0 {
+	if webDavDConf.ShouldBind() {
 		go func() {
 			if err := webDavDConf.Initialize(s.ConfigDir); err != nil {
 				logger.Error(logSender, "", "could not start WebDAV server: %v", err)
@@ -163,7 +185,22 @@ func (s *Service) startServices() {
 			s.Shutdown <- true
 		}()
 	} else {
-		logger.Debug(logSender, "", "WevDAV server not started, disabled in config file")
+		logger.Debug(logSender, "", "WebDAV server not started, disabled in config file")
+	}
+	if telemetryConf.ShouldBind() {
+		go func() {
+			if err := telemetryConf.Initialize(s.ConfigDir); err != nil {
+				logger.Error(logSender, "", "could not start telemetry server: %v", err)
+				logger.ErrorToConsole("could not start telemetry server: %v", err)
+				s.Error = err
+			}
+			s.Shutdown <- true
+		}()
+	} else {
+		logger.Debug(logSender, "", "telemetry server not started, disabled in config file")
+		if s.PortableMode != 1 {
+			logger.DebugToConsole("telemetry server not started, disabled in config file")
+		}
 	}
 }
 
@@ -207,13 +244,11 @@ func (s *Service) loadInitialData() error {
 	if err != nil {
 		return fmt.Errorf("unable to read input file %#v: %v", s.LoadDataFrom, err)
 	}
-	var dump dataprovider.BackupData
-
-	err = json.Unmarshal(content, &dump)
+	dump, err := dataprovider.ParseDumpData(content)
 	if err != nil {
 		return fmt.Errorf("unable to parse file to restore %#v: %v", s.LoadDataFrom, err)
 	}
-	err = httpd.RestoreFolders(dump.Folders, s.LoadDataFrom, s.LoadDataQuotaScan)
+	err = httpd.RestoreFolders(dump.Folders, s.LoadDataFrom, s.LoadDataMode, s.LoadDataQuotaScan)
 	if err != nil {
 		return fmt.Errorf("unable to restore folders from file %#v: %v", s.LoadDataFrom, err)
 	}
