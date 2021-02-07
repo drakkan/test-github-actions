@@ -19,9 +19,6 @@ ARG COMMIT_SHA
 # --build-arg FEATURES=nos3,nogcs
 ARG FEATURES
 
-# Set to yes to install the optional git and rsync dependencies
-ARG INSTALL_OPTIONAL_PACKAGES=no
-
 COPY . .
 
 RUN set -xe && \
@@ -31,10 +28,13 @@ RUN set -xe && \
 
 FROM alpine:3.12
 
+# Set to yes to install the optional git and rsync dependencies
+ARG INSTALL_OPTIONAL_PACKAGES=false
+
 RUN apk add --update --no-cache ca-certificates tzdata mailcap
 
 RUN echo install arg "${INSTALL_OPTIONAL_PACKAGES}"
-RUN if [ "${INSTALL_OPTIONAL_PACKAGES}" = "yes" ]; then apk add --update --no-cache rsync git; fi
+RUN if [ "${INSTALL_OPTIONAL_PACKAGES}" = "true" ]; then apk add --update --no-cache rsync git; fi
 
 # set up nsswitch.conf for Go's "netgo" implementation
 # https://github.com/gliderlabs/docker-alpine/issues/367#issuecomment-424546457

@@ -102,14 +102,14 @@ jobs:
             echo ${TAGS}
             echo ::set-output name=version::${VERSION}
             echo ::set-output name=tags::${TAGS}
-            echo ::set-output name=full::yes
+            echo ::set-output name=full::true
           else
             echo "false"
             echo ${VERSION_SLIM}
             echo ${TAGS_SLIM}
             echo ::set-output name=version::${VERSION_SLIM}
             echo ::set-output name=tags::${TAGS_SLIM}
-            echo ::set-output name=full::no
+            echo ::set-output name=full::false
           fi
           echo ::set-output name=dockerfile::${DOCKERFILE}
           echo ::set-output name=created::$(date -u +'%Y-%m-%dT%H:%M:%SZ')
