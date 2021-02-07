@@ -1,4 +1,4 @@
-FROM golang:1.15-alpine AS builder
+FROM golang:1.15-alpine3.12 AS builder
 
 ENV GOFLAGS="-mod=readonly"
 
@@ -19,6 +19,9 @@ ARG COMMIT_SHA
 # --build-arg FEATURES=nos3,nogcs
 ARG FEATURES
 
+# Set to true to install the optional git and rsync dependencies
+ARG INSTALL_OPTIONAL_PACKAGES=false
+
 COPY . .
 
 RUN set -xe && \
@@ -29,6 +32,8 @@ RUN set -xe && \
 FROM alpine:3.12
 
 RUN apk add --update --no-cache ca-certificates tzdata mailcap
+
+RUN [[ $INSTALL_OPTIONAL_PACKAGES == "true" ]]; then apk add --update --no-cache rsync git; fi
 
 # set up nsswitch.conf for Go's "netgo" implementation
 # https://github.com/gliderlabs/docker-alpine/issues/367#issuecomment-424546457
@@ -53,7 +58,7 @@ ENV SFTPGO_HTTPD__STATIC_FILES_PATH=/usr/share/sftpgo/static
 # Modify the default configuration file
 RUN sed -i "s|\"users_base_dir\": \"\",|\"users_base_dir\": \"/srv/sftpgo/data\",|" /etc/sftpgo/sftpgo.json && \
     sed -i "s|\"backups\"|\"/srv/sftpgo/backups\"|" /etc/sftpgo/sftpgo.json && \
-    sed -i "s|\"bind_address\": \"127.0.0.1\",|\"bind_address\": \"\",|" /etc/sftpgo/sftpgo.json
+    sed -i "s|\"address\": \"127.0.0.1\",|\"address\": \"\",|" /etc/sftpgo/sftpgo.json
 
 RUN chown -R sftpgo:sftpgo /etc/sftpgo && chown sftpgo:sftpgo /var/lib/sftpgo /srv/sftpgo
 

@@ -8,7 +8,7 @@ require (
 	github.com/Azure/azure-storage-blob-go v0.13.0
 	github.com/GehirnInc/crypt v0.0.0-20200316065508-bb7000b8a962
 	github.com/alexedwards/argon2id v0.0.0-20201228115903-cf543ebc1f7b
-	github.com/aws/aws-sdk-go v1.37.5
+	github.com/aws/aws-sdk-go v1.37.6
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf // indirect
 	github.com/eikenb/pipeat v0.0.0-20200430215831-470df5986b6d
 	github.com/fclairamb/ftpserverlib v0.12.0
@@ -54,8 +54,8 @@ require (
 	go.etcd.io/bbolt v1.3.5
 	go.opencensus.io v0.22.6 // indirect
 	go.uber.org/automaxprocs v1.4.0
-	gocloud.dev v0.21.0
-	gocloud.dev/secrets/hashivault v0.21.0
+	gocloud.dev v0.22.0
+	gocloud.dev/secrets/hashivault v0.22.0
 	golang.org/x/crypto v0.0.0-20201221181555-eec23a3978ad
 	golang.org/x/net v0.0.0-20210119194325-5f4716e94777
 	golang.org/x/oauth2 v0.0.0-20210201163806-010130855d6c // indirect
