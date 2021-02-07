@@ -105,8 +105,8 @@ jobs:
             echo ::set-output name=full::true
           else
             echo "false"
-            echo ${VERSION}
-            echo ${TAGS}
+            echo ${VERSION_SLIM}
+            echo ${TAGS_SLIM}
             echo ::set-output name=version::${VERSION_SLIM}
             echo ::set-output name=tags::${TAGS_SLIM}
             echo ::set-output name=full::false
