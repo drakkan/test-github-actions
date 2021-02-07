@@ -98,11 +98,15 @@ jobs:
           echo $OPTIONAL_DEPS
           if [[ $OPTIONAL_DEPS == true ]]; then
             echo "true"
+            echo ${VERSION}
+            echo ${TAGS}
             echo ::set-output name=version::${VERSION}
             echo ::set-output name=tags::${TAGS}
             echo ::set-output name=full::true
           else
             echo "false"
+            echo ${VERSION}
+            echo ${TAGS}
             echo ::set-output name=version::${VERSION_SLIM}
             echo ::set-output name=tags::${TAGS_SLIM}
             echo ::set-output name=full::false
