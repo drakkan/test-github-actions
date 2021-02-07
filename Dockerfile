@@ -18,7 +18,7 @@ ARG COMMIT_SHA
 ARG FEATURES
 
 # Set to true to install the optional git and rsync dependencies
-ARG INSTALL_OPTIONAL_PACKAGES=false
+ARG INSTALL_OPTIONAL_PACKAGES
 
 COPY . .
 
