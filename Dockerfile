@@ -30,7 +30,7 @@ FROM debian:buster-slim
 
 RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates mime-support && rm -rf /var/lib/apt/lists/*
 
-RUN if [[ $INSTALL_OPTIONAL_PACKAGES == "true" ]]; then apt-get update && apt-get install --no-install-recommends -y git rsync && rm -rf /var/lib/apt/lists/*; fi
+RUN if [ $INSTALL_OPTIONAL_PACKAGES = "true" ]; then apt-get update && apt-get install --no-install-recommends -y git rsync && rm -rf /var/lib/apt/lists/*; fi
 
 RUN mkdir -p /etc/sftpgo /var/lib/sftpgo /usr/share/sftpgo /srv/sftpgo
 
