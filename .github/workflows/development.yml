@@ -19,6 +19,7 @@ jobs:
           run: |
             pw useradd sftpgo
             chown -R sftpgo ../test-github-actions
+            ls -la /root/
             mkdir /root/.cache || true
             chown -R sftpgo /root/.cache
             su -m sftpgo -c 'go build -ldflags "-s -w" -o sftpgo'
