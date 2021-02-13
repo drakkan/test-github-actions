@@ -19,5 +19,7 @@ jobs:
           run: |
             pw useradd sftpgo
             chown -R sftpgo ../test-github-actions
+            mkdir /root/.cache || true
+            chown -R sftpgo /root/.cache
             su -m sftpgo -c 'go build -ldflags "-s -w" -o sftpgo'
             su -m sftpgo -c 'go test -v -p 1 -timeout 10m ./... -coverprofile=coverage.txt -covermode=atomic'
