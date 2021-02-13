@@ -267,7 +267,7 @@ func (t *ConnectionTransfer) getConnectionTransferAsString() string {
 	if t.Size > 0 {
 		elapsed := time.Since(utils.GetTimeFromMsecSinceEpoch(t.StartTime))
 		speed := float64(t.Size) / float64(utils.GetTimeAsMsSinceEpoch(time.Now())-t.StartTime)
-		result += fmt.Sprintf("Size: %#v Elapsed: %#v Speed: \"%.1f KB/s\"", utils.ByteCountSI(t.Size),
+		result += fmt.Sprintf("Size: %#v Elapsed: %#v Speed: \"%.1f KB/s\"", utils.ByteCountIEC(t.Size),
 			utils.GetDurationAsString(elapsed), speed)
 	}
 	return result
@@ -376,7 +376,7 @@ func (c *Configuration) ExecutePostConnectHook(ipAddr, protocol string) error {
 				ipAddr, c.PostConnectHook, err)
 			return err
 		}
-		httpClient := httpclient.GetHTTPClient()
+		httpClient := httpclient.GetRetraybleHTTPClient()
 		q := url.Query()
 		q.Add("ip", ipAddr)
 		q.Add("protocol", protocol)
@@ -705,7 +705,7 @@ func (c ConnectionStatus) GetConnectionInfo() string {
 func (c ConnectionStatus) GetTransfersAsString() string {
 	result := ""
 	for _, t := range c.Transfers {
-		if len(result) > 0 {
+		if result != "" {
 			result += ". "
 		}
 		result += t.getConnectionTransferAsString()

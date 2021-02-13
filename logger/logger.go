@@ -58,6 +58,57 @@ func (l *StdLoggerWrapper) Write(p []byte) (n int, err error) {
 	return
 }
 
+// LeveledLogger is a logger that accepts a message string and a variadic number of key-value pairs
+type LeveledLogger struct {
+	Sender string
+}
+
+func (l *LeveledLogger) addKeysAndValues(ev *zerolog.Event, keysAndValues ...interface{}) {
+	kvLen := len(keysAndValues)
+	if kvLen%2 != 0 {
+		extra := keysAndValues[kvLen-1]
+		keysAndValues = append(keysAndValues[:kvLen-1], "EXTRA_VALUE_AT_END", extra)
+	}
+	for i := 0; i < len(keysAndValues); i = i + 2 {
+		key, val := keysAndValues[i], keysAndValues[i+1]
+		if keyStr, ok := key.(string); ok {
+			ev.Str(keyStr, fmt.Sprintf("%v", val))
+		}
+	}
+}
+
+// Error logs at error level for the specified sender
+func (l *LeveledLogger) Error(msg string, keysAndValues ...interface{}) {
+	ev := logger.Error()
+	ev.Timestamp().Str("sender", l.Sender)
+	l.addKeysAndValues(ev, keysAndValues...)
+	ev.Msg(msg)
+}
+
+// Info logs at info level for the specified sender
+func (l *LeveledLogger) Info(msg string, keysAndValues ...interface{}) {
+	ev := logger.Info()
+	ev.Timestamp().Str("sender", l.Sender)
+	l.addKeysAndValues(ev, keysAndValues...)
+	ev.Msg(msg)
+}
+
+// Debug logs at debug level for the specified sender
+func (l *LeveledLogger) Debug(msg string, keysAndValues ...interface{}) {
+	ev := logger.Debug()
+	ev.Timestamp().Str("sender", l.Sender)
+	l.addKeysAndValues(ev, keysAndValues...)
+	ev.Msg(msg)
+}
+
+// Warn logs at warn level for the specified sender
+func (l *LeveledLogger) Warn(msg string, keysAndValues ...interface{}) {
+	ev := logger.Warn()
+	ev.Timestamp().Str("sender", l.Sender)
+	l.addKeysAndValues(ev, keysAndValues...)
+	ev.Msg(msg)
+}
+
 // GetLogger get the configured logger instance
 func GetLogger() *zerolog.Logger {
 	return &logger

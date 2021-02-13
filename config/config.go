@@ -218,7 +218,11 @@ func Init() {
 		},
 		HTTPConfig: httpclient.Config{
 			Timeout:        20,
+			RetryWaitMin:   2,
+			RetryWaitMax:   30,
+			RetryMax:       3,
 			CACertificates: nil,
+			Certificates:   nil,
 			SkipTLSVerify:  false,
 		},
 		KMSConfig: kms.Configuration{
@@ -400,7 +404,7 @@ func LoadConfig(configDir, configFile string) error {
 	if strings.TrimSpace(globalConf.FTPD.Banner) == "" {
 		globalConf.FTPD.Banner = defaultFTPDBanner
 	}
-	if len(globalConf.ProviderConf.UsersBaseDir) > 0 && !utils.IsFileInputValid(globalConf.ProviderConf.UsersBaseDir) {
+	if globalConf.ProviderConf.UsersBaseDir != "" && !utils.IsFileInputValid(globalConf.ProviderConf.UsersBaseDir) {
 		err = fmt.Errorf("invalid users base dir %#v will be ignored", globalConf.ProviderConf.UsersBaseDir)
 		globalConf.ProviderConf.UsersBaseDir = ""
 		logger.Warn(logSender, "", "Configuration error: %v", err)
@@ -455,7 +459,7 @@ func checkCommonParamsCompatibility() {
 		logger.WarnToConsole("sftpd.idle_timeout is deprecated, please use common.idle_timeout")
 		globalConf.Common.IdleTimeout = globalConf.SFTPD.IdleTimeout //nolint:staticcheck
 	}
-	if len(globalConf.SFTPD.Actions.Hook) > 0 && len(globalConf.Common.Actions.Hook) == 0 { //nolint:staticcheck
+	if globalConf.SFTPD.Actions.Hook != "" && len(globalConf.Common.Actions.Hook) == 0 { //nolint:staticcheck
 		logger.Warn(logSender, "", "sftpd.actions is deprecated, please use common.actions")
 		logger.WarnToConsole("sftpd.actions is deprecated, please use common.actions")
 		globalConf.Common.Actions.ExecuteOn = globalConf.SFTPD.Actions.ExecuteOn //nolint:staticcheck
@@ -574,6 +578,7 @@ func loadBindingsFromEnv() {
 		getFTPDBindingFromEnv(idx)
 		getWebDAVDBindingFromEnv(idx)
 		getHTTPDBindingFromEnv(idx)
+		getHTTPClientCertificatesFromEnv(idx)
 	}
 }
 
@@ -753,6 +758,28 @@ func getHTTPDBindingFromEnv(idx int) {
 	}
 }
 
+func getHTTPClientCertificatesFromEnv(idx int) {
+	tlsCert := httpclient.TLSKeyPair{}
+
+	cert, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_HTTP__CERTIFICATES__%v__CERT", idx))
+	if ok {
+		tlsCert.Cert = cert
+	}
+
+	key, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_HTTP__CERTIFICATES__%v__KEY", idx))
+	if ok {
+		tlsCert.Key = key
+	}
+
+	if tlsCert.Cert != "" && tlsCert.Key != "" {
+		if len(globalConf.HTTPConfig.Certificates) > idx {
+			globalConf.HTTPConfig.Certificates[idx] = tlsCert
+		} else {
+			globalConf.HTTPConfig.Certificates = append(globalConf.HTTPConfig.Certificates, tlsCert)
+		}
+	}
+}
+
 func setViperDefaults() {
 	viper.SetDefault("common.idle_timeout", globalConf.Common.IdleTimeout)
 	viper.SetDefault("common.upload_mode", globalConf.Common.UploadMode)
@@ -848,6 +875,9 @@ func setViperDefaults() {
 	viper.SetDefault("httpd.ca_certificates", globalConf.HTTPDConfig.CACertificates)
 	viper.SetDefault("httpd.ca_revocation_lists", globalConf.HTTPDConfig.CARevocationLists)
 	viper.SetDefault("http.timeout", globalConf.HTTPConfig.Timeout)
+	viper.SetDefault("http.retry_wait_min", globalConf.HTTPConfig.RetryWaitMin)
+	viper.SetDefault("http.retry_wait_max", globalConf.HTTPConfig.RetryWaitMax)
+	viper.SetDefault("http.retry_max", globalConf.HTTPConfig.RetryMax)
 	viper.SetDefault("http.ca_certificates", globalConf.HTTPConfig.CACertificates)
 	viper.SetDefault("http.skip_tls_verify", globalConf.HTTPConfig.SkipTLSVerify)
 	viper.SetDefault("kms.secrets.url", globalConf.KMSConfig.Secrets.URL)

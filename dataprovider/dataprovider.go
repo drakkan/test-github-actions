@@ -1363,7 +1363,8 @@ func validateBaseParams(user *User) error {
 		return &ValidationError{err: "username is mandatory"}
 	}
 	if !usernameRegex.MatchString(user.Username) {
-		return &ValidationError{err: fmt.Sprintf("username %#v is not valid", user.Username)}
+		return &ValidationError{err: fmt.Sprintf("username %#v is not valid, the following characters are allowed: a-zA-Z0-9-_.~",
+			user.Username)}
 	}
 	if user.HomeDir == "" {
 		return &ValidationError{err: "home_dir is mandatory"}
@@ -1395,7 +1396,8 @@ func ValidateFolder(folder *vfs.BaseVirtualFolder) error {
 		return &ValidationError{err: "folder name is mandatory"}
 	}
 	if !usernameRegex.MatchString(folder.Name) {
-		return &ValidationError{err: fmt.Sprintf("folder name %#v is not valid", folder.Name)}
+		return &ValidationError{err: fmt.Sprintf("folder name %#v is not valid, the following characters are allowed: a-zA-Z0-9-_.~",
+			folder.Name)}
 	}
 	cleanedMPath := filepath.Clean(folder.MappedPath)
 	if !filepath.IsAbs(cleanedMPath) {
@@ -2013,7 +2015,7 @@ func executePreLoginHook(username, loginMethod, ip, protocol string) (User, erro
 	if err != nil {
 		return u, fmt.Errorf("Pre-login hook error: %v", err)
 	}
-	if len(strings.TrimSpace(string(out))) == 0 {
+	if strings.TrimSpace(string(out)) == "" {
 		providerLog(logger.LevelDebug, "empty response from pre-login hook, no modification requested for user %#v id: %v",
 			username, u.ID)
 		if u.ID == 0 {
@@ -2091,7 +2093,7 @@ func ExecutePostLoginHook(user *User, loginMethod, ip, protocol string, err erro
 
 			startTime := time.Now()
 			respCode := 0
-			httpClient := httpclient.GetHTTPClient()
+			httpClient := httpclient.GetRetraybleHTTPClient()
 			resp, err := httpClient.Post(url.String(), "application/json", bytes.NewBuffer(userAsJSON))
 			if err == nil {
 				respCode = resp.StatusCode
@@ -2180,13 +2182,13 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 	if err != nil {
 		return user, fmt.Errorf("Invalid external auth response: %v", err)
 	}
-	if len(user.Username) == 0 {
+	if user.Username == "" {
 		return user, ErrInvalidCredentials
 	}
-	if len(password) > 0 {
+	if password != "" {
 		user.Password = password
 	}
-	if len(pkey) > 0 && !utils.IsStringPrefixInSlice(pkey, user.PublicKeys) {
+	if pkey != "" && !utils.IsStringPrefixInSlice(pkey, user.PublicKeys) {
 		user.PublicKeys = append(user.PublicKeys, pkey)
 	}
 	// some users want to map multiple login usernames with a single SFTPGo account
@@ -2271,7 +2273,7 @@ func executeAction(operation string, user *User) {
 			q.Add("action", operation)
 			url.RawQuery = q.Encode()
 			startTime := time.Now()
-			httpClient := httpclient.GetHTTPClient()
+			httpClient := httpclient.GetRetraybleHTTPClient()
 			resp, err := httpClient.Post(url.String(), "application/json", bytes.NewBuffer(userAsJSON))
 			respCode := 0
 			if err == nil {

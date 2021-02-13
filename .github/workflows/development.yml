@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  testfreebsd:
+    name: Test on FreeBSD
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Test in FreeBSD
+        uses: vmactions/freebsd-vm@v0.1.2
+        with:
+          usesh: true
+          prepare: pkg install -y go
+          run: |
+            go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
+            go test -v -p 1 -timeout 10m ./... -coverprofile=coverage.txt -covermode=atomic

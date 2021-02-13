@@ -8,8 +8,8 @@ SFTPGo provides an official Docker image, it is available on both [Docker Hub](h
 - [v2.0.1-alpine, v2.0-alpine, v2-alpine, alpine](https://github.com/drakkan/sftpgo/blob/v2.0.1/Dockerfile.full.alpine)
 - [v2.0.1-slim, v2.0-slim, v2-slim, slim](https://github.com/drakkan/sftpgo/blob/v2.0.1/Dockerfile)
 - [v2.0.1-alpine-slim, v2.0-alpine-slim, v2-alpine-slim, alpine-slim](https://github.com/drakkan/sftpgo/blob/v2.0.1/Dockerfile.alpine)
-- [edge](../Dockerfile.full)
-- [edge-alpine](../Dockerfile.full.alpine)
+- [edge](../Dockerfile)
+- [edge-alpine](../Dockerfile.alpine)
 - [edge-slim](../Dockerfile)
 - [edge-alpine-slim](../Dockerfile.alpine)
 
@@ -62,14 +62,16 @@ docker run --name some-sftpgo \
     -p 2022:2022 \
     --mount type=bind,source=/my/own/sftpgodata,target=/srv/sftpgo \
     --mount type=bind,source=/my/own/sftpgohome,target=/var/lib/sftpgo \
-    -e SFTPGO_HTTPD__BIND_PORT=8090 \
+    -e SFTPGO_HTTPD__BINDINGS__0__PORT=8090 \
     -d "drakkan/sftpgo:tag"
 ```
 
-As you can see SFTPGo uses two volumes:
+As you can see SFTPGo uses two main volumes:
 
 - `/srv/sftpgo` to handle persistent data. The default home directory for SFTP/FTP/WebDAV users is `/srv/sftpgo/data/<username>`. Backups are stored in `/srv/sftpgo/backups`
 - `/var/lib/sftpgo` is the home directory for the sftpgo system user defined inside the container. This is the container working directory too, host keys will be created here when using the default configuration.
+
+If you want to get fine grained control, you can also mount `/srv/sftpgo/data` and `/srv/sftpgo/backups` as separate volumes instead of mounting `/srv/sftpgo`.
 
 ### Configuration
 
