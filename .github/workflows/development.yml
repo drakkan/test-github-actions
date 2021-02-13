@@ -19,11 +19,11 @@ jobs:
           run: |
             pw useradd sftpgo
             chown -R sftpgo ../test-github-actions
-            mkdir -p ../env/{go,.cache,.config}
-            chown -R sftpgo ../env
-            go env -w GOCACHE="../env/.cache/go-build"
-            go env -w GOENV="../env/.config/go/env"
-            go env -w GOMODCACHE="..env/go/pkg/mod"
-            go env -w GOPATH="../env/go"
+            mkdir -p /tmp/env/{go,.cache,.config}
+            chown -R sftpgo /tmp/env
+            go env -w GOCACHE="/tmp/env/.cache/go-build"
+            go env -w GOENV="tmp/env/.config/go/env"
+            go env -w GOMODCACHE="/tmp/env/go/pkg/mod"
+            go env -w GOPATH="/tmp/env/go"
             su -m sftpgo -c 'go build -ldflags "-s -w X github.com/drakkan/sftpgo/version.commit=${GITHUB_SHA} -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo'
             su -m sftpgo -c 'go test -v -p 1 -timeout 10m ./... -coverprofile=coverage.txt -covermode=atomic'
