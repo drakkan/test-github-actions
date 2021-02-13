@@ -21,9 +21,9 @@ jobs:
             chown -R sftpgo ../test-github-actions
             mkdir -p ../env/{go,.cache,.config}
             chown -R sftpgo ../env
-            setenv GOCACHE "../env/.cache/go-build"
-            setenv GOENV "../env/.config/go/env"
-            setenv GOMODCACHE "..env/go/pkg/mod"
-            setenv GOPATH "../env/go"
+            go env -w GOCACHE="../env/.cache/go-build"
+            go env -w GOENV="../env/.config/go/env"
+            go env -w GOMODCACHE="..env/go/pkg/mod"
+            go env -w GOPATH="../env/go"
             su -m sftpgo -c "go build -ldflags \"-s -w X github.com/drakkan/sftpgo/version.commit=${GITHUB_SHA} -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`\" -o sftpgo"
             su -m sftpgo -c 'go test -v -p 1 -timeout 10m ./... -coverprofile=coverage.txt -covermode=atomic'
