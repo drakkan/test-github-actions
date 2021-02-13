@@ -25,5 +25,5 @@ jobs:
             export GOENV="../env/.config/go/env"
             export GOMODCACHE="..env/go/pkg/mod"
             export GOPATH="../env/go"
-            su -m sftpgo -c 'go build -ldflags "-s -w X github.com/drakkan/sftpgo/version.commit=${GITHUB_SHA} -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo'
+            su -m sftpgo -c "go build -ldflags \"-s -w X github.com/drakkan/sftpgo/version.commit=${GITHUB_SHA} -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`\" -o sftpgo"
             su -m sftpgo -c 'go test -v -p 1 -timeout 10m ./... -coverprofile=coverage.txt -covermode=atomic'
