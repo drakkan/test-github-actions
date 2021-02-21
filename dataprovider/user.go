@@ -261,6 +261,11 @@ func (u *User) HideConfidentialData() {
 	}
 }
 
+// IsPasswordHashed returns true if the password is hashed
+func (u *User) IsPasswordHashed() bool {
+	return utils.IsStringPrefixInSlice(u.Password, hashPwdPrefixes)
+}
+
 // SetEmptySecrets sets to empty any user secret
 func (u *User) SetEmptySecrets() {
 	u.FsConfig.S3Config.AccessSecret = kms.NewEmptySecret()
@@ -307,7 +312,7 @@ func (u *User) DecryptSecrets() error {
 }
 
 // GetPermissionsForPath returns the permissions for the given path.
-// The path must be an SFTP path
+// The path must be a SFTPGo exposed path
 func (u *User) GetPermissionsForPath(p string) []string {
 	permissions := []string{}
 	if perms, ok := u.Permissions["/"]; ok {

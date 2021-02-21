@@ -152,7 +152,7 @@ func (s *Server) AuthUser(cc ftpserver.ClientContext, username, password string)
 	connection.Fs.CheckRootPath(connection.GetUsername(), user.GetUID(), user.GetGID())
 	connection.Log(logger.LevelInfo, "User id: %d, logged in with FTP, username: %#v, home_dir: %#v remote addr: %#v",
 		user.ID, user.Username, user.HomeDir, ipAddr)
-	dataprovider.UpdateLastLogin(user) //nolint:errcheck
+	dataprovider.UpdateLastLogin(&user) //nolint:errcheck
 	return connection, nil
 }
 
@@ -162,6 +162,7 @@ func (s *Server) GetTLSConfig() (*tls.Config, error) {
 		tlsConfig := &tls.Config{
 			GetCertificate: certMgr.GetCertificateFunc(),
 			MinVersion:     tls.VersionTLS12,
+			CipherSuites:   utils.GetTLSCiphersFromNames(s.binding.TLSCipherSuites),
 		}
 		if s.binding.ClientAuthType == 1 {
 			tlsConfig.ClientCAs = certMgr.GetRootCAs()
