@@ -18,5 +18,6 @@ func main() {
 		fmt.Printf("error setting max procs: %v\n", err)
 		undo()
 	}
+	fmt.Printf("branch main\n")
 	cmd.Execute()
 }
