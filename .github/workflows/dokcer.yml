@@ -1,0 +1,140 @@
+name: Docker
+
+on:
+  #schedule:
+  #  - cron: '0 4 * * *' # everyday at 4:00 AM UTC
+  push:
+    branches:
+      - master
+    tags:
+      - v*
+  pull_request:
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+        docker_pkg:
+          - debian
+          - alpine
+        optional_deps:
+          - true
+          - false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Repo metadata
+        id: repo
+        uses: actions/github-script@v3
+        with:
+          script: |
+            const repo = await github.repos.get(context.repo)
+            return repo.data
+      - name: Gather image information
+        id: info
+        run: |
+          VERSION=noop
+          DOCKERFILE=Dockerfile
+          MINOR=""
+          MAJOR=""
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            VERSION=nightly
+          elif [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          elif [[ $GITHUB_REF == refs/heads/* ]]; then
+            VERSION=$(echo ${GITHUB_REF#refs/heads/} | sed -r 's#/+#-#g')
+            if [ "${{ github.event.repository.default_branch }}" = "$VERSION" ]; then
+              VERSION=edge
+            fi
+          elif [[ $GITHUB_REF == refs/pull/* ]]; then
+            VERSION=pr-${{ github.event.number }}
+          fi
+          if [[ $VERSION =~ ^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            MINOR=${VERSION%.*}
+            MAJOR=${MINOR%.*}
+          fi
+          VERSION_SLIM="${VERSION}-slim"
+          if [[ $DOCKER_PKG == alpine ]]; then
+            VERSION="${VERSION}-alpine"
+            VERSION_SLIM="${VERSION}-slim"
+            DOCKERFILE=Dockerfile.alpine
+          fi
+          DOCKER_IMAGES=("drakkan/sftpgo" "ghcr.io/drakkan/sftpgo")
+          TAGS="${DOCKER_IMAGES[0]}:${VERSION}"
+          TAGS_SLIM="${DOCKER_IMAGES[0]}:${VERSION_SLIM}"
+          for DOCKER_IMAGE in ${DOCKER_IMAGES[@]}; do
+            if [[ ${DOCKER_IMAGE} != ${DOCKER_IMAGES[0]} ]]; then
+              TAGS="${TAGS},${DOCKER_IMAGE}:${VERSION}"
+              TAGS_SLIM="${TAGS_SLIM},${DOCKER_IMAGE}:${VERSION_SLIM}"
+            fi
+            if [[ $GITHUB_REF == refs/tags/* ]]; then
+              if [[ $DOCKER_PKG == debian ]]; then
+                if [[ -n $MAJOR && -n $MINOR ]]; then
+                  TAGS="${TAGS},${DOCKER_IMAGE}:${MINOR},${DOCKER_IMAGE}:${MAJOR}"
+                  TAGS_SLIM="${TAGS_SLIM},${DOCKER_IMAGE}:${MINOR}-slim,${DOCKER_IMAGE}:${MAJOR}-slim"
+                fi
+                TAGS="${TAGS},${DOCKER_IMAGE}:latest"
+                TAGS_SLIM="${TAGS_SLIM},${DOCKER_IMAGE}:slim"
+              else
+                if [[ -n $MAJOR && -n $MINOR ]]; then
+                  TAGS="${TAGS},${DOCKER_IMAGE}:${MINOR}-alpine,${DOCKER_IMAGE}:${MAJOR}-alpine"
+                  TAGS_SLIM="${TAGS_SLIM},${DOCKER_IMAGE}:${MINOR}-alpine-slim,${DOCKER_IMAGE}:${MAJOR}-alpine-slim"
+                fi
+                TAGS="${TAGS},${DOCKER_IMAGE}:alpine"
+                TAGS_SLIM="${TAGS_SLIM},${DOCKER_IMAGE}:alpine-slim"
+              fi
+            fi
+          done
+          if [[ $OPTIONAL_DEPS == true ]]; then
+            echo ${VERSION}
+            echo ${TAGS}
+            echo ::set-output name=version::${VERSION}
+            echo ::set-output name=tags::${TAGS}
+            echo ::set-output name=full::true
+          else
+            echo ${VERSION_SLIM}
+            echo ${TAGS_SLIM}
+            echo ::set-output name=version::${VERSION_SLIM}
+            echo ::set-output name=tags::${TAGS_SLIM}
+            echo ::set-output name=full::false
+          fi
+          echo ::set-output name=dockerfile::${DOCKERFILE}
+          echo ::set-output name=created::$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          echo ::set-output name=sha::${GITHUB_SHA::8}
+        env:
+          DOCKER_PKG: ${{ matrix.docker_pkg }}
+          OPTIONAL_DEPS: ${{ matrix.optional_deps }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v1
+
+      - name: Set up builder
+        uses: docker/setup-buildx-action@v1
+        id: builder
+
+      - name: Build and push
+        uses: docker/build-push-action@v2
+        with:
+          builder: ${{ steps.builder.outputs.name }}
+          file: ./${{ steps.info.outputs.dockerfile }}
+          platforms: linux/amd64,linux/arm64,linux/ppc64le
+          push: false
+          tags: ${{ steps.info.outputs.tags }}
+          build-args: |
+            COMMIT_SHA=${{ steps.info.outputs.sha }}
+            INSTALL_OPTIONAL_PACKAGES=${{ steps.info.outputs.full }}
+          labels: |
+            org.opencontainers.image.title=SFTPGo
+            org.opencontainers.image.description=Fully featured and highly configurable SFTP server with optional FTP/S and WebDAV support
+            org.opencontainers.image.url=${{ fromJson(steps.repo.outputs.result).html_url }}
+            org.opencontainers.image.documentation=${{ fromJson(steps.repo.outputs.result).html_url }}/blob/${{ github.sha }}/docker/README.md
+            org.opencontainers.image.source=${{ fromJson(steps.repo.outputs.result).html_url }}
+            org.opencontainers.image.version=${{ steps.info.outputs.version }}
+            org.opencontainers.image.created=${{ steps.info.outputs.created }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=${{ fromJson(steps.repo.outputs.result).license.spdx_id }}
