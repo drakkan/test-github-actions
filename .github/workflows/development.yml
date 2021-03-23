@@ -40,7 +40,7 @@ jobs:
         ports:
           - 3307:3306
       crdb:
-        image: cockroachdb/cockroach:latest start-single-node --insecure --http-addr 0.0.0.0:8080 --listen-addr 0.0.0.0:26257
+        image: cockroachdb/cockroach:latest
         ports:
           - 26257:26257
         options: >-
@@ -48,6 +48,7 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 6
+          --entrypoint "/cockroach/cockroach start-single-node --insecure --http-addr 0.0.0.0:8080 --listen-addr 0.0.0.0:26257"
 
     steps:
       - uses: actions/checkout@v2
