@@ -12,35 +12,10 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      postgres:
-        image: postgres:latest
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: sftpgo
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
-      mariadb:
-        image: mariadb:latest
-        env:
-          MYSQL_ROOT_PASSWORD: mysql
-          MYSQL_DATABASE: sftpgo
-          MYSQL_USER: sftpgo
-          MYSQL_PASSWORD: sftpgo
-        options: >-
-          --health-cmd "mysqladmin status -h 127.0.0.1 -P 3306 -u root -p$MYSQL_ROOT_PASSWORD"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 6
-        ports:
-          - 3307:3306
       crdb:
         image: cockroachdb/cockroach:latest
+        args:
+          - start-single-node --insecure --http-addr 0.0.0.0:8080 --listen-addr 0.0.0.0:26257
         ports:
           - 26257:26257
         options: >-
@@ -48,7 +23,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 6
-          --entrypoint "/cockroach/cockroach start-single-node --insecure --http-addr 0.0.0.0:8080 --listen-addr 0.0.0.0:26257"
 
     steps:
       - uses: actions/checkout@v2
@@ -60,28 +34,6 @@ jobs:
 
       - name: Build
         run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
-
-      - name: Run tests using CockroachDB provider
-        run: |
-          go test -v -p 1 -timeout 10m ./... -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: cockroach
-          SFTPGO_DATA_PROVIDER__NAME: defaultdb
-          SFTPGO_DATA_PROVIDER__HOST: localhost
-          SFTPGO_DATA_PROVIDER__PORT: 26257
-          SFTPGO_DATA_PROVIDER__USERNAME: root
-          SFTPGO_DATA_PROVIDER__PASSWORD:
-
-      - name: Run tests using MySQL provider
-        run: |
-          go test -v -p 1 -timeout 10m ./... -covermode=atomic
-        env:
-          SFTPGO_DATA_PROVIDER__DRIVER: mysql
-          SFTPGO_DATA_PROVIDER__NAME: sftpgo
-          SFTPGO_DATA_PROVIDER__HOST: localhost
-          SFTPGO_DATA_PROVIDER__PORT: 3307
-          SFTPGO_DATA_PROVIDER__USERNAME: sftpgo
-          SFTPGO_DATA_PROVIDER__PASSWORD: sftpgo
 
       - name: Run tests using CockroachDB provider
         run: |
