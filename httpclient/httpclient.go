@@ -4,8 +4,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -83,6 +83,9 @@ func (c *Config) Initialize(configDir string) error {
 // loadCACerts returns system cert pools and try to add the configured
 // CA certificates to it
 func (c *Config) loadCACerts(configDir string) (*x509.CertPool, error) {
+	if len(c.CACertificates) == 0 {
+		return nil, nil
+	}
 	rootCAs, err := x509.SystemCertPool()
 	if err != nil {
 		rootCAs = x509.NewCertPool()
@@ -95,7 +98,7 @@ func (c *Config) loadCACerts(configDir string) (*x509.CertPool, error) {
 		if !filepath.IsAbs(ca) {
 			ca = filepath.Join(configDir, ca)
 		}
-		certs, err := ioutil.ReadFile(ca)
+		certs, err := os.ReadFile(ca)
 		if err != nil {
 			return nil, fmt.Errorf("unable to load CA certificate: %v", err)
 		}

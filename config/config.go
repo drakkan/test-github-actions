@@ -59,6 +59,7 @@ var (
 		EnableHTTPS:     false,
 		ClientAuthType:  0,
 		TLSCipherSuites: nil,
+		Prefix:          "",
 	}
 	defaultHTTPDBinding = httpd.Binding{
 		Address:         "127.0.0.1",
@@ -210,6 +211,7 @@ func Init() {
 			},
 			UpdateMode:                0,
 			PreferDatabaseCredentials: false,
+			SkipNaturalKeysValidation: false,
 		},
 		HTTPDConfig: httpd.Conf{
 			Bindings:           []httpd.Binding{defaultHTTPDBinding},
@@ -401,7 +403,6 @@ func LoadConfig(configDir, configFile string) error {
 	}
 	// viper only supports slice of strings from env vars, so we use our custom method
 	loadBindingsFromEnv()
-	checkCommonParamsCompatibility()
 	if strings.TrimSpace(globalConf.SFTPD.Banner) == "" {
 		globalConf.SFTPD.Banner = defaultSFTPDBanner
 	}
@@ -428,7 +429,7 @@ func LoadConfig(configDir, configFile string) error {
 		logger.Warn(logSender, "", "Configuration error: %v", warn)
 		logger.WarnToConsole("Configuration error: %v", warn)
 	}
-	if globalConf.ProviderConf.ExternalAuthScope < 0 || globalConf.ProviderConf.ExternalAuthScope > 7 {
+	if globalConf.ProviderConf.ExternalAuthScope < 0 || globalConf.ProviderConf.ExternalAuthScope > 15 {
 		warn := fmt.Sprintf("invalid external_auth_scope: %v reset to 0", globalConf.ProviderConf.ExternalAuthScope)
 		globalConf.ProviderConf.ExternalAuthScope = 0
 		logger.Warn(logSender, "", "Configuration error: %v", warn)
@@ -440,51 +441,8 @@ func LoadConfig(configDir, configFile string) error {
 		logger.Warn(logSender, "", "Configuration error: %v", warn)
 		logger.WarnToConsole("Configuration error: %v", warn)
 	}
-	checkHostKeyCompatibility()
 	logger.Debug(logSender, "", "config file used: '%#v', config loaded: %+v", viper.ConfigFileUsed(), getRedactedGlobalConf())
 	return nil
-}
-
-func checkHostKeyCompatibility() {
-	// we copy deprecated fields to new ones to keep backward compatibility so lint is disabled
-	if len(globalConf.SFTPD.Keys) > 0 && len(globalConf.SFTPD.HostKeys) == 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "keys is deprecated, please use host_keys")
-		logger.WarnToConsole("keys is deprecated, please use host_keys")
-		for _, k := range globalConf.SFTPD.Keys { //nolint:staticcheck
-			globalConf.SFTPD.HostKeys = append(globalConf.SFTPD.HostKeys, k.PrivateKey)
-		}
-	}
-}
-
-func checkCommonParamsCompatibility() {
-	// we copy deprecated fields to new ones to keep backward compatibility so lint is disabled
-	if globalConf.SFTPD.IdleTimeout > 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "sftpd.idle_timeout is deprecated, please use common.idle_timeout")
-		logger.WarnToConsole("sftpd.idle_timeout is deprecated, please use common.idle_timeout")
-		globalConf.Common.IdleTimeout = globalConf.SFTPD.IdleTimeout //nolint:staticcheck
-	}
-	if globalConf.SFTPD.Actions.Hook != "" && len(globalConf.Common.Actions.Hook) == 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "sftpd.actions is deprecated, please use common.actions")
-		logger.WarnToConsole("sftpd.actions is deprecated, please use common.actions")
-		globalConf.Common.Actions.ExecuteOn = globalConf.SFTPD.Actions.ExecuteOn //nolint:staticcheck
-		globalConf.Common.Actions.Hook = globalConf.SFTPD.Actions.Hook           //nolint:staticcheck
-	}
-	if globalConf.SFTPD.SetstatMode > 0 && globalConf.Common.SetstatMode == 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "sftpd.setstat_mode is deprecated, please use common.setstat_mode")
-		logger.WarnToConsole("sftpd.setstat_mode is deprecated, please use common.setstat_mode")
-		globalConf.Common.SetstatMode = globalConf.SFTPD.SetstatMode //nolint:staticcheck
-	}
-	if globalConf.SFTPD.UploadMode > 0 && globalConf.Common.UploadMode == 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "sftpd.upload_mode is deprecated, please use common.upload_mode")
-		logger.WarnToConsole("sftpd.upload_mode is deprecated, please use common.upload_mode")
-		globalConf.Common.UploadMode = globalConf.SFTPD.UploadMode //nolint:staticcheck
-	}
-	if globalConf.SFTPD.ProxyProtocol > 0 && globalConf.Common.ProxyProtocol == 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "sftpd.proxy_protocol is deprecated, please use common.proxy_protocol")
-		logger.WarnToConsole("sftpd.proxy_protocol is deprecated, please use common.proxy_protocol")
-		globalConf.Common.ProxyProtocol = globalConf.SFTPD.ProxyProtocol //nolint:staticcheck
-		globalConf.Common.ProxyAllowed = globalConf.SFTPD.ProxyAllowed   //nolint:staticcheck
-	}
 }
 
 func checkSFTPDBindingsCompatibility() {
@@ -718,6 +676,12 @@ func getWebDAVDBindingFromEnv(idx int) {
 		isSet = true
 	}
 
+	prefix, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__PREFIX", idx))
+	if ok {
+		binding.Prefix = prefix
+		isSet = true
+	}
+
 	if isSet {
 		if len(globalConf.WebDAVD.Bindings) > idx {
 			globalConf.WebDAVD.Bindings[idx] = binding
@@ -889,6 +853,7 @@ func setViperDefaults() {
 	viper.SetDefault("data_provider.password_hashing.argon2_options.iterations", globalConf.ProviderConf.PasswordHashing.Argon2Options.Iterations)
 	viper.SetDefault("data_provider.password_hashing.argon2_options.parallelism", globalConf.ProviderConf.PasswordHashing.Argon2Options.Parallelism)
 	viper.SetDefault("data_provider.update_mode", globalConf.ProviderConf.UpdateMode)
+	viper.SetDefault("data_provider.skip_natural_keys_validation", globalConf.ProviderConf.SkipNaturalKeysValidation)
 	viper.SetDefault("httpd.templates_path", globalConf.HTTPDConfig.TemplatesPath)
 	viper.SetDefault("httpd.static_files_path", globalConf.HTTPDConfig.StaticFilesPath)
 	viper.SetDefault("httpd.backups_path", globalConf.HTTPDConfig.BackupsPath)

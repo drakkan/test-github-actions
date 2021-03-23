@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -15,6 +16,7 @@ type BaseVirtualFolder struct {
 	ID            int64  `json:"id"`
 	Name          string `json:"name"`
 	MappedPath    string `json:"mapped_path,omitempty"`
+	Description   string `json:"description,omitempty"`
 	UsedQuotaSize int64  `json:"used_quota_size"`
 	// Used quota as number of files
 	UsedQuotaFiles int `json:"used_quota_files"`
@@ -22,6 +24,18 @@ type BaseVirtualFolder struct {
 	LastQuotaUpdate int64 `json:"last_quota_update"`
 	// list of usernames associated with this virtual folder
 	Users []string `json:"users,omitempty"`
+	// Filesystem configuration details
+	FsConfig Filesystem `json:"filesystem"`
+}
+
+// GetEncrytionAdditionalData returns the additional data to use for AEAD
+func (v *BaseVirtualFolder) GetEncrytionAdditionalData() string {
+	return fmt.Sprintf("folder_%v", v.Name)
+}
+
+// GetGCSCredentialsFilePath returns the path for GCS credentials
+func (v *BaseVirtualFolder) GetGCSCredentialsFilePath() string {
+	return filepath.Join(credentialsDirPath, "folders", fmt.Sprintf("%v_gcs_credentials.json", v.Name))
 }
 
 // GetACopy returns a copy
@@ -31,11 +45,13 @@ func (v *BaseVirtualFolder) GetACopy() BaseVirtualFolder {
 	return BaseVirtualFolder{
 		ID:              v.ID,
 		Name:            v.Name,
+		Description:     v.Description,
 		MappedPath:      v.MappedPath,
 		UsedQuotaSize:   v.UsedQuotaSize,
 		UsedQuotaFiles:  v.UsedQuotaFiles,
 		LastQuotaUpdate: v.LastQuotaUpdate,
 		Users:           users,
+		FsConfig:        v.FsConfig.GetACopy(),
 	}
 }
 
@@ -58,6 +74,66 @@ func (v *BaseVirtualFolder) GetQuotaSummary() string {
 	return result
 }
 
+// IsLocalOrLocalCrypted returns true if the folder provider is local or local encrypted
+func (v *BaseVirtualFolder) IsLocalOrLocalCrypted() bool {
+	return v.FsConfig.Provider == LocalFilesystemProvider || v.FsConfig.Provider == CryptedFilesystemProvider
+}
+
+// hideConfidentialData hides folder confidential data
+func (v *BaseVirtualFolder) hideConfidentialData() {
+	switch v.FsConfig.Provider {
+	case S3FilesystemProvider:
+		v.FsConfig.S3Config.AccessSecret.Hide()
+	case GCSFilesystemProvider:
+		v.FsConfig.GCSConfig.Credentials.Hide()
+	case AzureBlobFilesystemProvider:
+		v.FsConfig.AzBlobConfig.AccountKey.Hide()
+	case CryptedFilesystemProvider:
+		v.FsConfig.CryptConfig.Passphrase.Hide()
+	case SFTPFilesystemProvider:
+		v.FsConfig.SFTPConfig.Password.Hide()
+		v.FsConfig.SFTPConfig.PrivateKey.Hide()
+	}
+}
+
+// PrepareForRendering prepares a folder for rendering.
+// It hides confidential data and set to nil the empty secrets
+// so they are not serialized
+func (v *BaseVirtualFolder) PrepareForRendering() {
+	v.hideConfidentialData()
+	v.FsConfig.SetEmptySecretsIfNil()
+}
+
+// HasRedactedSecret returns true if the folder has a redacted secret
+func (v *BaseVirtualFolder) HasRedactedSecret() bool {
+	switch v.FsConfig.Provider {
+	case S3FilesystemProvider:
+		if v.FsConfig.S3Config.AccessSecret.IsRedacted() {
+			return true
+		}
+	case GCSFilesystemProvider:
+		if v.FsConfig.GCSConfig.Credentials.IsRedacted() {
+			return true
+		}
+	case AzureBlobFilesystemProvider:
+		if v.FsConfig.AzBlobConfig.AccountKey.IsRedacted() {
+			return true
+		}
+	case CryptedFilesystemProvider:
+		if v.FsConfig.CryptConfig.Passphrase.IsRedacted() {
+			return true
+		}
+	case SFTPFilesystemProvider:
+		if v.FsConfig.SFTPConfig.Password.IsRedacted() {
+			return true
+		}
+		if v.FsConfig.SFTPConfig.PrivateKey.IsRedacted() {
+			return true
+		}
+	}
+	return false
+}
+
 // VirtualFolder defines a mapping between an SFTPGo exposed virtual path and a
 // filesystem path outside the user home directory.
 // The specified paths must be absolute and the virtual path cannot be "/",
@@ -73,6 +149,37 @@ type VirtualFolder struct {
 	QuotaFiles int `json:"quota_files"`
 }
 
+// GetFilesystem returns the filesystem for this folder
+func (v *VirtualFolder) GetFilesystem(connectionID string) (Fs, error) {
+	switch v.FsConfig.Provider {
+	case S3FilesystemProvider:
+		return NewS3Fs(connectionID, v.MappedPath, v.VirtualPath, v.FsConfig.S3Config)
+	case GCSFilesystemProvider:
+		config := v.FsConfig.GCSConfig
+		config.CredentialFile = v.GetGCSCredentialsFilePath()
+		return NewGCSFs(connectionID, v.MappedPath, v.VirtualPath, config)
+	case AzureBlobFilesystemProvider:
+		return NewAzBlobFs(connectionID, v.MappedPath, v.VirtualPath, v.FsConfig.AzBlobConfig)
+	case CryptedFilesystemProvider:
+		return NewCryptFs(connectionID, v.MappedPath, v.VirtualPath, v.FsConfig.CryptConfig)
+	case SFTPFilesystemProvider:
+		return NewSFTPFs(connectionID, v.VirtualPath, v.FsConfig.SFTPConfig)
+	default:
+		return NewOsFs(connectionID, v.MappedPath, v.VirtualPath), nil
+	}
+}
+
+// ScanQuota scans the folder and returns the number of files and their size
+func (v *VirtualFolder) ScanQuota() (int, int64, error) {
+	fs, err := v.GetFilesystem("")
+	if err != nil {
+		return 0, 0, err
+	}
+	defer fs.Close()
+
+	return fs.ScanRootDirContents()
+}
+
 // IsIncludedInUserQuota returns true if the virtual folder is included in user quota
 func (v *VirtualFolder) IsIncludedInUserQuota() bool {
 	return v.QuotaFiles == -1 && v.QuotaSize == -1
@@ -84,4 +191,14 @@ func (v *VirtualFolder) HasNoQuotaRestrictions(checkFiles bool) bool {
 		return true
 	}
 	return false
+}
+
+// GetACopy returns a copy
+func (v *VirtualFolder) GetACopy() VirtualFolder {
+	return VirtualFolder{
+		BaseVirtualFolder: v.BaseVirtualFolder.GetACopy(),
+		VirtualPath:       v.VirtualPath,
+		QuotaSize:         v.QuotaSize,
+		QuotaFiles:        v.QuotaFiles,
+	}
 }

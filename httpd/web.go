@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -41,6 +41,7 @@ const (
 
 const (
 	templateBase         = "base.html"
+	templateFsConfig     = "fsconfig.html"
 	templateUsers        = "users.html"
 	templateUser         = "user.html"
 	templateAdmins       = "admins.html"
@@ -133,15 +134,15 @@ type statusPage struct {
 
 type userPage struct {
 	basePage
-	User                 *dataprovider.User
-	RootPerms            []string
-	Error                string
-	ValidPerms           []string
-	ValidSSHLoginMethods []string
-	ValidProtocols       []string
-	RootDirPerms         []string
-	RedactedSecret       string
-	Mode                 userPageMode
+	User              *dataprovider.User
+	RootPerms         []string
+	Error             string
+	ValidPerms        []string
+	ValidLoginMethods []string
+	ValidProtocols    []string
+	RootDirPerms      []string
+	RedactedSecret    string
+	Mode              userPageMode
 }
 
 type adminPage struct {
@@ -196,6 +197,7 @@ func loadTemplates(templatesPath string) {
 	}
 	userPaths := []string{
 		filepath.Join(templatesPath, templateBase),
+		filepath.Join(templatesPath, templateFsConfig),
 		filepath.Join(templatesPath, templateUser),
 	}
 	adminsPaths := []string{
@@ -224,6 +226,7 @@ func loadTemplates(templatesPath string) {
 	}
 	folderPath := []string{
 		filepath.Join(templatesPath, templateBase),
+		filepath.Join(templatesPath, templateFsConfig),
 		filepath.Join(templatesPath, templateFolder),
 	}
 	statusPath := []string{
@@ -392,16 +395,16 @@ func renderUserPage(w http.ResponseWriter, r *http.Request, user *dataprovider.U
 	if user.Password != "" && user.IsPasswordHashed() && mode == userPageModeUpdate {
 		user.Password = redactedSecret
 	}
+	user.FsConfig.RedactedSecret = redactedSecret
 	data := userPage{
-		basePage:             getBasePageData(title, currentURL, r),
-		Mode:                 mode,
-		Error:                error,
-		User:                 user,
-		ValidPerms:           dataprovider.ValidPerms,
-		ValidSSHLoginMethods: dataprovider.ValidSSHLoginMethods,
-		ValidProtocols:       dataprovider.ValidProtocols,
-		RootDirPerms:         user.GetPermissionsForPath("/"),
-		RedactedSecret:       redactedSecret,
+		basePage:          getBasePageData(title, currentURL, r),
+		Mode:              mode,
+		Error:             error,
+		User:              user,
+		ValidPerms:        dataprovider.ValidPerms,
+		ValidLoginMethods: dataprovider.ValidLoginMethods,
+		ValidProtocols:    dataprovider.ValidProtocols,
+		RootDirPerms:      user.GetPermissionsForPath("/"),
 	}
 	renderTemplate(w, templateUser, data)
 }
@@ -419,6 +422,9 @@ func renderFolderPage(w http.ResponseWriter, r *http.Request, folder vfs.BaseVir
 		title = "Folder template"
 		currentURL = webTemplateFolder
 	}
+	folder.FsConfig.RedactedSecret = redactedSecret
+	folder.FsConfig.SetEmptySecretsIfNil()
+
 	data := folderPage{
 		basePage: getBasePageData(title, currentURL, r),
 		Error:    error,
@@ -655,6 +661,7 @@ func getFiltersFromUserPostFields(r *http.Request) dataprovider.UserFilters {
 	filters.DeniedProtocols = r.Form["denied_protocols"]
 	filters.FileExtensions = getFileExtensionsFromPostField(r.Form.Get("allowed_extensions"), r.Form.Get("denied_extensions"))
 	filters.FilePatterns = getFilePatternsFromPostField(r.Form.Get("allowed_patterns"), r.Form.Get("denied_patterns"))
+	filters.TLSUsername = dataprovider.TLSUsername(r.Form.Get("tls_username"))
 	return filters
 }
 
@@ -708,7 +715,7 @@ func getGCSConfig(r *http.Request) (vfs.GCSFsConfig, error) {
 		return config, err
 	}
 	defer credentials.Close()
-	fileBytes, err := ioutil.ReadAll(credentials)
+	fileBytes, err := io.ReadAll(credentials)
 	if err != nil || len(fileBytes) == 0 {
 		if len(fileBytes) == 0 {
 			err = errors.New("credentials file size must be greater than 0")
@@ -729,6 +736,7 @@ func getSFTPConfig(r *http.Request) vfs.SFTPFsConfig {
 	fingerprintsFormValue := r.Form.Get("sftp_fingerprints")
 	config.Fingerprints = getSliceFromDelimitedValues(fingerprintsFormValue, "\n")
 	config.Prefix = r.Form.Get("sftp_prefix")
+	config.DisableCouncurrentReads = len(r.Form.Get("sftp_disable_concurrent_reads")) > 0
 	return config
 }
 
@@ -751,35 +759,35 @@ func getAzureConfig(r *http.Request) (vfs.AzBlobFsConfig, error) {
 	return config, err
 }
 
-func getFsConfigFromUserPostFields(r *http.Request) (dataprovider.Filesystem, error) {
-	var fs dataprovider.Filesystem
+func getFsConfigFromPostFields(r *http.Request) (vfs.Filesystem, error) {
+	var fs vfs.Filesystem
 	provider, err := strconv.Atoi(r.Form.Get("fs_provider"))
 	if err != nil {
-		provider = int(dataprovider.LocalFilesystemProvider)
+		provider = int(vfs.LocalFilesystemProvider)
 	}
-	fs.Provider = dataprovider.FilesystemProvider(provider)
+	fs.Provider = vfs.FilesystemProvider(provider)
 	switch fs.Provider {
-	case dataprovider.S3FilesystemProvider:
+	case vfs.S3FilesystemProvider:
 		config, err := getS3Config(r)
 		if err != nil {
 			return fs, err
 		}
 		fs.S3Config = config
-	case dataprovider.AzureBlobFilesystemProvider:
+	case vfs.AzureBlobFilesystemProvider:
 		config, err := getAzureConfig(r)
 		if err != nil {
 			return fs, err
 		}
 		fs.AzBlobConfig = config
-	case dataprovider.GCSFilesystemProvider:
+	case vfs.GCSFilesystemProvider:
 		config, err := getGCSConfig(r)
 		if err != nil {
 			return fs, err
 		}
 		fs.GCSConfig = config
-	case dataprovider.CryptedFilesystemProvider:
+	case vfs.CryptedFilesystemProvider:
 		fs.CryptConfig.Passphrase = getSecretFromFormField(r, "crypt_passphrase")
-	case dataprovider.SFTPFilesystemProvider:
+	case vfs.SFTPFilesystemProvider:
 		fs.SFTPConfig = getSFTPConfig(r)
 	}
 	return fs, nil
@@ -802,6 +810,7 @@ func getAdminFromPostFields(r *http.Request) (dataprovider.Admin, error) {
 	admin.Status = status
 	admin.Filters.AllowList = getSliceFromDelimitedValues(r.Form.Get("allowed_ip"), ",")
 	admin.AdditionalInfo = r.Form.Get("additional_info")
+	admin.Description = r.Form.Get("description")
 	return admin, nil
 }
 
@@ -818,6 +827,19 @@ func getFolderFromTemplate(folder vfs.BaseVirtualFolder, name string) vfs.BaseVi
 	replacements["%name%"] = folder.Name
 
 	folder.MappedPath = replacePlaceholders(folder.MappedPath, replacements)
+	folder.Description = replacePlaceholders(folder.Description, replacements)
+	switch folder.FsConfig.Provider {
+	case vfs.CryptedFilesystemProvider:
+		folder.FsConfig.CryptConfig = getCryptFsFromTemplate(folder.FsConfig.CryptConfig, replacements)
+	case vfs.S3FilesystemProvider:
+		folder.FsConfig.S3Config = getS3FsFromTemplate(folder.FsConfig.S3Config, replacements)
+	case vfs.GCSFilesystemProvider:
+		folder.FsConfig.GCSConfig = getGCSFsFromTemplate(folder.FsConfig.GCSConfig, replacements)
+	case vfs.AzureBlobFilesystemProvider:
+		folder.FsConfig.AzBlobConfig = getAzBlobFsFromTemplate(folder.FsConfig.AzBlobConfig, replacements)
+	case vfs.SFTPFilesystemProvider:
+		folder.FsConfig.SFTPConfig = getSFTPFsFromTemplate(folder.FsConfig.SFTPConfig, replacements)
+	}
 
 	return folder
 }
@@ -887,18 +909,19 @@ func getUserFromTemplate(user dataprovider.User, template userTemplateFields) da
 		vfolders = append(vfolders, vfolder)
 	}
 	user.VirtualFolders = vfolders
+	user.Description = replacePlaceholders(user.Description, replacements)
 	user.AdditionalInfo = replacePlaceholders(user.AdditionalInfo, replacements)
 
 	switch user.FsConfig.Provider {
-	case dataprovider.CryptedFilesystemProvider:
+	case vfs.CryptedFilesystemProvider:
 		user.FsConfig.CryptConfig = getCryptFsFromTemplate(user.FsConfig.CryptConfig, replacements)
-	case dataprovider.S3FilesystemProvider:
+	case vfs.S3FilesystemProvider:
 		user.FsConfig.S3Config = getS3FsFromTemplate(user.FsConfig.S3Config, replacements)
-	case dataprovider.GCSFilesystemProvider:
+	case vfs.GCSFilesystemProvider:
 		user.FsConfig.GCSConfig = getGCSFsFromTemplate(user.FsConfig.GCSConfig, replacements)
-	case dataprovider.AzureBlobFilesystemProvider:
+	case vfs.AzureBlobFilesystemProvider:
 		user.FsConfig.AzBlobConfig = getAzBlobFsFromTemplate(user.FsConfig.AzBlobConfig, replacements)
-	case dataprovider.SFTPFilesystemProvider:
+	case vfs.SFTPFilesystemProvider:
 		user.FsConfig.SFTPConfig = getSFTPFsFromTemplate(user.FsConfig.SFTPConfig, replacements)
 	}
 
@@ -954,7 +977,7 @@ func getUserFromPostFields(r *http.Request) (dataprovider.User, error) {
 		}
 		expirationDateMillis = utils.GetTimeAsMsSinceEpoch(expirationDate)
 	}
-	fsConfig, err := getFsConfigFromUserPostFields(r)
+	fsConfig, err := getFsConfigFromPostFields(r)
 	if err != nil {
 		return user, err
 	}
@@ -977,6 +1000,7 @@ func getUserFromPostFields(r *http.Request) (dataprovider.User, error) {
 		Filters:           getFiltersFromUserPostFields(r),
 		FsConfig:          fsConfig,
 		AdditionalInfo:    r.Form.Get("additional_info"),
+		Description:       r.Form.Get("description"),
 	}
 	maxFileSize, err := strconv.ParseInt(r.Form.Get("max_upload_file_size"), 10, 64)
 	user.Filters.MaxUploadFileSize = maxFileSize
@@ -1059,7 +1083,7 @@ func handleWebRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	defer backupFile.Close()
 
-	backupContent, err := ioutil.ReadAll(backupFile)
+	backupContent, err := io.ReadAll(backupFile)
 	if err != nil || len(backupContent) == 0 {
 		if len(backupContent) == 0 {
 			err = errors.New("backup file size must be greater than 0")
@@ -1250,6 +1274,13 @@ func handleWebTemplateFolderPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	templateFolder.MappedPath = r.Form.Get("mapped_path")
+	templateFolder.Description = r.Form.Get("description")
+	fsConfig, err := getFsConfigFromPostFields(r)
+	if err != nil {
+		renderMessagePage(w, r, "Error parsing folders fields", "", http.StatusBadRequest, err, "")
+		return
+	}
+	templateFolder.FsConfig = fsConfig
 
 	var dump dataprovider.BackupData
 	dump.Version = dataprovider.DumpVersion
@@ -1408,7 +1439,7 @@ func handleWebUpdateUserPost(w http.ResponseWriter, r *http.Request) {
 	if updatedUser.Password == redactedSecret {
 		updatedUser.Password = user.Password
 	}
-	updateEncryptedSecrets(&updatedUser, user.FsConfig.S3Config.AccessSecret, user.FsConfig.AzBlobConfig.AccountKey,
+	updateEncryptedSecrets(&updatedUser.FsConfig, user.FsConfig.S3Config.AccessSecret, user.FsConfig.AzBlobConfig.AccountKey,
 		user.FsConfig.GCSConfig.Credentials, user.FsConfig.CryptConfig.Passphrase, user.FsConfig.SFTPConfig.Password,
 		user.FsConfig.SFTPConfig.PrivateKey)
 
@@ -1458,6 +1489,13 @@ func handleWebAddFolderPost(w http.ResponseWriter, r *http.Request) {
 	}
 	folder.MappedPath = r.Form.Get("mapped_path")
 	folder.Name = r.Form.Get("name")
+	folder.Description = r.Form.Get("description")
+	fsConfig, err := getFsConfigFromPostFields(r)
+	if err != nil {
+		renderFolderPage(w, r, folder, folderPageModeAdd, err.Error())
+		return
+	}
+	folder.FsConfig = fsConfig
 
 	err = dataprovider.AddFolder(&folder)
 	if err == nil {
@@ -1500,8 +1538,24 @@ func handleWebUpdateFolderPost(w http.ResponseWriter, r *http.Request) {
 		renderForbiddenPage(w, r, err.Error())
 		return
 	}
-	folder.MappedPath = r.Form.Get("mapped_path")
-	err = dataprovider.UpdateFolder(&folder)
+	fsConfig, err := getFsConfigFromPostFields(r)
+	if err != nil {
+		renderFolderPage(w, r, folder, folderPageModeUpdate, err.Error())
+		return
+	}
+	updatedFolder := &vfs.BaseVirtualFolder{
+		MappedPath:  r.Form.Get("mapped_path"),
+		Description: r.Form.Get("description"),
+	}
+	updatedFolder.ID = folder.ID
+	updatedFolder.Name = folder.Name
+	updatedFolder.FsConfig = fsConfig
+	updatedFolder.FsConfig.SetEmptySecretsIfNil()
+	updateEncryptedSecrets(&updatedFolder.FsConfig, folder.FsConfig.S3Config.AccessSecret, folder.FsConfig.AzBlobConfig.AccountKey,
+		folder.FsConfig.GCSConfig.Credentials, folder.FsConfig.CryptConfig.Passphrase, folder.FsConfig.SFTPConfig.Password,
+		folder.FsConfig.SFTPConfig.PrivateKey)
+
+	err = dataprovider.UpdateFolder(updatedFolder, folder.Users)
 	if err != nil {
 		renderFolderPage(w, r, folder, folderPageModeUpdate, err.Error())
 		return

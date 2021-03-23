@@ -2,7 +2,6 @@ package config_test
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +18,6 @@ import (
 	"github.com/drakkan/sftpgo/httpclient"
 	"github.com/drakkan/sftpgo/httpd"
 	"github.com/drakkan/sftpgo/sftpd"
-	"github.com/drakkan/sftpgo/utils"
 	"github.com/drakkan/sftpgo/webdavd"
 )
 
@@ -46,11 +44,11 @@ func TestLoadConfigTest(t *testing.T) {
 	configFilePath := filepath.Join(configDir, confName)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, []byte("{invalid json}"), os.ModePerm)
+	err = os.WriteFile(configFilePath, []byte("{invalid json}"), os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, []byte("{\"sftpd\": {\"bind_port\": \"a\"}}"), os.ModePerm)
+	err = os.WriteFile(configFilePath, []byte("{\"sftpd\": {\"bind_port\": \"a\"}}"), os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.Error(t, err)
@@ -79,7 +77,7 @@ func TestEmptyBanner(t *testing.T) {
 	c := make(map[string]sftpd.Configuration)
 	c["sftpd"] = sftpdConf
 	jsonConf, _ := json.Marshal(c)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
@@ -93,7 +91,7 @@ func TestEmptyBanner(t *testing.T) {
 	c1 := make(map[string]ftpd.Configuration)
 	c1["ftpd"] = ftpdConf
 	jsonConf, _ = json.Marshal(c1)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
@@ -117,7 +115,7 @@ func TestInvalidUploadMode(t *testing.T) {
 	c["common"] = commonConf
 	jsonConf, err := json.Marshal(c)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
@@ -135,12 +133,12 @@ func TestInvalidExternalAuthScope(t *testing.T) {
 	err := config.LoadConfig(configDir, "")
 	assert.NoError(t, err)
 	providerConf := config.GetProviderConf()
-	providerConf.ExternalAuthScope = 10
+	providerConf.ExternalAuthScope = 100
 	c := make(map[string]dataprovider.Config)
 	c["data_provider"] = providerConf
 	jsonConf, err := json.Marshal(c)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
@@ -163,7 +161,7 @@ func TestInvalidCredentialsPath(t *testing.T) {
 	c["data_provider"] = providerConf
 	jsonConf, err := json.Marshal(c)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
@@ -186,7 +184,7 @@ func TestInvalidProxyProtocol(t *testing.T) {
 	c["common"] = commonConf
 	jsonConf, err := json.Marshal(c)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
@@ -209,81 +207,11 @@ func TestInvalidUsersBaseDir(t *testing.T) {
 	c["data_provider"] = providerConf
 	jsonConf, err := json.Marshal(c)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
 	assert.Empty(t, config.GetProviderConf().UsersBaseDir)
-	err = os.Remove(configFilePath)
-	assert.NoError(t, err)
-}
-
-func TestCommonParamsCompatibility(t *testing.T) {
-	reset()
-
-	configDir := ".."
-	confName := tempConfigName + ".json"
-	configFilePath := filepath.Join(configDir, confName)
-	err := config.LoadConfig(configDir, "")
-	assert.NoError(t, err)
-	sftpdConf := config.GetSFTPDConfig()
-	sftpdConf.IdleTimeout = 21 //nolint:staticcheck
-	sftpdConf.Actions.Hook = "http://hook"
-	sftpdConf.Actions.ExecuteOn = []string{"upload"}
-	sftpdConf.SetstatMode = 1                                //nolint:staticcheck
-	sftpdConf.UploadMode = common.UploadModeAtomicWithResume //nolint:staticcheck
-	sftpdConf.ProxyProtocol = 1                              //nolint:staticcheck
-	sftpdConf.ProxyAllowed = []string{"192.168.1.1"}         //nolint:staticcheck
-	c := make(map[string]sftpd.Configuration)
-	c["sftpd"] = sftpdConf
-	jsonConf, err := json.Marshal(c)
-	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
-	assert.NoError(t, err)
-	err = config.LoadConfig(configDir, confName)
-	assert.NoError(t, err)
-	commonConf := config.GetCommonConfig()
-	assert.Equal(t, 21, commonConf.IdleTimeout)
-	assert.Equal(t, "http://hook", commonConf.Actions.Hook)
-	assert.Len(t, commonConf.Actions.ExecuteOn, 1)
-	assert.True(t, utils.IsStringInSlice("upload", commonConf.Actions.ExecuteOn))
-	assert.Equal(t, 1, commonConf.SetstatMode)
-	assert.Equal(t, 1, commonConf.ProxyProtocol)
-	assert.Len(t, commonConf.ProxyAllowed, 1)
-	assert.True(t, utils.IsStringInSlice("192.168.1.1", commonConf.ProxyAllowed))
-	err = os.Remove(configFilePath)
-	assert.NoError(t, err)
-}
-
-func TestHostKeyCompatibility(t *testing.T) {
-	reset()
-
-	configDir := ".."
-	confName := tempConfigName + ".json"
-	configFilePath := filepath.Join(configDir, confName)
-	err := config.LoadConfig(configDir, "")
-	assert.NoError(t, err)
-	sftpdConf := config.GetSFTPDConfig()
-	sftpdConf.Keys = []sftpd.Key{ //nolint:staticcheck
-		{
-			PrivateKey: "rsa",
-		},
-		{
-			PrivateKey: "ecdsa",
-		},
-	}
-	c := make(map[string]sftpd.Configuration)
-	c["sftpd"] = sftpdConf
-	jsonConf, err := json.Marshal(c)
-	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
-	assert.NoError(t, err)
-	err = config.LoadConfig(configDir, confName)
-	assert.NoError(t, err)
-	sftpdConf = config.GetSFTPDConfig()
-	assert.Equal(t, 2, len(sftpdConf.HostKeys))
-	assert.True(t, utils.IsStringInSlice("rsa", sftpdConf.HostKeys))
-	assert.True(t, utils.IsStringInSlice("ecdsa", sftpdConf.HostKeys))
 	err = os.Remove(configFilePath)
 	assert.NoError(t, err)
 }
@@ -379,7 +307,7 @@ func TestSFTPDBindingsCompatibility(t *testing.T) {
 	c["sftpd"] = sftpdConf
 	jsonConf, err := json.Marshal(c)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
@@ -420,7 +348,7 @@ func TestFTPDBindingsCompatibility(t *testing.T) {
 	c["ftpd"] = ftpdConf
 	jsonConf, err := json.Marshal(c)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
@@ -453,7 +381,7 @@ func TestWebDAVDBindingsCompatibility(t *testing.T) {
 	c["webdavd"] = webdavConf
 	jsonConf, err := json.Marshal(c)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
@@ -484,7 +412,7 @@ func TestHTTPDBindingsCompatibility(t *testing.T) {
 	c["httpd"] = httpdConf
 	jsonConf, err := json.Marshal(c)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	assert.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	assert.NoError(t, err)
@@ -544,7 +472,7 @@ func TestFTPDBindingsFromEnv(t *testing.T) {
 	os.Setenv("SFTPGO_FTPD__BINDINGS__9__APPLY_PROXY_CONFIG", "t")
 	os.Setenv("SFTPGO_FTPD__BINDINGS__9__TLS_MODE", "1")
 	os.Setenv("SFTPGO_FTPD__BINDINGS__9__FORCE_PASSIVE_IP", "127.0.1.1")
-	os.Setenv("SFTPGO_FTPD__BINDINGS__9__CLIENT_AUTH_TYPE", "1")
+	os.Setenv("SFTPGO_FTPD__BINDINGS__9__CLIENT_AUTH_TYPE", "2")
 
 	t.Cleanup(func() {
 		os.Unsetenv("SFTPGO_FTPD__BINDINGS__0__ADDRESS")
@@ -580,7 +508,7 @@ func TestFTPDBindingsFromEnv(t *testing.T) {
 	require.True(t, bindings[1].ApplyProxyConfig)
 	require.Equal(t, 1, bindings[1].TLSMode)
 	require.Equal(t, "127.0.1.1", bindings[1].ForcePassiveIP)
-	require.Equal(t, 1, bindings[1].ClientAuthType)
+	require.Equal(t, 2, bindings[1].ClientAuthType)
 	require.Nil(t, bindings[1].TLSCipherSuites)
 }
 
@@ -595,6 +523,7 @@ func TestWebDAVBindingsFromEnv(t *testing.T) {
 	os.Setenv("SFTPGO_WEBDAVD__BINDINGS__2__PORT", "9000")
 	os.Setenv("SFTPGO_WEBDAVD__BINDINGS__2__ENABLE_HTTPS", "1")
 	os.Setenv("SFTPGO_WEBDAVD__BINDINGS__2__CLIENT_AUTH_TYPE", "1")
+	os.Setenv("SFTPGO_WEBDAVD__BINDINGS__2__PREFIX", "/dav2")
 	t.Cleanup(func() {
 		os.Unsetenv("SFTPGO_WEBDAVD__BINDINGS__1__ADDRESS")
 		os.Unsetenv("SFTPGO_WEBDAVD__BINDINGS__1__PORT")
@@ -604,6 +533,7 @@ func TestWebDAVBindingsFromEnv(t *testing.T) {
 		os.Unsetenv("SFTPGO_WEBDAVD__BINDINGS__2__PORT")
 		os.Unsetenv("SFTPGO_WEBDAVD__BINDINGS__2__ENABLE_HTTPS")
 		os.Unsetenv("SFTPGO_WEBDAVD__BINDINGS__2__CLIENT_AUTH_TYPE")
+		os.Unsetenv("SFTPGO_WEBDAVD__BINDINGS__2__PREFIX")
 	})
 
 	configDir := ".."
@@ -615,17 +545,20 @@ func TestWebDAVBindingsFromEnv(t *testing.T) {
 	require.Empty(t, bindings[0].Address)
 	require.False(t, bindings[0].EnableHTTPS)
 	require.Len(t, bindings[0].TLSCipherSuites, 0)
+	require.Empty(t, bindings[0].Prefix)
 	require.Equal(t, 8000, bindings[1].Port)
 	require.Equal(t, "127.0.0.1", bindings[1].Address)
 	require.False(t, bindings[1].EnableHTTPS)
 	require.Equal(t, 0, bindings[1].ClientAuthType)
 	require.Len(t, bindings[1].TLSCipherSuites, 1)
 	require.Equal(t, "TLS_RSA_WITH_AES_128_CBC_SHA", bindings[1].TLSCipherSuites[0])
+	require.Empty(t, bindings[1].Prefix)
 	require.Equal(t, 9000, bindings[2].Port)
 	require.Equal(t, "127.0.1.1", bindings[2].Address)
 	require.True(t, bindings[2].EnableHTTPS)
 	require.Equal(t, 1, bindings[2].ClientAuthType)
 	require.Nil(t, bindings[2].TLSCipherSuites)
+	require.Equal(t, "/dav2", bindings[2].Prefix)
 }
 
 func TestHTTPDBindingsFromEnv(t *testing.T) {
@@ -706,7 +639,7 @@ func TestHTTPClientCertificatesFromEnv(t *testing.T) {
 	c["http"] = httpConf
 	jsonConf, err := json.Marshal(c)
 	require.NoError(t, err)
-	err = ioutil.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
 	require.NoError(t, err)
 	err = config.LoadConfig(configDir, confName)
 	require.NoError(t, err)

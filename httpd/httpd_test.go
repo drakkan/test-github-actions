@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -210,12 +209,12 @@ func TestMain(m *testing.M) {
 	// now start an https server
 	certPath := filepath.Join(os.TempDir(), "test.crt")
 	keyPath := filepath.Join(os.TempDir(), "test.key")
-	err = ioutil.WriteFile(certPath, []byte(httpsCert), os.ModePerm)
+	err = os.WriteFile(certPath, []byte(httpsCert), os.ModePerm)
 	if err != nil {
 		logger.ErrorToConsole("error writing HTTPS certificate: %v", err)
 		os.Exit(1)
 	}
-	err = ioutil.WriteFile(keyPath, []byte(httpsKey), os.ModePerm)
+	err = os.WriteFile(keyPath, []byte(httpsKey), os.ModePerm)
 	if err != nil {
 		logger.ErrorToConsole("error writing HTTPS private key: %v", err)
 		os.Exit(1)
@@ -300,6 +299,7 @@ func TestBasicUserHandling(t *testing.T) {
 	user.DownloadBandwidth = 64
 	user.ExpirationDate = utils.GetTimeAsMsSinceEpoch(time.Now())
 	user.AdditionalInfo = "some free text"
+	user.Filters.TLSUsername = dataprovider.TLSUsernameCN
 	originalUser := user
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
@@ -487,7 +487,7 @@ func TestAddUserInvalidFilters(t *testing.T) {
 	u.Filters.DeniedLoginMethods = []string{"invalid"}
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
-	u.Filters.DeniedLoginMethods = dataprovider.ValidSSHLoginMethods
+	u.Filters.DeniedLoginMethods = dataprovider.ValidLoginMethods
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
 	u.Filters.DeniedLoginMethods = []string{}
@@ -569,11 +569,15 @@ func TestAddUserInvalidFilters(t *testing.T) {
 	u.Filters.DeniedProtocols = dataprovider.ValidProtocols
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
+	u.Filters.DeniedProtocols = nil
+	u.Filters.TLSUsername = "not a supported attribute"
+	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
+	assert.NoError(t, err)
 }
 
 func TestAddUserInvalidFsConfig(t *testing.T) {
 	u := getTestUser()
-	u.FsConfig.Provider = dataprovider.S3FilesystemProvider
+	u.FsConfig.Provider = vfs.S3FilesystemProvider
 	u.FsConfig.S3Config.Bucket = ""
 	_, _, err := httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
@@ -582,8 +586,8 @@ func TestAddUserInvalidFsConfig(t *testing.T) {
 	err = os.MkdirAll(credentialsPath, 0700)
 	assert.NoError(t, err)
 	u.FsConfig.S3Config.Bucket = "testbucket"
-	u.FsConfig.S3Config.Region = "eu-west-1"
-	u.FsConfig.S3Config.AccessKey = "access-key"
+	u.FsConfig.S3Config.Region = "eu-west-1"     //nolint:goconst
+	u.FsConfig.S3Config.AccessKey = "access-key" //nolint:goconst
 	u.FsConfig.S3Config.AccessSecret = kms.NewSecret(kms.SecretStatusRedacted, "access-secret", "", "")
 	u.FsConfig.S3Config.Endpoint = "http://127.0.0.1:9000/path?a=b"
 	u.FsConfig.S3Config.StorageClass = "Standard" //nolint:goconst
@@ -605,7 +609,7 @@ func TestAddUserInvalidFsConfig(t *testing.T) {
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
 	u = getTestUser()
-	u.FsConfig.Provider = dataprovider.GCSFilesystemProvider
+	u.FsConfig.Provider = vfs.GCSFilesystemProvider
 	u.FsConfig.GCSConfig.Bucket = ""
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
@@ -628,7 +632,7 @@ func TestAddUserInvalidFsConfig(t *testing.T) {
 	assert.NoError(t, err)
 
 	u = getTestUser()
-	u.FsConfig.Provider = dataprovider.AzureBlobFilesystemProvider
+	u.FsConfig.Provider = vfs.AzureBlobFilesystemProvider
 	u.FsConfig.AzBlobConfig.SASURL = "http://foo\x7f.com/"
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
@@ -655,14 +659,14 @@ func TestAddUserInvalidFsConfig(t *testing.T) {
 	assert.NoError(t, err)
 
 	u = getTestUser()
-	u.FsConfig.Provider = dataprovider.CryptedFilesystemProvider
+	u.FsConfig.Provider = vfs.CryptedFilesystemProvider
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
 	u.FsConfig.CryptConfig.Passphrase = kms.NewSecret(kms.SecretStatusRedacted, "akey", "", "")
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
 	u = getTestUser()
-	u.FsConfig.Provider = dataprovider.SFTPFilesystemProvider
+	u.FsConfig.Provider = vfs.SFTPFilesystemProvider
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
 	u.FsConfig.SFTPConfig.Password = kms.NewSecret(kms.SecretStatusRedacted, "randompkey", "", "")
@@ -671,6 +675,52 @@ func TestAddUserInvalidFsConfig(t *testing.T) {
 	u.FsConfig.SFTPConfig.Password = kms.NewEmptySecret()
 	u.FsConfig.SFTPConfig.PrivateKey = kms.NewSecret(kms.SecretStatusRedacted, "keyforpkey", "", "")
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
+	assert.NoError(t, err)
+}
+
+func TestUserRedactedPassword(t *testing.T) {
+	u := getTestUser()
+	u.FsConfig.Provider = vfs.S3FilesystemProvider
+	u.FsConfig.S3Config.Bucket = "b"
+	u.FsConfig.S3Config.Region = "eu-west-1"
+	u.FsConfig.S3Config.AccessKey = "access-key"
+	u.FsConfig.S3Config.AccessSecret = kms.NewSecret(kms.SecretStatusRedacted, "access-secret", "", "")
+	u.FsConfig.S3Config.Endpoint = "http://127.0.0.1:9000/path?k=m"
+	u.FsConfig.S3Config.StorageClass = "Standard"
+	_, resp, err := httpdtest.AddUser(u, http.StatusBadRequest)
+	assert.NoError(t, err, string(resp))
+	assert.Contains(t, string(resp), "invalid access_secret")
+	err = dataprovider.AddUser(&u)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "cannot save a user with a redacted secret")
+	}
+	u.FsConfig.S3Config.AccessSecret = kms.NewPlainSecret("secret")
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+
+	folderName := "folderName"
+	vfolder := vfs.VirtualFolder{
+		BaseVirtualFolder: vfs.BaseVirtualFolder{
+			Name:       folderName,
+			MappedPath: filepath.Join(os.TempDir(), "crypted"),
+			FsConfig: vfs.Filesystem{
+				Provider: vfs.CryptedFilesystemProvider,
+				CryptConfig: vfs.CryptFsConfig{
+					Passphrase: kms.NewSecret(kms.SecretStatusRedacted, "crypted-secret", "", ""),
+				},
+			},
+		},
+		VirtualPath: "/avpath",
+	}
+
+	user.Password = defaultPassword
+	user.VirtualFolders = append(user.VirtualFolders, vfolder)
+	err = dataprovider.UpdateUser(&user)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "cannot save a user with a redacted secret")
+	}
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 }
 
@@ -760,7 +810,7 @@ func TestAddUserInvalidVirtualFolders(t *testing.T) {
 	})
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
-	u.VirtualFolders = nil
+	/*u.VirtualFolders = nil
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
 			MappedPath: filepath.Join(os.TempDir(), "mapped_dir", "subdir"),
@@ -827,7 +877,7 @@ func TestAddUserInvalidVirtualFolders(t *testing.T) {
 		VirtualPath: "/vdir1/subdir", // invalid, contained inside /vdir1
 	})
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
-	assert.NoError(t, err)
+	assert.NoError(t, err)*/
 	u.VirtualFolders = nil
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
@@ -898,6 +948,32 @@ func TestAddUserInvalidVirtualFolders(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestSFTPVirtualFolderSelf(t *testing.T) {
+	// an sftp virtual folder cannot use the same sftp account, it will generate an infinite loop
+	// at login
+	u := getTestUser()
+	mappedPathSFTP := filepath.Join(os.TempDir(), "sftp")
+	folderNameSFTP := filepath.Base(mappedPathSFTP)
+	vdirSFTPPath := "/vdir/sftp"
+	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
+		BaseVirtualFolder: vfs.BaseVirtualFolder{
+			Name: folderNameSFTP,
+			FsConfig: vfs.Filesystem{
+				Provider: vfs.SFTPFilesystemProvider,
+				SFTPConfig: vfs.SFTPFsConfig{
+					Endpoint: "127.0.0.1:2022",
+					Username: defaultUsername,
+					Password: kms.NewPlainSecret(defaultPassword),
+				},
+			},
+		},
+		VirtualPath: vdirSFTPPath,
+	})
+	_, resp, err := httpdtest.AddUser(u, http.StatusBadRequest)
+	assert.NoError(t, err, string(resp))
+	assert.Contains(t, string(resp), "could point to the same SFTPGo account")
+}
+
 func TestUserPublicKey(t *testing.T) {
 	u := getTestUser()
 	u.Password = ""
@@ -964,6 +1040,7 @@ func TestUpdateUser(t *testing.T) {
 	u := getTestUser()
 	u.UsedQuotaFiles = 1
 	u.UsedQuotaSize = 2
+	u.Filters.TLSUsername = dataprovider.TLSUsernameCN
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, user.UsedQuotaFiles)
@@ -980,6 +1057,7 @@ func TestUpdateUser(t *testing.T) {
 	user.Filters.DeniedIP = []string{"192.168.3.0/24", "192.168.4.0/24"}
 	user.Filters.DeniedLoginMethods = []string{dataprovider.LoginMethodPassword}
 	user.Filters.DeniedProtocols = []string{common.ProtocolWebDAV}
+	user.Filters.TLSUsername = dataprovider.TLSUsernameNone
 	user.Filters.FileExtensions = append(user.Filters.FileExtensions, dataprovider.ExtensionsFilter{
 		Path:              "/subdir",
 		AllowedExtensions: []string{".zip", ".rar"},
@@ -1104,10 +1182,11 @@ func TestUserFolderMapping(t *testing.T) {
 	u1 := getTestUser()
 	u1.VirtualFolders = append(u1.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:           folderName1,
-			MappedPath:     mappedPath1,
-			UsedQuotaFiles: 2,
-			UsedQuotaSize:  123,
+			Name:            folderName1,
+			MappedPath:      mappedPath1,
+			UsedQuotaFiles:  2,
+			UsedQuotaSize:   123,
+			LastQuotaUpdate: 456,
 		},
 		VirtualPath: "/vdir",
 		QuotaSize:   -1,
@@ -1122,6 +1201,10 @@ func TestUserFolderMapping(t *testing.T) {
 	assert.Contains(t, folder.Users, user1.Username)
 	assert.Equal(t, 0, folder.UsedQuotaFiles)
 	assert.Equal(t, int64(0), folder.UsedQuotaSize)
+	assert.Equal(t, int64(0), folder.LastQuotaUpdate)
+	assert.Equal(t, 0, user1.VirtualFolders[0].UsedQuotaFiles)
+	assert.Equal(t, int64(0), user1.VirtualFolders[0].UsedQuotaSize)
+	assert.Equal(t, int64(0), user1.VirtualFolders[0].LastQuotaUpdate)
 
 	u2 := getTestUser()
 	u2.Username = defaultUsername + "2"
@@ -1233,23 +1316,53 @@ func TestUserFolderMapping(t *testing.T) {
 func TestUserS3Config(t *testing.T) {
 	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
 	assert.NoError(t, err)
-	user.FsConfig.Provider = dataprovider.S3FilesystemProvider
+	user.FsConfig.Provider = vfs.S3FilesystemProvider
 	user.FsConfig.S3Config.Bucket = "test"      //nolint:goconst
 	user.FsConfig.S3Config.Region = "us-east-1" //nolint:goconst
 	user.FsConfig.S3Config.AccessKey = "Server-Access-Key"
 	user.FsConfig.S3Config.AccessSecret = kms.NewPlainSecret("Server-Access-Secret")
 	user.FsConfig.S3Config.Endpoint = "http://127.0.0.1:9000"
 	user.FsConfig.S3Config.UploadPartSize = 8
+	folderName := "vfolderName"
+	user.VirtualFolders = append(user.VirtualFolders, vfs.VirtualFolder{
+		BaseVirtualFolder: vfs.BaseVirtualFolder{
+			Name:       folderName,
+			MappedPath: filepath.Join(os.TempDir(), "folderName"),
+			FsConfig: vfs.Filesystem{
+				Provider: vfs.CryptedFilesystemProvider,
+				CryptConfig: vfs.CryptFsConfig{
+					Passphrase: kms.NewPlainSecret("Crypted-Secret"),
+				},
+			},
+		},
+		VirtualPath: "/folderPath",
+	})
 	user, body, err := httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err, string(body))
 	assert.Equal(t, kms.SecretStatusSecretBox, user.FsConfig.S3Config.AccessSecret.GetStatus())
 	assert.NotEmpty(t, user.FsConfig.S3Config.AccessSecret.GetPayload())
 	assert.Empty(t, user.FsConfig.S3Config.AccessSecret.GetAdditionalData())
 	assert.Empty(t, user.FsConfig.S3Config.AccessSecret.GetKey())
+	if assert.Len(t, user.VirtualFolders, 1) {
+		folder := user.VirtualFolders[0]
+		assert.Equal(t, kms.SecretStatusSecretBox, folder.FsConfig.CryptConfig.Passphrase.GetStatus())
+		assert.NotEmpty(t, folder.FsConfig.CryptConfig.Passphrase.GetPayload())
+		assert.Empty(t, folder.FsConfig.CryptConfig.Passphrase.GetAdditionalData())
+		assert.Empty(t, folder.FsConfig.CryptConfig.Passphrase.GetKey())
+	}
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	folder, _, err := httpdtest.GetFolderByName(folderName, http.StatusOK)
+	assert.NoError(t, err)
+	assert.Equal(t, kms.SecretStatusSecretBox, folder.FsConfig.CryptConfig.Passphrase.GetStatus())
+	assert.NotEmpty(t, folder.FsConfig.CryptConfig.Passphrase.GetPayload())
+	assert.Empty(t, folder.FsConfig.CryptConfig.Passphrase.GetAdditionalData())
+	assert.Empty(t, folder.FsConfig.CryptConfig.Passphrase.GetKey())
+	_, err = httpdtest.RemoveFolder(folder, http.StatusOK)
 	assert.NoError(t, err)
 	user.Password = defaultPassword
 	user.ID = 0
+	user.VirtualFolders = nil
 	secret := kms.NewSecret(kms.SecretStatusSecretBox, "Server-Access-Secret", "", "")
 	user.FsConfig.S3Config.AccessSecret = secret
 	_, _, err = httpdtest.AddUser(user, http.StatusCreated)
@@ -1262,7 +1375,7 @@ func TestUserS3Config(t *testing.T) {
 	assert.NotEmpty(t, initialSecretPayload)
 	assert.Empty(t, user.FsConfig.S3Config.AccessSecret.GetAdditionalData())
 	assert.Empty(t, user.FsConfig.S3Config.AccessSecret.GetKey())
-	user.FsConfig.Provider = dataprovider.S3FilesystemProvider
+	user.FsConfig.Provider = vfs.S3FilesystemProvider
 	user.FsConfig.S3Config.Bucket = "test-bucket"
 	user.FsConfig.S3Config.Region = "us-east-1" //nolint:goconst
 	user.FsConfig.S3Config.AccessKey = "Server-Access-Key1"
@@ -1276,7 +1389,7 @@ func TestUserS3Config(t *testing.T) {
 	assert.Empty(t, user.FsConfig.S3Config.AccessSecret.GetAdditionalData())
 	assert.Empty(t, user.FsConfig.S3Config.AccessSecret.GetKey())
 	// test user without access key and access secret (shared config state)
-	user.FsConfig.Provider = dataprovider.S3FilesystemProvider
+	user.FsConfig.Provider = vfs.S3FilesystemProvider
 	user.FsConfig.S3Config.Bucket = "testbucket"
 	user.FsConfig.S3Config.Region = "us-east-1"
 	user.FsConfig.S3Config.AccessKey = ""
@@ -1287,7 +1400,7 @@ func TestUserS3Config(t *testing.T) {
 	user.FsConfig.S3Config.UploadConcurrency = 4
 	user, body, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err, string(body))
-	assert.True(t, user.FsConfig.S3Config.AccessSecret.IsEmpty())
+	assert.Nil(t, user.FsConfig.S3Config.AccessSecret)
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 	user.Password = defaultPassword
@@ -1295,7 +1408,7 @@ func TestUserS3Config(t *testing.T) {
 	// shared credential test for add instead of update
 	user, _, err = httpdtest.AddUser(user, http.StatusCreated)
 	assert.NoError(t, err)
-	assert.True(t, user.FsConfig.S3Config.AccessSecret.IsEmpty())
+	assert.Nil(t, user.FsConfig.S3Config.AccessSecret)
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 }
@@ -1307,14 +1420,14 @@ func TestUserGCSConfig(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.MkdirAll(credentialsPath, 0700)
 	assert.NoError(t, err)
-	user.FsConfig.Provider = dataprovider.GCSFilesystemProvider
+	user.FsConfig.Provider = vfs.GCSFilesystemProvider
 	user.FsConfig.GCSConfig.Bucket = "test"
 	user.FsConfig.GCSConfig.Credentials = kms.NewPlainSecret("fake credentials") //nolint:goconst
 	user, bb, err := httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err, string(bb))
 	credentialFile := filepath.Join(credentialsPath, fmt.Sprintf("%v_gcs_credentials.json", user.Username))
 	assert.FileExists(t, credentialFile)
-	creds, err := ioutil.ReadFile(credentialFile)
+	creds, err := os.ReadFile(credentialFile)
 	assert.NoError(t, err)
 	secret := kms.NewEmptySecret()
 	err = json.Unmarshal(creds, secret)
@@ -1326,7 +1439,7 @@ func TestUserGCSConfig(t *testing.T) {
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	assert.FileExists(t, credentialFile)
-	creds, err = ioutil.ReadFile(credentialFile)
+	creds, err = os.ReadFile(credentialFile)
 	assert.NoError(t, err)
 	secret = kms.NewEmptySecret()
 	err = json.Unmarshal(creds, secret)
@@ -1354,7 +1467,7 @@ func TestUserGCSConfig(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoFileExists(t, credentialFile)
 	user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
-	user.FsConfig.Provider = dataprovider.S3FilesystemProvider
+	user.FsConfig.Provider = vfs.S3FilesystemProvider
 	user.FsConfig.S3Config.Bucket = "test1"
 	user.FsConfig.S3Config.Region = "us-east-1"
 	user.FsConfig.S3Config.AccessKey = "Server-Access-Key1"
@@ -1364,7 +1477,7 @@ func TestUserGCSConfig(t *testing.T) {
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	user.FsConfig.S3Config = vfs.S3FsConfig{}
-	user.FsConfig.Provider = dataprovider.GCSFilesystemProvider
+	user.FsConfig.Provider = vfs.GCSFilesystemProvider
 	user.FsConfig.GCSConfig.Bucket = "test1"
 	user.FsConfig.GCSConfig.Credentials = kms.NewPlainSecret("fake credentials")
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
@@ -1377,7 +1490,7 @@ func TestUserGCSConfig(t *testing.T) {
 func TestUserAzureBlobConfig(t *testing.T) {
 	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
 	assert.NoError(t, err)
-	user.FsConfig.Provider = dataprovider.AzureBlobFilesystemProvider
+	user.FsConfig.Provider = vfs.AzureBlobFilesystemProvider
 	user.FsConfig.AzBlobConfig.Container = "test"
 	user.FsConfig.AzBlobConfig.AccountName = "Server-Account-Name"
 	user.FsConfig.AzBlobConfig.AccountKey = kms.NewPlainSecret("Server-Account-Key")
@@ -1416,7 +1529,7 @@ func TestUserAzureBlobConfig(t *testing.T) {
 	assert.NotEmpty(t, initialPayload)
 	assert.Empty(t, user.FsConfig.AzBlobConfig.AccountKey.GetAdditionalData())
 	assert.Empty(t, user.FsConfig.AzBlobConfig.AccountKey.GetKey())
-	user.FsConfig.Provider = dataprovider.AzureBlobFilesystemProvider
+	user.FsConfig.Provider = vfs.AzureBlobFilesystemProvider
 	user.FsConfig.AzBlobConfig.Container = "test-container"
 	user.FsConfig.AzBlobConfig.Endpoint = "http://localhost:9001"
 	user.FsConfig.AzBlobConfig.KeyPrefix = "somedir/subdir"
@@ -1429,7 +1542,7 @@ func TestUserAzureBlobConfig(t *testing.T) {
 	assert.Empty(t, user.FsConfig.AzBlobConfig.AccountKey.GetAdditionalData())
 	assert.Empty(t, user.FsConfig.AzBlobConfig.AccountKey.GetKey())
 	// test user without access key and access secret (sas)
-	user.FsConfig.Provider = dataprovider.AzureBlobFilesystemProvider
+	user.FsConfig.Provider = vfs.AzureBlobFilesystemProvider
 	user.FsConfig.AzBlobConfig.SASURL = "https://myaccount.blob.core.windows.net/pictures/profile.jpg?sv=2012-02-12&st=2009-02-09&se=2009-02-10&sr=c&sp=r&si=YWJjZGVmZw%3d%3d&sig=dD80ihBh5jfNpymO5Hg1IdiJIEvHcJpCMiCMnN%2fRnbI%3d"
 	user.FsConfig.AzBlobConfig.KeyPrefix = "somedir/subdir"
 	user.FsConfig.AzBlobConfig.AccountName = ""
@@ -1438,7 +1551,7 @@ func TestUserAzureBlobConfig(t *testing.T) {
 	user.FsConfig.AzBlobConfig.UploadConcurrency = 4
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
-	assert.True(t, user.FsConfig.AzBlobConfig.AccountKey.IsEmpty())
+	assert.Nil(t, user.FsConfig.AzBlobConfig.AccountKey)
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 	user.Password = defaultPassword
@@ -1446,7 +1559,7 @@ func TestUserAzureBlobConfig(t *testing.T) {
 	// sas test for add instead of update
 	user, _, err = httpdtest.AddUser(user, http.StatusCreated)
 	assert.NoError(t, err)
-	assert.True(t, user.FsConfig.AzBlobConfig.AccountKey.IsEmpty())
+	assert.Nil(t, user.FsConfig.AzBlobConfig.AccountKey)
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 }
@@ -1454,7 +1567,7 @@ func TestUserAzureBlobConfig(t *testing.T) {
 func TestUserCryptFs(t *testing.T) {
 	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
 	assert.NoError(t, err)
-	user.FsConfig.Provider = dataprovider.CryptedFilesystemProvider
+	user.FsConfig.Provider = vfs.CryptedFilesystemProvider
 	user.FsConfig.CryptConfig.Passphrase = kms.NewPlainSecret("crypt passphrase")
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
@@ -1489,7 +1602,7 @@ func TestUserCryptFs(t *testing.T) {
 	assert.NotEmpty(t, initialPayload)
 	assert.Empty(t, user.FsConfig.CryptConfig.Passphrase.GetAdditionalData())
 	assert.Empty(t, user.FsConfig.CryptConfig.Passphrase.GetKey())
-	user.FsConfig.Provider = dataprovider.CryptedFilesystemProvider
+	user.FsConfig.Provider = vfs.CryptedFilesystemProvider
 	user.FsConfig.CryptConfig.Passphrase.SetKey("pass")
 	user, bb, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err, string(bb))
@@ -1506,7 +1619,7 @@ func TestUserCryptFs(t *testing.T) {
 func TestUserSFTPFs(t *testing.T) {
 	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
 	assert.NoError(t, err)
-	user.FsConfig.Provider = dataprovider.SFTPFilesystemProvider
+	user.FsConfig.Provider = vfs.SFTPFilesystemProvider
 	user.FsConfig.SFTPConfig.Endpoint = "127.0.0.1" // missing port
 	user.FsConfig.SFTPConfig.Username = "sftp_user"
 	user.FsConfig.SFTPConfig.Password = kms.NewPlainSecret("sftp_pwd")
@@ -1517,9 +1630,11 @@ func TestUserSFTPFs(t *testing.T) {
 	assert.Contains(t, string(resp), "invalid endpoint")
 
 	user.FsConfig.SFTPConfig.Endpoint = "127.0.0.1:2022"
+	user.FsConfig.SFTPConfig.DisableCouncurrentReads = true
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	assert.Equal(t, "/", user.FsConfig.SFTPConfig.Prefix)
+	assert.True(t, user.FsConfig.SFTPConfig.DisableCouncurrentReads)
 	initialPwdPayload := user.FsConfig.SFTPConfig.Password.GetPayload()
 	initialPkeyPayload := user.FsConfig.SFTPConfig.PrivateKey.GetPayload()
 	assert.Equal(t, kms.SecretStatusSecretBox, user.FsConfig.SFTPConfig.Password.GetStatus())
@@ -1536,6 +1651,7 @@ func TestUserSFTPFs(t *testing.T) {
 	user.FsConfig.SFTPConfig.PrivateKey.SetStatus(kms.SecretStatusSecretBox)
 	user.FsConfig.SFTPConfig.PrivateKey.SetAdditionalData("adata")
 	user.FsConfig.SFTPConfig.PrivateKey.SetKey("fake key")
+	user.FsConfig.SFTPConfig.DisableCouncurrentReads = false
 	user, bb, err := httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err, string(bb))
 	assert.Equal(t, kms.SecretStatusSecretBox, user.FsConfig.SFTPConfig.Password.GetStatus())
@@ -1546,6 +1662,7 @@ func TestUserSFTPFs(t *testing.T) {
 	assert.Equal(t, initialPkeyPayload, user.FsConfig.SFTPConfig.PrivateKey.GetPayload())
 	assert.Empty(t, user.FsConfig.SFTPConfig.PrivateKey.GetAdditionalData())
 	assert.Empty(t, user.FsConfig.SFTPConfig.PrivateKey.GetKey())
+	assert.False(t, user.FsConfig.SFTPConfig.DisableCouncurrentReads)
 
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -1564,12 +1681,12 @@ func TestUserSFTPFs(t *testing.T) {
 	user, _, err = httpdtest.AddUser(user, http.StatusCreated)
 	assert.NoError(t, err)
 	initialPkeyPayload = user.FsConfig.SFTPConfig.PrivateKey.GetPayload()
-	assert.Empty(t, user.FsConfig.SFTPConfig.Password.GetStatus())
+	assert.Nil(t, user.FsConfig.SFTPConfig.Password)
 	assert.Equal(t, kms.SecretStatusSecretBox, user.FsConfig.SFTPConfig.PrivateKey.GetStatus())
 	assert.NotEmpty(t, initialPkeyPayload)
 	assert.Empty(t, user.FsConfig.SFTPConfig.PrivateKey.GetAdditionalData())
 	assert.Empty(t, user.FsConfig.SFTPConfig.PrivateKey.GetKey())
-	user.FsConfig.Provider = dataprovider.SFTPFilesystemProvider
+	user.FsConfig.Provider = vfs.SFTPFilesystemProvider
 	user.FsConfig.SFTPConfig.PrivateKey.SetKey("k")
 	user, bb, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err, string(bb))
@@ -1597,7 +1714,7 @@ func TestUserHiddenFields(t *testing.T) {
 	usernames := []string{"user1", "user2", "user3", "user4", "user5"}
 	u1 := getTestUser()
 	u1.Username = usernames[0]
-	u1.FsConfig.Provider = dataprovider.S3FilesystemProvider
+	u1.FsConfig.Provider = vfs.S3FilesystemProvider
 	u1.FsConfig.S3Config.Bucket = "test"
 	u1.FsConfig.S3Config.Region = "us-east-1"
 	u1.FsConfig.S3Config.AccessKey = "S3-Access-Key"
@@ -1607,7 +1724,7 @@ func TestUserHiddenFields(t *testing.T) {
 
 	u2 := getTestUser()
 	u2.Username = usernames[1]
-	u2.FsConfig.Provider = dataprovider.GCSFilesystemProvider
+	u2.FsConfig.Provider = vfs.GCSFilesystemProvider
 	u2.FsConfig.GCSConfig.Bucket = "test"
 	u2.FsConfig.GCSConfig.Credentials = kms.NewPlainSecret("fake credentials")
 	user2, _, err := httpdtest.AddUser(u2, http.StatusCreated)
@@ -1615,7 +1732,7 @@ func TestUserHiddenFields(t *testing.T) {
 
 	u3 := getTestUser()
 	u3.Username = usernames[2]
-	u3.FsConfig.Provider = dataprovider.AzureBlobFilesystemProvider
+	u3.FsConfig.Provider = vfs.AzureBlobFilesystemProvider
 	u3.FsConfig.AzBlobConfig.Container = "test"
 	u3.FsConfig.AzBlobConfig.AccountName = "Server-Account-Name"
 	u3.FsConfig.AzBlobConfig.AccountKey = kms.NewPlainSecret("Server-Account-Key")
@@ -1624,14 +1741,14 @@ func TestUserHiddenFields(t *testing.T) {
 
 	u4 := getTestUser()
 	u4.Username = usernames[3]
-	u4.FsConfig.Provider = dataprovider.CryptedFilesystemProvider
+	u4.FsConfig.Provider = vfs.CryptedFilesystemProvider
 	u4.FsConfig.CryptConfig.Passphrase = kms.NewPlainSecret("test passphrase")
 	user4, _, err := httpdtest.AddUser(u4, http.StatusCreated)
 	assert.NoError(t, err)
 
 	u5 := getTestUser()
 	u5.Username = usernames[4]
-	u5.FsConfig.Provider = dataprovider.SFTPFilesystemProvider
+	u5.FsConfig.Provider = vfs.SFTPFilesystemProvider
 	u5.FsConfig.SFTPConfig.Endpoint = "127.0.0.1:2022"
 	u5.FsConfig.SFTPConfig.Username = "sftp_user"
 	u5.FsConfig.SFTPConfig.Password = kms.NewPlainSecret("apassword")
@@ -1874,7 +1991,7 @@ func TestSecretObjectCompatibility(t *testing.T) {
 		assert.NoError(t, err)
 
 		masterKeyPath := filepath.Join(os.TempDir(), "mkey")
-		err = ioutil.WriteFile(masterKeyPath, []byte("test key"), os.ModePerm)
+		err = os.WriteFile(masterKeyPath, []byte("test key"), os.ModePerm)
 		assert.NoError(t, err)
 		config := kms.Configuration{
 			Secrets: kms.Secrets{
@@ -2033,8 +2150,9 @@ func TestStartQuotaScan(t *testing.T) {
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 	folder := vfs.BaseVirtualFolder{
-		Name:       "vfolder",
-		MappedPath: filepath.Join(os.TempDir(), "folder"),
+		Name:        "vfolder",
+		MappedPath:  filepath.Join(os.TempDir(), "folder"),
+		Description: "virtual folder",
 	}
 	_, _, err = httpdtest.AddFolder(folder, http.StatusCreated)
 	assert.NoError(t, err)
@@ -2091,7 +2209,7 @@ func TestEmbeddedFolders(t *testing.T) {
 	u.Username = u.Username + "1"
 	u.VirtualFolders[0].MappedPath = ""
 	user1, _, err := httpdtest.AddUser(u, http.StatusCreated)
-	assert.EqualError(t, err, "Virtual folders mismatch")
+	assert.EqualError(t, err, "mapped path mismatch")
 	if assert.Len(t, user1.VirtualFolders, 1) {
 		assert.Equal(t, mappedPath, user1.VirtualFolders[0].MappedPath)
 		assert.Equal(t, u.VirtualFolders[0].VirtualPath, user1.VirtualFolders[0].VirtualPath)
@@ -2100,7 +2218,7 @@ func TestEmbeddedFolders(t *testing.T) {
 	}
 	user1.VirtualFolders = u.VirtualFolders
 	user1, _, err = httpdtest.UpdateUser(user1, http.StatusOK, "")
-	assert.EqualError(t, err, "Virtual folders mismatch")
+	assert.EqualError(t, err, "mapped path mismatch")
 	if assert.Len(t, user1.VirtualFolders, 1) {
 		assert.Equal(t, mappedPath, user1.VirtualFolders[0].MappedPath)
 		assert.Equal(t, u.VirtualFolders[0].VirtualPath, user1.VirtualFolders[0].VirtualPath)
@@ -2122,6 +2240,153 @@ func TestEmbeddedFolders(t *testing.T) {
 	_, err = httpdtest.RemoveUser(user1, http.StatusOK)
 	assert.NoError(t, err)
 
+	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: name}, http.StatusOK)
+	assert.NoError(t, err)
+}
+
+func TestEmbeddedFoldersUpdate(t *testing.T) {
+	u := getTestUser()
+	mappedPath := filepath.Join(os.TempDir(), "mapped_path")
+	name := filepath.Base(mappedPath)
+	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
+		BaseVirtualFolder: vfs.BaseVirtualFolder{
+			Name:            name,
+			MappedPath:      mappedPath,
+			UsedQuotaFiles:  1000,
+			UsedQuotaSize:   8192,
+			LastQuotaUpdate: 123,
+		},
+		VirtualPath: "/vdir",
+		QuotaSize:   4096,
+		QuotaFiles:  1,
+	})
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	folder, _, err := httpdtest.GetFolderByName(name, http.StatusOK)
+	assert.NoError(t, err)
+	assert.Equal(t, mappedPath, folder.MappedPath)
+	assert.Equal(t, 0, folder.UsedQuotaFiles)
+	assert.Equal(t, int64(0), folder.UsedQuotaSize)
+	assert.Equal(t, int64(0), folder.LastQuotaUpdate)
+	assert.Empty(t, folder.Description)
+	assert.Equal(t, vfs.LocalFilesystemProvider, folder.FsConfig.Provider)
+	assert.Len(t, folder.Users, 1)
+	assert.Contains(t, folder.Users, user.Username)
+	// update a field on the folder
+	description := "updatedDesc"
+	folder.MappedPath = mappedPath + "_update"
+	folder.Description = description
+	folder, _, err = httpdtest.UpdateFolder(folder, http.StatusOK)
+	assert.NoError(t, err)
+	assert.Equal(t, mappedPath+"_update", folder.MappedPath)
+	assert.Equal(t, 0, folder.UsedQuotaFiles)
+	assert.Equal(t, int64(0), folder.UsedQuotaSize)
+	assert.Equal(t, int64(0), folder.LastQuotaUpdate)
+	assert.Equal(t, description, folder.Description)
+	assert.Equal(t, vfs.LocalFilesystemProvider, folder.FsConfig.Provider)
+	// check that the user gets the changes
+	user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+	assert.NoError(t, err)
+	userFolder := user.VirtualFolders[0].BaseVirtualFolder
+	assert.Equal(t, mappedPath+"_update", folder.MappedPath)
+	assert.Equal(t, 0, userFolder.UsedQuotaFiles)
+	assert.Equal(t, int64(0), userFolder.UsedQuotaSize)
+	assert.Equal(t, int64(0), userFolder.LastQuotaUpdate)
+	assert.Equal(t, description, userFolder.Description)
+	assert.Equal(t, vfs.LocalFilesystemProvider, userFolder.FsConfig.Provider)
+	// now update the folder embedding it inside the user
+	user.VirtualFolders = []vfs.VirtualFolder{
+		{
+			BaseVirtualFolder: vfs.BaseVirtualFolder{
+				Name:            name,
+				MappedPath:      "",
+				UsedQuotaFiles:  1000,
+				UsedQuotaSize:   8192,
+				LastQuotaUpdate: 123,
+				FsConfig: vfs.Filesystem{
+					Provider: vfs.S3FilesystemProvider,
+					S3Config: vfs.S3FsConfig{
+						Bucket:       "test",
+						Region:       "us-east-1",
+						AccessKey:    "akey",
+						AccessSecret: kms.NewPlainSecret("asecret"),
+						Endpoint:     "http://127.0.1.1:9090",
+					},
+				},
+			},
+			VirtualPath: "/vdir1",
+			QuotaSize:   4096,
+			QuotaFiles:  1,
+		},
+	}
+	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	userFolder = user.VirtualFolders[0].BaseVirtualFolder
+	assert.Equal(t, 0, userFolder.UsedQuotaFiles)
+	assert.Equal(t, int64(0), userFolder.UsedQuotaSize)
+	assert.Equal(t, int64(0), userFolder.LastQuotaUpdate)
+	assert.Empty(t, userFolder.Description)
+	assert.Equal(t, vfs.S3FilesystemProvider, userFolder.FsConfig.Provider)
+	assert.Equal(t, "test", userFolder.FsConfig.S3Config.Bucket)
+	assert.Equal(t, "us-east-1", userFolder.FsConfig.S3Config.Region)
+	assert.Equal(t, "http://127.0.1.1:9090", userFolder.FsConfig.S3Config.Endpoint)
+	assert.Equal(t, kms.SecretStatusSecretBox, userFolder.FsConfig.S3Config.AccessSecret.GetStatus())
+	assert.NotEmpty(t, userFolder.FsConfig.S3Config.AccessSecret.GetPayload())
+	assert.Empty(t, userFolder.FsConfig.S3Config.AccessSecret.GetKey())
+	assert.Empty(t, userFolder.FsConfig.S3Config.AccessSecret.GetAdditionalData())
+	// confirm the changes
+	folder, _, err = httpdtest.GetFolderByName(name, http.StatusOK)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, folder.UsedQuotaFiles)
+	assert.Equal(t, int64(0), folder.UsedQuotaSize)
+	assert.Equal(t, int64(0), folder.LastQuotaUpdate)
+	assert.Empty(t, folder.Description)
+	assert.Equal(t, vfs.S3FilesystemProvider, folder.FsConfig.Provider)
+	assert.Equal(t, "test", folder.FsConfig.S3Config.Bucket)
+	assert.Equal(t, "us-east-1", folder.FsConfig.S3Config.Region)
+	assert.Equal(t, "http://127.0.1.1:9090", folder.FsConfig.S3Config.Endpoint)
+	assert.Equal(t, kms.SecretStatusSecretBox, folder.FsConfig.S3Config.AccessSecret.GetStatus())
+	assert.NotEmpty(t, folder.FsConfig.S3Config.AccessSecret.GetPayload())
+	assert.Empty(t, folder.FsConfig.S3Config.AccessSecret.GetKey())
+	assert.Empty(t, folder.FsConfig.S3Config.AccessSecret.GetAdditionalData())
+	// now update folder usage limits and check that a folder update will not change them
+	folder.UsedQuotaFiles = 100
+	folder.UsedQuotaSize = 32768
+	_, err = httpdtest.UpdateFolderQuotaUsage(folder, "reset", http.StatusOK)
+	assert.NoError(t, err)
+	folder, _, err = httpdtest.GetFolderByName(name, http.StatusOK)
+	assert.NoError(t, err)
+	assert.Equal(t, 100, folder.UsedQuotaFiles)
+	assert.Equal(t, int64(32768), folder.UsedQuotaSize)
+	assert.Greater(t, folder.LastQuotaUpdate, int64(0))
+	assert.Equal(t, vfs.S3FilesystemProvider, folder.FsConfig.Provider)
+	assert.Equal(t, "test", folder.FsConfig.S3Config.Bucket)
+	assert.Equal(t, "us-east-1", folder.FsConfig.S3Config.Region)
+	assert.Equal(t, "http://127.0.1.1:9090", folder.FsConfig.S3Config.Endpoint)
+	assert.Equal(t, kms.SecretStatusSecretBox, folder.FsConfig.S3Config.AccessSecret.GetStatus())
+	assert.NotEmpty(t, folder.FsConfig.S3Config.AccessSecret.GetPayload())
+	assert.Empty(t, folder.FsConfig.S3Config.AccessSecret.GetKey())
+	assert.Empty(t, folder.FsConfig.S3Config.AccessSecret.GetAdditionalData())
+
+	user.VirtualFolders[0].FsConfig.S3Config.AccessSecret = kms.NewPlainSecret("updated secret")
+	user, resp, err := httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err, string(resp))
+	userFolder = user.VirtualFolders[0].BaseVirtualFolder
+	assert.Equal(t, 100, userFolder.UsedQuotaFiles)
+	assert.Equal(t, int64(32768), userFolder.UsedQuotaSize)
+	assert.Greater(t, userFolder.LastQuotaUpdate, int64(0))
+	assert.Empty(t, userFolder.Description)
+	assert.Equal(t, vfs.S3FilesystemProvider, userFolder.FsConfig.Provider)
+	assert.Equal(t, "test", userFolder.FsConfig.S3Config.Bucket)
+	assert.Equal(t, "us-east-1", userFolder.FsConfig.S3Config.Region)
+	assert.Equal(t, "http://127.0.1.1:9090", userFolder.FsConfig.S3Config.Endpoint)
+	assert.Equal(t, kms.SecretStatusSecretBox, userFolder.FsConfig.S3Config.AccessSecret.GetStatus())
+	assert.NotEmpty(t, userFolder.FsConfig.S3Config.AccessSecret.GetPayload())
+	assert.Empty(t, userFolder.FsConfig.S3Config.AccessSecret.GetKey())
+	assert.Empty(t, userFolder.FsConfig.S3Config.AccessSecret.GetAdditionalData())
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
 	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: name}, http.StatusOK)
 	assert.NoError(t, err)
 }
@@ -2190,7 +2455,7 @@ func TestCloseActiveConnection(t *testing.T) {
 	_, err := httpdtest.CloseConnection("non_existent_id", http.StatusNotFound)
 	assert.NoError(t, err)
 	user := getTestUser()
-	c := common.NewBaseConnection("connID", common.ProtocolSFTP, user, nil)
+	c := common.NewBaseConnection("connID", common.ProtocolSFTP, user)
 	fakeConn := &fakeConnection{
 		BaseConnection: c,
 	}
@@ -2203,12 +2468,12 @@ func TestCloseActiveConnection(t *testing.T) {
 func TestCloseConnectionAfterUserUpdateDelete(t *testing.T) {
 	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
 	assert.NoError(t, err)
-	c := common.NewBaseConnection("connID", common.ProtocolFTP, user, nil)
+	c := common.NewBaseConnection("connID", common.ProtocolFTP, user)
 	fakeConn := &fakeConnection{
 		BaseConnection: c,
 	}
 	common.Connections.Add(fakeConn)
-	c1 := common.NewBaseConnection("connID1", common.ProtocolSFTP, user, nil)
+	c1 := common.NewBaseConnection("connID1", common.ProtocolSFTP, user)
 	fakeConn1 := &fakeConnection{
 		BaseConnection: c1,
 	}
@@ -2228,6 +2493,66 @@ func TestCloseConnectionAfterUserUpdateDelete(t *testing.T) {
 	assert.Len(t, common.Connections.GetStats(), 0)
 }
 
+func TestSkipNaturalKeysValidation(t *testing.T) {
+	err := dataprovider.Close()
+	assert.NoError(t, err)
+	err = config.LoadConfig(configDir, "")
+	assert.NoError(t, err)
+	providerConf := config.GetProviderConf()
+	providerConf.SkipNaturalKeysValidation = true
+	err = dataprovider.Initialize(providerConf, configDir, true)
+	assert.NoError(t, err)
+
+	u := getTestUser()
+	u.Username = "user@example.com"
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	user.AdditionalInfo = "info"
+	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+
+	a := getTestAdmin()
+	a.Username = "admin@example.com"
+	admin, _, err := httpdtest.AddAdmin(a, http.StatusCreated)
+	assert.NoError(t, err)
+	admin.Email = admin.Username
+	admin, _, err = httpdtest.UpdateAdmin(admin, http.StatusOK)
+	assert.NoError(t, err)
+	admin, _, err = httpdtest.GetAdminByUsername(admin.Username, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveAdmin(admin, http.StatusOK)
+	assert.NoError(t, err)
+
+	f := vfs.BaseVirtualFolder{
+		Name:       "文件夹",
+		MappedPath: filepath.Clean(os.TempDir()),
+	}
+	folder, resp, err := httpdtest.AddFolder(f, http.StatusCreated)
+	assert.NoError(t, err, string(resp))
+	folder.Description = folder.Name
+	folder, resp, err = httpdtest.UpdateFolder(folder, http.StatusOK)
+	assert.NoError(t, err, string(resp))
+	folder, resp, err = httpdtest.GetFolderByName(folder.Name, http.StatusOK)
+	assert.NoError(t, err, string(resp))
+	_, err = httpdtest.RemoveFolder(folder, http.StatusOK)
+	assert.NoError(t, err)
+
+	err = dataprovider.Close()
+	assert.NoError(t, err)
+	err = config.LoadConfig(configDir, "")
+	assert.NoError(t, err)
+	providerConf = config.GetProviderConf()
+	providerConf.CredentialsPath = credentialsPath
+	err = os.RemoveAll(credentialsPath)
+	assert.NoError(t, err)
+	err = dataprovider.Initialize(providerConf, configDir, true)
+	assert.NoError(t, err)
+}
+
 func TestUserBaseDir(t *testing.T) {
 	err := dataprovider.Close()
 	assert.NoError(t, err)
@@ -2241,7 +2566,7 @@ func TestUserBaseDir(t *testing.T) {
 	u.HomeDir = ""
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	if assert.Error(t, err) {
-		assert.EqualError(t, err, "HomeDir mismatch")
+		assert.EqualError(t, err, "home dir mismatch")
 	}
 	assert.Equal(t, filepath.Join(providerConf.UsersBaseDir, u.Username), user.HomeDir)
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
@@ -2337,14 +2662,14 @@ func TestProviderErrors(t *testing.T) {
 	backupContent, err := json.Marshal(backupData)
 	assert.NoError(t, err)
 	backupFilePath := filepath.Join(backupsPath, "backup.json")
-	err = ioutil.WriteFile(backupFilePath, backupContent, os.ModePerm)
+	err = os.WriteFile(backupFilePath, backupContent, os.ModePerm)
 	assert.NoError(t, err)
 	_, _, err = httpdtest.Loaddata(backupFilePath, "", "", http.StatusInternalServerError)
 	assert.NoError(t, err)
 	backupData.Folders = append(backupData.Folders, vfs.BaseVirtualFolder{Name: "testFolder", MappedPath: filepath.Clean(os.TempDir())})
 	backupContent, err = json.Marshal(backupData)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(backupFilePath, backupContent, os.ModePerm)
+	err = os.WriteFile(backupFilePath, backupContent, os.ModePerm)
 	assert.NoError(t, err)
 	_, _, err = httpdtest.Loaddata(backupFilePath, "", "", http.StatusInternalServerError)
 	assert.NoError(t, err)
@@ -2353,7 +2678,7 @@ func TestProviderErrors(t *testing.T) {
 	backupData.Admins = append(backupData.Admins, getTestAdmin())
 	backupContent, err = json.Marshal(backupData)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(backupFilePath, backupContent, os.ModePerm)
+	err = os.WriteFile(backupFilePath, backupContent, os.ModePerm)
 	assert.NoError(t, err)
 	_, _, err = httpdtest.Loaddata(backupFilePath, "", "", http.StatusInternalServerError)
 	assert.NoError(t, err)
@@ -2390,17 +2715,27 @@ func TestFolders(t *testing.T) {
 		Name:       "name",
 		MappedPath: "relative path",
 		Users:      []string{"1", "2", "3"},
+		FsConfig: vfs.Filesystem{
+			Provider: vfs.CryptedFilesystemProvider,
+			CryptConfig: vfs.CryptFsConfig{
+				Passphrase: kms.NewPlainSecret("asecret"),
+			},
+		},
 	}
 	_, _, err := httpdtest.AddFolder(folder, http.StatusBadRequest)
 	assert.NoError(t, err)
 	folder.MappedPath = filepath.Clean(os.TempDir())
 	folder1, resp, err := httpdtest.AddFolder(folder, http.StatusCreated)
-	assert.EqualError(t, err, "folder users mismatch", string(resp))
+	assert.NoError(t, err, string(resp))
 	assert.Equal(t, folder.Name, folder1.Name)
 	assert.Equal(t, folder.MappedPath, folder1.MappedPath)
 	assert.Equal(t, 0, folder1.UsedQuotaFiles)
 	assert.Equal(t, int64(0), folder1.UsedQuotaSize)
 	assert.Equal(t, int64(0), folder1.LastQuotaUpdate)
+	assert.Equal(t, kms.SecretStatusSecretBox, folder1.FsConfig.CryptConfig.Passphrase.GetStatus())
+	assert.NotEmpty(t, folder1.FsConfig.CryptConfig.Passphrase.GetPayload())
+	assert.Empty(t, folder1.FsConfig.CryptConfig.Passphrase.GetAdditionalData())
+	assert.Empty(t, folder1.FsConfig.CryptConfig.Passphrase.GetKey())
 	assert.Len(t, folder1.Users, 0)
 	// adding a duplicate folder must fail
 	_, _, err = httpdtest.AddFolder(folder, http.StatusCreated)
@@ -2411,7 +2746,7 @@ func TestFolders(t *testing.T) {
 	folder.UsedQuotaSize = 345
 	folder.LastQuotaUpdate = 10
 	folder2, _, err := httpdtest.AddFolder(folder, http.StatusCreated)
-	assert.EqualError(t, err, "folder users mismatch", string(resp))
+	assert.NoError(t, err, string(resp))
 	assert.Equal(t, 1, folder2.UsedQuotaFiles)
 	assert.Equal(t, int64(345), folder2.UsedQuotaSize)
 	assert.Equal(t, int64(10), folder2.LastQuotaUpdate)
@@ -2420,6 +2755,19 @@ func TestFolders(t *testing.T) {
 	assert.NoError(t, err)
 	numResults := len(folders)
 	assert.GreaterOrEqual(t, numResults, 2)
+	found := false
+	for _, f := range folders {
+		if f.Name == folder1.Name {
+			found = true
+			assert.Equal(t, folder1.MappedPath, f.MappedPath)
+			assert.Equal(t, kms.SecretStatusSecretBox, f.FsConfig.CryptConfig.Passphrase.GetStatus())
+			assert.NotEmpty(t, f.FsConfig.CryptConfig.Passphrase.GetPayload())
+			assert.Empty(t, f.FsConfig.CryptConfig.Passphrase.GetAdditionalData())
+			assert.Empty(t, f.FsConfig.CryptConfig.Passphrase.GetKey())
+			assert.Len(t, f.Users, 0)
+		}
+	}
+	assert.True(t, found)
 	folders, _, err = httpdtest.GetFolders(0, 1, http.StatusOK)
 	assert.NoError(t, err)
 	assert.Len(t, folders, numResults-1)
@@ -2430,6 +2778,11 @@ func TestFolders(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, folder1.Name, f.Name)
 	assert.Equal(t, folder1.MappedPath, f.MappedPath)
+	assert.Equal(t, kms.SecretStatusSecretBox, f.FsConfig.CryptConfig.Passphrase.GetStatus())
+	assert.NotEmpty(t, f.FsConfig.CryptConfig.Passphrase.GetPayload())
+	assert.Empty(t, f.FsConfig.CryptConfig.Passphrase.GetAdditionalData())
+	assert.Empty(t, f.FsConfig.CryptConfig.Passphrase.GetKey())
+	assert.Len(t, f.Users, 0)
 	f, _, err = httpdtest.GetFolderByName(folder2.Name, http.StatusOK)
 	assert.NoError(t, err)
 	assert.Equal(t, folder2.Name, f.Name)
@@ -2444,9 +2797,11 @@ func TestFolders(t *testing.T) {
 	_, _, err = httpdtest.UpdateFolder(folder1, http.StatusBadRequest)
 	assert.NoError(t, err)
 	folder1.MappedPath = filepath.Join(os.TempDir(), "updated")
-	f, _, err = httpdtest.UpdateFolder(folder1, http.StatusOK)
-	assert.NoError(t, err)
+	folder1.Description = "updated folder description"
+	f, resp, err = httpdtest.UpdateFolder(folder1, http.StatusOK)
+	assert.NoError(t, err, string(resp))
 	assert.Equal(t, folder1.MappedPath, f.MappedPath)
+	assert.Equal(t, folder1.Description, f.Description)
 
 	_, err = httpdtest.RemoveFolder(folder1, http.StatusOK)
 	assert.NoError(t, err)
@@ -2462,14 +2817,14 @@ func TestDumpdata(t *testing.T) {
 	providerConf := config.GetProviderConf()
 	err = dataprovider.Initialize(providerConf, configDir, true)
 	assert.NoError(t, err)
-	_, _, err = httpdtest.Dumpdata("", "", "", http.StatusBadRequest)
-	assert.NoError(t, err)
+	_, rawResp, err := httpdtest.Dumpdata("", "", "", http.StatusBadRequest)
+	assert.NoError(t, err, string(rawResp))
 	_, _, err = httpdtest.Dumpdata(filepath.Join(backupsPath, "backup.json"), "", "", http.StatusBadRequest)
 	assert.NoError(t, err)
-	_, _, err = httpdtest.Dumpdata("../backup.json", "", "", http.StatusBadRequest)
-	assert.NoError(t, err)
-	_, _, err = httpdtest.Dumpdata("backup.json", "", "0", http.StatusOK)
-	assert.NoError(t, err)
+	_, rawResp, err = httpdtest.Dumpdata("../backup.json", "", "", http.StatusBadRequest)
+	assert.NoError(t, err, string(rawResp))
+	_, rawResp, err = httpdtest.Dumpdata("backup.json", "", "0", http.StatusOK)
+	assert.NoError(t, err, string(rawResp))
 	response, _, err := httpdtest.Dumpdata("", "1", "0", http.StatusOK)
 	assert.NoError(t, err)
 	_, ok := response["admins"]
@@ -2480,8 +2835,8 @@ func TestDumpdata(t *testing.T) {
 	assert.True(t, ok)
 	_, ok = response["version"]
 	assert.True(t, ok)
-	_, _, err = httpdtest.Dumpdata("backup.json", "", "1", http.StatusOK)
-	assert.NoError(t, err)
+	_, rawResp, err = httpdtest.Dumpdata("backup.json", "", "1", http.StatusOK)
+	assert.NoError(t, err, string(rawResp))
 	err = os.Remove(filepath.Join(backupsPath, "backup.json"))
 	assert.NoError(t, err)
 	if runtime.GOOS != "windows" {
@@ -2632,6 +2987,7 @@ func TestLoaddataFromPostBody(t *testing.T) {
 func TestLoaddata(t *testing.T) {
 	mappedPath := filepath.Join(os.TempDir(), "restored_folder")
 	folderName := filepath.Base(mappedPath)
+	foldeDesc := "restored folder desc"
 	user := getTestUser()
 	user.ID = 1
 	user.Username = "test_user_restore"
@@ -2651,14 +3007,15 @@ func TestLoaddata(t *testing.T) {
 			Users:           []string{"user"},
 		},
 		{
-			MappedPath: mappedPath,
-			Name:       folderName,
+			MappedPath:  mappedPath,
+			Name:        folderName,
+			Description: foldeDesc,
 		},
 	}
 	backupContent, err := json.Marshal(backupData)
 	assert.NoError(t, err)
 	backupFilePath := filepath.Join(backupsPath, "backup.json")
-	err = ioutil.WriteFile(backupFilePath, backupContent, os.ModePerm)
+	err = os.WriteFile(backupFilePath, backupContent, os.ModePerm)
 	assert.NoError(t, err)
 	_, _, err = httpdtest.Loaddata(backupFilePath, "a", "", http.StatusBadRequest)
 	assert.NoError(t, err)
@@ -2698,6 +3055,7 @@ func TestLoaddata(t *testing.T) {
 	assert.Equal(t, int64(123), folder.UsedQuotaSize)
 	assert.Equal(t, 456, folder.UsedQuotaFiles)
 	assert.Equal(t, int64(789), folder.LastQuotaUpdate)
+	assert.Equal(t, foldeDesc, folder.Description)
 	assert.Len(t, folder.Users, 0)
 	_, err = httpdtest.RemoveFolder(folder, http.StatusOK)
 	assert.NoError(t, err)
@@ -2745,7 +3103,7 @@ func TestLoaddataMode(t *testing.T) {
 	}
 	backupContent, _ := json.Marshal(backupData)
 	backupFilePath := filepath.Join(backupsPath, "backup.json")
-	err := ioutil.WriteFile(backupFilePath, backupContent, os.ModePerm)
+	err := os.WriteFile(backupFilePath, backupContent, os.ModePerm)
 	assert.NoError(t, err)
 	_, _, err = httpdtest.Loaddata(backupFilePath, "0", "0", http.StatusOK)
 	assert.NoError(t, err)
@@ -2765,7 +3123,9 @@ func TestLoaddataMode(t *testing.T) {
 	admin, _, err = httpdtest.GetAdminByUsername(admin.Username, http.StatusOK)
 	assert.NoError(t, err)
 	oldInfo := admin.AdditionalInfo
+	oldDesc := admin.Description
 	admin.AdditionalInfo = "newInfo"
+	admin.Description = "newDesc"
 	admin, _, err = httpdtest.UpdateAdmin(admin, http.StatusOK)
 	assert.NoError(t, err)
 
@@ -2785,7 +3145,7 @@ func TestLoaddataMode(t *testing.T) {
 	assert.Equal(t, int64(789), folder.LastQuotaUpdate)
 	assert.Len(t, folder.Users, 0)
 
-	c := common.NewBaseConnection("connID", common.ProtocolFTP, user, nil)
+	c := common.NewBaseConnection("connID", common.ProtocolFTP, user)
 	fakeConn := &fakeConnection{
 		BaseConnection: c,
 	}
@@ -2797,6 +3157,7 @@ func TestLoaddataMode(t *testing.T) {
 	admin, _, err = httpdtest.GetAdminByUsername(admin.Username, http.StatusOK)
 	assert.NoError(t, err)
 	assert.NotEqual(t, oldInfo, admin.AdditionalInfo)
+	assert.NotEqual(t, oldDesc, admin.Description)
 
 	_, _, err = httpdtest.Loaddata(backupFilePath, "0", "2", http.StatusOK)
 	assert.NoError(t, err)
@@ -4001,7 +4362,7 @@ func TestWebLoginMock(t *testing.T) {
 	req.RemoteAddr = "10.9.9.8:1234"
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
-	assert.Contains(t, rr.Body.String(), "Unable to verify form token")
+	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	req, _ = http.NewRequest(http.MethodGet, webLoginPath, nil)
 	rr = executeRequest(req)
@@ -4056,7 +4417,7 @@ func TestWebAdminPwdChange(t *testing.T) {
 	setJWTCookieForReq(req, token)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
-	assert.Contains(t, rr.Body.String(), "Unable to verify form token")
+	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
 	req, _ = http.NewRequest(http.MethodPost, webChangeAdminPwdPath, bytes.NewBuffer([]byte(form.Encode())))
@@ -4183,12 +4544,13 @@ func TestWebAdminBasicMock(t *testing.T) {
 	form.Set("password", "")
 	form.Set("status", "1")
 	form.Set("permissions", "*")
+	form.Set("description", admin.Description)
 	req, _ := http.NewRequest(http.MethodPost, webAdminPath, bytes.NewBuffer([]byte(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	setJWTCookieForReq(req, token)
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
-	assert.Contains(t, rr.Body.String(), "Unable to verify form token")
+	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
 	form.Set("status", "a")
@@ -4242,7 +4604,7 @@ func TestWebAdminBasicMock(t *testing.T) {
 	setJWTCookieForReq(req, token)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
-	assert.Contains(t, rr.Body.String(), "Unable to verify form token")
+	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
 	form.Set("email", "not-an-email")
@@ -4298,7 +4660,7 @@ func TestWebAdminBasicMock(t *testing.T) {
 	setCSRFHeaderForReq(req, csrfToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusBadRequest, rr)
-	assert.Contains(t, rr.Body.String(), "You cannot delete yourself")
+	assert.Contains(t, rr.Body.String(), "you cannot delete yourself")
 
 	req, _ = http.NewRequest(http.MethodDelete, path.Join(webAdminPath, defaultTokenAuthUser), nil)
 	setJWTCookieForReq(req, token)
@@ -4426,7 +4788,7 @@ func TestWebMaintenanceMock(t *testing.T) {
 	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
-	assert.Contains(t, rr.Body.String(), "Unable to verify form token")
+	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
 	b, contentType, _ = getMultipartFormData(form, "", "")
@@ -4491,7 +4853,7 @@ func TestWebMaintenanceMock(t *testing.T) {
 	backupData.Admins = append(backupData.Admins, admin)
 	backupContent, err := json.Marshal(backupData)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(backupFilePath, backupContent, os.ModePerm)
+	err = os.WriteFile(backupFilePath, backupContent, os.ModePerm)
 	assert.NoError(t, err)
 
 	b, contentType, _ = getMultipartFormData(form, "backup_file", backupFilePath)
@@ -4525,6 +4887,7 @@ func TestWebUserAddMock(t *testing.T) {
 	user.DownloadBandwidth = 64
 	user.UID = 1000
 	user.AdditionalInfo = "info"
+	user.Description = "user dsc"
 	mappedDir := filepath.Join(os.TempDir(), "mapped")
 	folderName := filepath.Base(mappedDir)
 	f := vfs.BaseVirtualFolder{
@@ -4553,6 +4916,7 @@ func TestWebUserAddMock(t *testing.T) {
 	form.Set("allowed_patterns", "/dir2::*.jpg,*.png\n/dir1::*.png")
 	form.Set("denied_patterns", "/dir1::*.zip\n/dir3::*.rar\n/dir2::*.mkv")
 	form.Set("additional_info", user.AdditionalInfo)
+	form.Set("description", user.Description)
 	b, contentType, _ := getMultipartFormData(form, "", "")
 	// test invalid url escape
 	req, _ = http.NewRequest(http.MethodPost, webUserPath+"?a=%2", &b)
@@ -4661,6 +5025,16 @@ func TestWebUserAddMock(t *testing.T) {
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 	form.Set("max_upload_file_size", "1000")
+	// test invalid tls username
+	form.Set("tls_username", "username")
+	b, contentType, _ = getMultipartFormData(form, "", "")
+	req, _ = http.NewRequest(http.MethodPost, webUserPath, &b)
+	setJWTCookieForReq(req, webToken)
+	req.Header.Set("Content-Type", contentType)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+	assert.Contains(t, rr.Body.String(), "Validation error: invalid TLS username")
+	form.Set("tls_username", string(dataprovider.TLSUsernameNone))
 	form.Set(csrfFormToken, "invalid form token")
 	b, contentType, _ = getMultipartFormData(form, "", "")
 	req, _ = http.NewRequest(http.MethodPost, webUserPath, &b)
@@ -4668,7 +5042,7 @@ func TestWebUserAddMock(t *testing.T) {
 	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
-	assert.Contains(t, rr.Body.String(), "Unable to verify form token")
+	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
 	b, contentType, _ = getMultipartFormData(form, "", "")
@@ -4701,6 +5075,7 @@ func TestWebUserAddMock(t *testing.T) {
 	assert.Equal(t, user.DownloadBandwidth, newUser.DownloadBandwidth)
 	assert.Equal(t, int64(1000), newUser.Filters.MaxUploadFileSize)
 	assert.Equal(t, user.AdditionalInfo, newUser.AdditionalInfo)
+	assert.Equal(t, user.Description, newUser.Description)
 	assert.True(t, utils.IsStringInSlice(testPubKey, newUser.PublicKeys))
 	if val, ok := newUser.Permissions["/subdir"]; ok {
 		assert.True(t, utils.IsStringInSlice(dataprovider.PermListItems, val))
@@ -4755,6 +5130,7 @@ func TestWebUserAddMock(t *testing.T) {
 			assert.True(t, utils.IsStringInSlice("*.rar", filter.DeniedPatterns))
 		}
 	}
+	assert.Equal(t, dataprovider.TLSUsernameNone, newUser.Filters.TLSUsername)
 	req, _ = http.NewRequest(http.MethodDelete, path.Join(userPath, newUser.Username), nil)
 	setBearerForReq(req, apiToken)
 	rr = executeRequest(req)
@@ -4813,13 +5189,15 @@ func TestWebUserUpdateMock(t *testing.T) {
 	form.Set("max_upload_file_size", "100")
 	form.Set("disconnect", "1")
 	form.Set("additional_info", user.AdditionalInfo)
+	form.Set("description", user.Description)
+	form.Set("tls_username", string(dataprovider.TLSUsernameCN))
 	b, contentType, _ := getMultipartFormData(form, "", "")
 	req, _ = http.NewRequest(http.MethodPost, path.Join(webUserPath, user.Username), &b)
 	setJWTCookieForReq(req, webToken)
 	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
-	assert.Contains(t, rr.Body.String(), "Unable to verify form token")
+	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
 	b, contentType, _ = getMultipartFormData(form, "", "")
@@ -4873,7 +5251,9 @@ func TestWebUserUpdateMock(t *testing.T) {
 	assert.Equal(t, user.UID, updateUser.UID)
 	assert.Equal(t, user.GID, updateUser.GID)
 	assert.Equal(t, user.AdditionalInfo, updateUser.AdditionalInfo)
+	assert.Equal(t, user.Description, updateUser.Description)
 	assert.Equal(t, int64(100), updateUser.Filters.MaxUploadFileSize)
+	assert.Equal(t, dataprovider.TLSUsernameCN, updateUser.Filters.TLSUsername)
 
 	if val, ok := updateUser.Permissions["/otherdir"]; ok {
 		assert.True(t, utils.IsStringInSlice(dataprovider.PermListItems, val))
@@ -4903,8 +5283,9 @@ func TestRenderFolderTemplateMock(t *testing.T) {
 	checkResponseCode(t, http.StatusOK, rr)
 
 	folder := vfs.BaseVirtualFolder{
-		Name:       "templatefolder",
-		MappedPath: filepath.Join(os.TempDir(), "mapped"),
+		Name:        "templatefolder",
+		MappedPath:  filepath.Join(os.TempDir(), "mapped"),
+		Description: "template folder desc",
 	}
 	folder, _, err = httpdtest.AddFolder(folder, http.StatusCreated)
 	assert.NoError(t, err)
@@ -4977,8 +5358,9 @@ func TestRenderWebCloneUserMock(t *testing.T) {
 
 func TestUserTemplateWithFoldersMock(t *testing.T) {
 	folder := vfs.BaseVirtualFolder{
-		Name:       "vfolder",
-		MappedPath: filepath.Join(os.TempDir(), "mapped"),
+		Name:        "vfolder",
+		MappedPath:  filepath.Join(os.TempDir(), "mapped"),
+		Description: "vfolder desc with spéciàl ch@rs",
 	}
 
 	token, err := getJWTWebTokenFromTestServer(defaultTokenAuthUser, defaultTokenAuthPass)
@@ -5002,6 +5384,7 @@ func TestUserTemplateWithFoldersMock(t *testing.T) {
 	form.Set("expiration_date", "2020-01-01 00:00:00")
 	form.Set("fs_provider", "0")
 	form.Set("max_upload_file_size", "0")
+	form.Set("description", "desc %username% %password%")
 	form.Set("virtual_folders", "/vdir%username%::"+folder.Name+"::-1::-1")
 	form.Set("users", "auser1::password1\nauser2::password2::"+testPubKey+"\nauser1::password")
 	b, contentType, _ := getMultipartFormData(form, "", "")
@@ -5010,7 +5393,7 @@ func TestUserTemplateWithFoldersMock(t *testing.T) {
 	req.Header.Set("Content-Type", contentType)
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
-	require.Contains(t, rr.Body.String(), "Unable to verify form token")
+	require.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
 	b, contentType, _ = getMultipartFormData(form, "", "")
@@ -5041,10 +5424,13 @@ func TestUserTemplateWithFoldersMock(t *testing.T) {
 	folder1 := dump.Folders[0]
 	assert.Equal(t, "auser1", user1.Username)
 	assert.Equal(t, "auser2", user2.Username)
+	assert.Equal(t, "desc auser1 password1", user1.Description)
+	assert.Equal(t, "desc auser2 password2", user2.Description)
 	assert.Equal(t, filepath.Join(os.TempDir(), user1.Username), user1.HomeDir)
 	assert.Equal(t, filepath.Join(os.TempDir(), user2.Username), user2.HomeDir)
 	assert.Equal(t, folder.Name, folder1.Name)
 	assert.Equal(t, folder.MappedPath, folder1.MappedPath)
+	assert.Equal(t, folder.Description, folder1.Description)
 	assert.Len(t, user1.PublicKeys, 0)
 	assert.Len(t, user2.PublicKeys, 1)
 	assert.Len(t, user1.VirtualFolders, 1)
@@ -5060,7 +5446,7 @@ func TestUserTemplateMock(t *testing.T) {
 	token, err := getJWTWebTokenFromTestServer(defaultTokenAuthUser, defaultTokenAuthPass)
 	assert.NoError(t, err)
 	user := getTestUser()
-	user.FsConfig.Provider = dataprovider.S3FilesystemProvider
+	user.FsConfig.Provider = vfs.S3FilesystemProvider
 	user.FsConfig.S3Config.Bucket = "test"
 	user.FsConfig.S3Config.Region = "eu-central-1"
 	user.FsConfig.S3Config.AccessKey = "%username%"
@@ -5148,9 +5534,9 @@ func TestUserTemplateMock(t *testing.T) {
 	user1 := dump.Users[0]
 	user2 := dump.Users[1]
 	require.Equal(t, "user1", user1.Username)
-	require.Equal(t, dataprovider.S3FilesystemProvider, user1.FsConfig.Provider)
+	require.Equal(t, vfs.S3FilesystemProvider, user1.FsConfig.Provider)
 	require.Equal(t, "user2", user2.Username)
-	require.Equal(t, dataprovider.S3FilesystemProvider, user2.FsConfig.Provider)
+	require.Equal(t, vfs.S3FilesystemProvider, user2.FsConfig.Provider)
 	require.Len(t, user2.PublicKeys, 1)
 	require.Equal(t, filepath.Join(os.TempDir(), user1.Username), user1.HomeDir)
 	require.Equal(t, filepath.Join(os.TempDir(), user2.Username), user2.HomeDir)
@@ -5178,6 +5564,7 @@ func TestFolderTemplateMock(t *testing.T) {
 	form := make(url.Values)
 	form.Set("name", folderName)
 	form.Set("mapped_path", mappedPath)
+	form.Set("description", "desc folder %name%")
 	form.Set("folders", "folder1\nfolder2\nfolder3\nfolder1\n\n\n")
 	contentType := "application/x-www-form-urlencoded"
 	req, _ := http.NewRequest(http.MethodPost, webTemplateFolder, bytes.NewBuffer([]byte(form.Encode())))
@@ -5185,10 +5572,9 @@ func TestFolderTemplateMock(t *testing.T) {
 	req.Header.Set("Content-Type", contentType)
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
-	assert.Contains(t, rr.Body.String(), "Unable to verify form token")
+	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
-
 	req, _ = http.NewRequest(http.MethodPost, webTemplateFolder+"?param=p%C3%AO%GG", bytes.NewBuffer([]byte(form.Encode())))
 	setJWTCookieForReq(req, token)
 	req.Header.Set("Content-Type", contentType)
@@ -5196,6 +5582,9 @@ func TestFolderTemplateMock(t *testing.T) {
 	checkResponseCode(t, http.StatusBadRequest, rr)
 	assert.Contains(t, rr.Body.String(), "Error parsing folders fields")
 
+	folder1 := "folder1"
+	folder2 := "folder2"
+	folder3 := "folder3"
 	req, _ = http.NewRequest(http.MethodPost, webTemplateFolder, bytes.NewBuffer([]byte(form.Encode())))
 	setJWTCookieForReq(req, token)
 	req.Header.Set("Content-Type", contentType)
@@ -5208,12 +5597,62 @@ func TestFolderTemplateMock(t *testing.T) {
 	require.Len(t, dump.Users, 0)
 	require.Len(t, dump.Admins, 0)
 	require.Len(t, dump.Folders, 3)
-	require.Equal(t, "folder1", dump.Folders[0].Name)
+	require.Equal(t, folder1, dump.Folders[0].Name)
+	require.Equal(t, "desc folder folder1", dump.Folders[0].Description)
 	require.True(t, strings.HasSuffix(dump.Folders[0].MappedPath, "folder1mappedfolder1path"))
-	require.Equal(t, "folder2", dump.Folders[1].Name)
+	require.Equal(t, folder2, dump.Folders[1].Name)
+	require.Equal(t, "desc folder folder2", dump.Folders[1].Description)
 	require.True(t, strings.HasSuffix(dump.Folders[1].MappedPath, "folder2mappedfolder2path"))
-	require.Equal(t, "folder3", dump.Folders[2].Name)
+	require.Equal(t, folder3, dump.Folders[2].Name)
+	require.Equal(t, "desc folder folder3", dump.Folders[2].Description)
 	require.True(t, strings.HasSuffix(dump.Folders[2].MappedPath, "folder3mappedfolder3path"))
+
+	form.Set("fs_provider", "1")
+	form.Set("s3_bucket", "bucket")
+	form.Set("s3_region", "us-east-1")
+	form.Set("s3_access_key", "%name%")
+	form.Set("s3_access_secret", "pwd%name%")
+	form.Set("s3_key_prefix", "base/%name%")
+
+	req, _ = http.NewRequest(http.MethodPost, webTemplateFolder, bytes.NewBuffer([]byte(form.Encode())))
+	setJWTCookieForReq(req, token)
+	req.Header.Set("Content-Type", contentType)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "Error parsing folders fields")
+
+	form.Set("s3_upload_part_size", "5")
+	form.Set("s3_upload_concurrency", "4")
+	req, _ = http.NewRequest(http.MethodPost, webTemplateFolder, bytes.NewBuffer([]byte(form.Encode())))
+	setJWTCookieForReq(req, token)
+	req.Header.Set("Content-Type", contentType)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+
+	dump = dataprovider.BackupData{}
+	err = json.Unmarshal(rr.Body.Bytes(), &dump)
+	require.NoError(t, err)
+	require.Len(t, dump.Users, 0)
+	require.Len(t, dump.Admins, 0)
+	require.Len(t, dump.Folders, 3)
+	require.Equal(t, folder1, dump.Folders[0].Name)
+	require.Equal(t, folder1, dump.Folders[0].FsConfig.S3Config.AccessKey)
+	err = dump.Folders[0].FsConfig.S3Config.AccessSecret.Decrypt()
+	require.NoError(t, err)
+	require.Equal(t, "pwd"+folder1, dump.Folders[0].FsConfig.S3Config.AccessSecret.GetPayload())
+	require.Equal(t, "base/"+folder1+"/", dump.Folders[0].FsConfig.S3Config.KeyPrefix)
+	require.Equal(t, folder2, dump.Folders[1].Name)
+	require.Equal(t, folder2, dump.Folders[1].FsConfig.S3Config.AccessKey)
+	err = dump.Folders[1].FsConfig.S3Config.AccessSecret.Decrypt()
+	require.NoError(t, err)
+	require.Equal(t, "pwd"+folder2, dump.Folders[1].FsConfig.S3Config.AccessSecret.GetPayload())
+	require.Equal(t, "base/"+folder2+"/", dump.Folders[1].FsConfig.S3Config.KeyPrefix)
+	require.Equal(t, folder3, dump.Folders[2].Name)
+	require.Equal(t, folder3, dump.Folders[2].FsConfig.S3Config.AccessKey)
+	err = dump.Folders[2].FsConfig.S3Config.AccessSecret.Decrypt()
+	require.NoError(t, err)
+	require.Equal(t, "pwd"+folder3, dump.Folders[2].FsConfig.S3Config.AccessSecret.GetPayload())
+	require.Equal(t, "base/"+folder3+"/", dump.Folders[2].FsConfig.S3Config.KeyPrefix)
 
 	form.Set("folders", "\n\n\n")
 	req, _ = http.NewRequest(http.MethodPost, webTemplateFolder, bytes.NewBuffer([]byte(form.Encode())))
@@ -5248,7 +5687,7 @@ func TestWebUserS3Mock(t *testing.T) {
 	checkResponseCode(t, http.StatusCreated, rr)
 	err = render.DecodeJSON(rr.Body, &user)
 	assert.NoError(t, err)
-	user.FsConfig.Provider = dataprovider.S3FilesystemProvider
+	user.FsConfig.Provider = vfs.S3FilesystemProvider
 	user.FsConfig.S3Config.Bucket = "test"
 	user.FsConfig.S3Config.Region = "eu-west-1"
 	user.FsConfig.S3Config.AccessKey = "access-key"
@@ -5258,6 +5697,7 @@ func TestWebUserS3Mock(t *testing.T) {
 	user.FsConfig.S3Config.KeyPrefix = "somedir/subdir/"
 	user.FsConfig.S3Config.UploadPartSize = 5
 	user.FsConfig.S3Config.UploadConcurrency = 4
+	user.Description = "s3 tèst user"
 	form := make(url.Values)
 	form.Set(csrfFormToken, csrfToken)
 	form.Set("username", user.Username)
@@ -5287,6 +5727,7 @@ func TestWebUserS3Mock(t *testing.T) {
 	form.Set("allowed_extensions", "/dir1::.jpg,.png")
 	form.Set("denied_extensions", "/dir2::.zip")
 	form.Set("max_upload_file_size", "0")
+	form.Set("description", user.Description)
 	// test invalid s3_upload_part_size
 	form.Set("s3_upload_part_size", "a")
 	b, contentType, _ := getMultipartFormData(form, "", "")
@@ -5333,6 +5774,7 @@ func TestWebUserS3Mock(t *testing.T) {
 	assert.NotEmpty(t, updateUser.FsConfig.S3Config.AccessSecret.GetPayload())
 	assert.Empty(t, updateUser.FsConfig.S3Config.AccessSecret.GetKey())
 	assert.Empty(t, updateUser.FsConfig.S3Config.AccessSecret.GetAdditionalData())
+	assert.Equal(t, user.Description, updateUser.Description)
 	// now check that a redacted password is not saved
 	form.Set("s3_access_secret", redactedSecret)
 	b, contentType, _ = getMultipartFormData(form, "", "")
@@ -5369,7 +5811,7 @@ func TestWebUserS3Mock(t *testing.T) {
 	var userGet dataprovider.User
 	err = render.DecodeJSON(rr.Body, &userGet)
 	assert.NoError(t, err)
-	assert.True(t, userGet.FsConfig.S3Config.AccessSecret.IsEmpty())
+	assert.Nil(t, userGet.FsConfig.S3Config.AccessSecret)
 
 	req, _ = http.NewRequest(http.MethodDelete, path.Join(userPath, user.Username), nil)
 	setBearerForReq(req, apiToken)
@@ -5396,7 +5838,7 @@ func TestWebUserGCSMock(t *testing.T) {
 	credentialsFilePath := filepath.Join(os.TempDir(), "gcs.json")
 	err = createTestFile(credentialsFilePath, 0)
 	assert.NoError(t, err)
-	user.FsConfig.Provider = dataprovider.GCSFilesystemProvider
+	user.FsConfig.Provider = vfs.GCSFilesystemProvider
 	user.FsConfig.GCSConfig.Bucket = "test"
 	user.FsConfig.GCSConfig.KeyPrefix = "somedir/subdir/"
 	user.FsConfig.GCSConfig.StorageClass = "standard"
@@ -5494,7 +5936,7 @@ func TestWebUserAzureBlobMock(t *testing.T) {
 	checkResponseCode(t, http.StatusCreated, rr)
 	err = render.DecodeJSON(rr.Body, &user)
 	assert.NoError(t, err)
-	user.FsConfig.Provider = dataprovider.AzureBlobFilesystemProvider
+	user.FsConfig.Provider = vfs.AzureBlobFilesystemProvider
 	user.FsConfig.AzBlobConfig.Container = "container"
 	user.FsConfig.AzBlobConfig.AccountName = "aname"
 	user.FsConfig.AzBlobConfig.AccountKey = kms.NewPlainSecret("access-skey")
@@ -5617,7 +6059,7 @@ func TestWebUserCryptMock(t *testing.T) {
 	checkResponseCode(t, http.StatusCreated, rr)
 	err = render.DecodeJSON(rr.Body, &user)
 	assert.NoError(t, err)
-	user.FsConfig.Provider = dataprovider.CryptedFilesystemProvider
+	user.FsConfig.Provider = vfs.CryptedFilesystemProvider
 	user.FsConfig.CryptConfig.Passphrase = kms.NewPlainSecret("crypted passphrase")
 	form := make(url.Values)
 	form.Set(csrfFormToken, csrfToken)
@@ -5709,13 +6151,14 @@ func TestWebUserSFTPFsMock(t *testing.T) {
 	checkResponseCode(t, http.StatusCreated, rr)
 	err = render.DecodeJSON(rr.Body, &user)
 	assert.NoError(t, err)
-	user.FsConfig.Provider = dataprovider.SFTPFilesystemProvider
+	user.FsConfig.Provider = vfs.SFTPFilesystemProvider
 	user.FsConfig.SFTPConfig.Endpoint = "127.0.0.1:22"
 	user.FsConfig.SFTPConfig.Username = "sftpuser"
 	user.FsConfig.SFTPConfig.Password = kms.NewPlainSecret("pwd")
 	user.FsConfig.SFTPConfig.PrivateKey = kms.NewPlainSecret(sftpPrivateKey)
 	user.FsConfig.SFTPConfig.Fingerprints = []string{sftpPkeyFingerprint}
 	user.FsConfig.SFTPConfig.Prefix = "/home/sftpuser"
+	user.FsConfig.SFTPConfig.DisableCouncurrentReads = true
 	form := make(url.Values)
 	form.Set(csrfFormToken, csrfToken)
 	form.Set("username", user.Username)
@@ -5752,6 +6195,7 @@ func TestWebUserSFTPFsMock(t *testing.T) {
 	form.Set("sftp_private_key", user.FsConfig.SFTPConfig.PrivateKey.GetPayload())
 	form.Set("sftp_fingerprints", user.FsConfig.SFTPConfig.Fingerprints[0])
 	form.Set("sftp_prefix", user.FsConfig.SFTPConfig.Prefix)
+	form.Set("sftp_disable_concurrent_reads", "true")
 	b, contentType, _ = getMultipartFormData(form, "", "")
 	req, _ = http.NewRequest(http.MethodPost, path.Join(webUserPath, user.Username), &b)
 	setJWTCookieForReq(req, webToken)
@@ -5778,6 +6222,7 @@ func TestWebUserSFTPFsMock(t *testing.T) {
 	assert.Equal(t, updateUser.FsConfig.SFTPConfig.Prefix, user.FsConfig.SFTPConfig.Prefix)
 	assert.Equal(t, updateUser.FsConfig.SFTPConfig.Username, user.FsConfig.SFTPConfig.Username)
 	assert.Equal(t, updateUser.FsConfig.SFTPConfig.Endpoint, user.FsConfig.SFTPConfig.Endpoint)
+	assert.True(t, updateUser.FsConfig.SFTPConfig.DisableCouncurrentReads)
 	assert.Len(t, updateUser.FsConfig.SFTPConfig.Fingerprints, 1)
 	assert.Contains(t, updateUser.FsConfig.SFTPConfig.Fingerprints, sftpPkeyFingerprint)
 	// now check that a redacted credentials are not saved
@@ -5819,16 +6264,18 @@ func TestAddWebFoldersMock(t *testing.T) {
 	assert.NoError(t, err)
 	mappedPath := filepath.Clean(os.TempDir())
 	folderName := filepath.Base(mappedPath)
+	folderDesc := "a simple desc"
 	form := make(url.Values)
 	form.Set("mapped_path", mappedPath)
 	form.Set("name", folderName)
+	form.Set("description", folderDesc)
 	req, err := http.NewRequest(http.MethodPost, webFolderPath, strings.NewReader(form.Encode()))
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
-	assert.Contains(t, rr.Body.String(), "Unable to verify form token")
+	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
 	req, err = http.NewRequest(http.MethodPost, webFolderPath, strings.NewReader(form.Encode()))
@@ -5868,6 +6315,122 @@ func TestAddWebFoldersMock(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, mappedPath, folder.MappedPath)
 	assert.Equal(t, folderName, folder.Name)
+	assert.Equal(t, folderDesc, folder.Description)
+	// cleanup
+	req, _ = http.NewRequest(http.MethodDelete, path.Join(folderPath, folderName), nil)
+	setBearerForReq(req, apiToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+}
+
+func TestS3WebFolderMock(t *testing.T) {
+	webToken, err := getJWTWebTokenFromTestServer(defaultTokenAuthUser, defaultTokenAuthPass)
+	assert.NoError(t, err)
+	apiToken, err := getJWTAPITokenFromTestServer(defaultTokenAuthUser, defaultTokenAuthPass)
+	assert.NoError(t, err)
+	csrfToken, err := getCSRFToken()
+	assert.NoError(t, err)
+	mappedPath := filepath.Clean(os.TempDir())
+	folderName := filepath.Base(mappedPath)
+	folderDesc := "a simple desc"
+	S3Bucket := "test"
+	S3Region := "eu-west-1"
+	S3AccessKey := "access-key"
+	S3AccessSecret := kms.NewPlainSecret("folder-access-secret")
+	S3Endpoint := "http://127.0.0.1:9000/path?b=c"
+	S3StorageClass := "Standard"
+	S3KeyPrefix := "somedir/subdir/"
+	S3UploadPartSize := 5
+	S3UploadConcurrency := 4
+	form := make(url.Values)
+	form.Set("mapped_path", mappedPath)
+	form.Set("name", folderName)
+	form.Set("description", folderDesc)
+	form.Set("fs_provider", "1")
+	form.Set("s3_bucket", S3Bucket)
+	form.Set("s3_region", S3Region)
+	form.Set("s3_access_key", S3AccessKey)
+	form.Set("s3_access_secret", S3AccessSecret.GetPayload())
+	form.Set("s3_storage_class", S3StorageClass)
+	form.Set("s3_endpoint", S3Endpoint)
+	form.Set("s3_key_prefix", S3KeyPrefix)
+	form.Set("s3_upload_part_size", strconv.Itoa(S3UploadPartSize))
+	form.Set("s3_upload_concurrency", "a")
+	form.Set(csrfFormToken, csrfToken)
+	req, err := http.NewRequest(http.MethodPost, webFolderPath, strings.NewReader(form.Encode()))
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+
+	form.Set("s3_upload_concurrency", strconv.Itoa(S3UploadConcurrency))
+	req, err = http.NewRequest(http.MethodPost, webFolderPath, strings.NewReader(form.Encode()))
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusSeeOther, rr)
+
+	var folder vfs.BaseVirtualFolder
+	req, _ = http.NewRequest(http.MethodGet, path.Join(folderPath, folderName), nil)
+	setBearerForReq(req, apiToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+	err = render.DecodeJSON(rr.Body, &folder)
+	assert.NoError(t, err)
+	assert.Equal(t, mappedPath, folder.MappedPath)
+	assert.Equal(t, folderName, folder.Name)
+	assert.Equal(t, folderDesc, folder.Description)
+	assert.Equal(t, vfs.S3FilesystemProvider, folder.FsConfig.Provider)
+	assert.Equal(t, S3Bucket, folder.FsConfig.S3Config.Bucket)
+	assert.Equal(t, S3Region, folder.FsConfig.S3Config.Region)
+	assert.Equal(t, S3AccessKey, folder.FsConfig.S3Config.AccessKey)
+	assert.NotEmpty(t, folder.FsConfig.S3Config.AccessSecret.GetPayload())
+	assert.Equal(t, S3Endpoint, folder.FsConfig.S3Config.Endpoint)
+	assert.Equal(t, S3StorageClass, folder.FsConfig.S3Config.StorageClass)
+	assert.Equal(t, S3KeyPrefix, folder.FsConfig.S3Config.KeyPrefix)
+	assert.Equal(t, S3UploadConcurrency, folder.FsConfig.S3Config.UploadConcurrency)
+	assert.Equal(t, int64(S3UploadPartSize), folder.FsConfig.S3Config.UploadPartSize)
+	// update
+	S3UploadConcurrency = 10
+	form.Set("s3_upload_concurrency", "b")
+	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), strings.NewReader(form.Encode()))
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+
+	form.Set("s3_upload_concurrency", strconv.Itoa(S3UploadConcurrency))
+	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), strings.NewReader(form.Encode()))
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusSeeOther, rr)
+
+	folder = vfs.BaseVirtualFolder{}
+	req, _ = http.NewRequest(http.MethodGet, path.Join(folderPath, folderName), nil)
+	setBearerForReq(req, apiToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+	err = render.DecodeJSON(rr.Body, &folder)
+	assert.NoError(t, err)
+	assert.Equal(t, mappedPath, folder.MappedPath)
+	assert.Equal(t, folderName, folder.Name)
+	assert.Equal(t, folderDesc, folder.Description)
+	assert.Equal(t, vfs.S3FilesystemProvider, folder.FsConfig.Provider)
+	assert.Equal(t, S3Bucket, folder.FsConfig.S3Config.Bucket)
+	assert.Equal(t, S3Region, folder.FsConfig.S3Config.Region)
+	assert.Equal(t, S3AccessKey, folder.FsConfig.S3Config.AccessKey)
+	assert.NotEmpty(t, folder.FsConfig.S3Config.AccessSecret.GetPayload())
+	assert.Equal(t, S3Endpoint, folder.FsConfig.S3Config.Endpoint)
+	assert.Equal(t, S3StorageClass, folder.FsConfig.S3Config.StorageClass)
+	assert.Equal(t, S3KeyPrefix, folder.FsConfig.S3Config.KeyPrefix)
+	assert.Equal(t, S3UploadConcurrency, folder.FsConfig.S3Config.UploadConcurrency)
+	assert.Equal(t, int64(S3UploadPartSize), folder.FsConfig.S3Config.UploadPartSize)
+
 	// cleanup
 	req, _ = http.NewRequest(http.MethodDelete, path.Join(folderPath, folderName), nil)
 	setBearerForReq(req, apiToken)
@@ -5883,9 +6446,11 @@ func TestUpdateWebFolderMock(t *testing.T) {
 	csrfToken, err := getCSRFToken()
 	assert.NoError(t, err)
 	folderName := "vfolderupdate"
+	folderDesc := "updated desc"
 	folder := vfs.BaseVirtualFolder{
-		Name:       folderName,
-		MappedPath: filepath.Join(os.TempDir(), "folderupdate"),
+		Name:        folderName,
+		MappedPath:  filepath.Join(os.TempDir(), "folderupdate"),
+		Description: "dsc",
 	}
 	_, _, err = httpdtest.AddFolder(folder, http.StatusCreated)
 	newMappedPath := folder.MappedPath + "1"
@@ -5893,6 +6458,7 @@ func TestUpdateWebFolderMock(t *testing.T) {
 	form := make(url.Values)
 	form.Set("mapped_path", newMappedPath)
 	form.Set("name", folderName)
+	form.Set("description", folderDesc)
 	form.Set(csrfFormToken, "")
 	req, err := http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), strings.NewReader(form.Encode()))
 	assert.NoError(t, err)
@@ -5900,7 +6466,7 @@ func TestUpdateWebFolderMock(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
-	assert.Contains(t, rr.Body.String(), "Unable to verify form token")
+	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
 	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), strings.NewReader(form.Encode()))
@@ -5909,6 +6475,16 @@ func TestUpdateWebFolderMock(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusSeeOther, rr)
+
+	req, _ = http.NewRequest(http.MethodGet, path.Join(folderPath, folderName), nil)
+	setBearerForReq(req, apiToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+	err = render.DecodeJSON(rr.Body, &folder)
+	assert.NoError(t, err)
+	assert.Equal(t, newMappedPath, folder.MappedPath)
+	assert.Equal(t, folderName, folder.Name)
+	assert.Equal(t, folderDesc, folder.Description)
 
 	// parse form error
 	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName)+"??a=a%B3%A2%G3", strings.NewReader(form.Encode()))
@@ -5976,29 +6552,57 @@ func TestWebFoldersMock(t *testing.T) {
 	mappedPath2 := filepath.Join(os.TempDir(), "vfolder2")
 	folderName1 := filepath.Base(mappedPath1)
 	folderName2 := filepath.Base(mappedPath2)
+	folderDesc1 := "vfolder1 desc"
+	folderDesc2 := "vfolder2 desc"
 	folders := []vfs.BaseVirtualFolder{
 		{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
+			Name:        folderName1,
+			MappedPath:  mappedPath1,
+			Description: folderDesc1,
 		},
 		{
-			Name:       folderName2,
-			MappedPath: mappedPath2,
+			Name:        folderName2,
+			MappedPath:  mappedPath2,
+			Description: folderDesc2,
 		},
 	}
 	for _, folder := range folders {
 		folderAsJSON, err := json.Marshal(folder)
 		assert.NoError(t, err)
-		req, _ := http.NewRequest(http.MethodPost, folderPath, bytes.NewBuffer(folderAsJSON))
+		req, err := http.NewRequest(http.MethodPost, folderPath, bytes.NewBuffer(folderAsJSON))
+		assert.NoError(t, err)
 		setBearerForReq(req, apiToken)
 		rr := executeRequest(req)
 		checkResponseCode(t, http.StatusCreated, rr)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, webFoldersPath, nil)
+	req, err := http.NewRequest(http.MethodGet, folderPath, nil)
+	assert.NoError(t, err)
+	setBearerForReq(req, apiToken)
+	rr := executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+	var foldersGet []vfs.BaseVirtualFolder
+	err = render.DecodeJSON(rr.Body, &foldersGet)
+	assert.NoError(t, err)
+	numFound := 0
+	for _, f := range foldersGet {
+		if f.Name == folderName1 {
+			assert.Equal(t, mappedPath1, f.MappedPath)
+			assert.Equal(t, folderDesc1, f.Description)
+			numFound++
+		}
+		if f.Name == folderName2 {
+			assert.Equal(t, mappedPath2, f.MappedPath)
+			assert.Equal(t, folderDesc2, f.Description)
+			numFound++
+		}
+	}
+	assert.Equal(t, 2, numFound)
+
+	req, err = http.NewRequest(http.MethodGet, webFoldersPath, nil)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	rr := executeRequest(req)
+	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 	req, err = http.NewRequest(http.MethodGet, webFoldersPath+"?qlimit=a", nil)
 	assert.NoError(t, err)
@@ -6145,15 +6749,17 @@ func getTestAdmin() dataprovider.Admin {
 		Status:      1,
 		Permissions: []string{dataprovider.PermAdminAny},
 		Email:       "admin@example.com",
+		Description: "test admin",
 	}
 }
 
 func getTestUser() dataprovider.User {
 	user := dataprovider.User{
-		Username: defaultUsername,
-		Password: defaultPassword,
-		HomeDir:  filepath.Join(homeBasePath, defaultUsername),
-		Status:   1,
+		Username:    defaultUsername,
+		Password:    defaultPassword,
+		HomeDir:     filepath.Join(homeBasePath, defaultUsername),
+		Status:      1,
+		Description: "test user",
 	}
 	user.Permissions = make(map[string][]string)
 	user.Permissions["/"] = defaultPerms
@@ -6323,7 +6929,7 @@ func createTestFile(path string, size int64) error {
 			return err
 		}
 	}
-	return ioutil.WriteFile(path, content, os.ModePerm)
+	return os.WriteFile(path, content, os.ModePerm)
 }
 
 func getMultipartFormData(values url.Values, fileFieldName, filePath string) (bytes.Buffer, string, error) {

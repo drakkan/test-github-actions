@@ -1,6 +1,6 @@
 #!/bin/bash
 
-NFPM_VERSION=2.2.4
+NFPM_VERSION=2.3.1
 NFPM_ARCH=${NFPM_ARCH:-amd64}
 if [ -z ${SFTPGO_VERSION} ]
 then
@@ -44,7 +44,7 @@ description: |
   Google Cloud Storage, Azure Blob Storage, SFTP.
 vendor: "SFTPGo"
 homepage: "https://github.com/drakkan/sftpgo"
-license: "GPL-3.0"
+license: "AGPL-3.0"
 provides:
   - sftpgo
 contents:

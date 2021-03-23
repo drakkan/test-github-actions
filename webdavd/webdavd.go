@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/go-chi/chi/middleware"
+	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/logger"
@@ -86,6 +86,13 @@ type Binding struct {
 	// any invalid name will be silently ignored.
 	// The order matters, the ciphers listed first will be the preferred ones.
 	TLSCipherSuites []string `json:"tls_cipher_suites" mapstructure:"tls_cipher_suites"`
+	// Prefix for WebDAV resources, if empty WebDAV resources will be available at the
+	// root ("/") URI. If defined it must be an absolute URI.
+	Prefix string `json:"prefix" mapstructure:"prefix"`
+}
+
+func (b *Binding) isMutualTLSEnabled() bool {
+	return b.ClientAuthType == 1 || b.ClientAuthType == 2
 }
 
 // GetAddress returns the binding address

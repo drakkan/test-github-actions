@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/jwtauth"
+	"github.com/go-chi/jwtauth/v5"
 	"github.com/lestrrat-go/jwx/jwt"
 	"github.com/rs/xid"
 
@@ -212,12 +212,12 @@ func verifyCSRFToken(tokenString string) error {
 	token, err := jwtauth.VerifyToken(csrfTokenAuth, tokenString)
 	if err != nil || token == nil {
 		logger.Debug(logSender, "", "error validating CSRF: %v", err)
-		return fmt.Errorf("Unable to verify form token: %v", err)
+		return fmt.Errorf("unable to verify form token: %v", err)
 	}
 
 	if !utils.IsStringInSlice(tokenAudienceCSRF, token.Audience()) {
 		logger.Debug(logSender, "", "error validating CSRF token audience")
-		return errors.New("The form token is not valid")
+		return errors.New("the form token is not valid")
 	}
 
 	return nil

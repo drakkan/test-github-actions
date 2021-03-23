@@ -21,12 +21,13 @@ import (
 	"github.com/drakkan/sftpgo/sftpd"
 	"github.com/drakkan/sftpgo/utils"
 	"github.com/drakkan/sftpgo/version"
+	"github.com/drakkan/sftpgo/vfs"
 	"github.com/drakkan/sftpgo/webdavd"
 )
 
 // StartPortableMode starts the service in portable mode
-func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort int, enabledSSHCommands []string, advertiseService, advertiseCredentials bool,
-	ftpsCert, ftpsKey, webDavCert, webDavKey string) error {
+func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort int, enabledSSHCommands []string, advertiseService,
+	advertiseCredentials bool, ftpsCert, ftpsKey, webDavCert, webDavKey string) error {
 	if s.PortableMode != 1 {
 		return fmt.Errorf("service is not configured for portable mode")
 	}
@@ -49,6 +50,9 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort int, enabledS
 	httpdConf := config.GetHTTPDConfig()
 	httpdConf.Bindings = nil
 	config.SetHTTPDConfig(httpdConf)
+	telemetryConf := config.GetTelemetryConfig()
+	telemetryConf.BindPort = 0
+	config.SetTelemetryConfig(telemetryConf)
 	sftpdConf := config.GetSFTPDConfig()
 	sftpdConf.MaxAuthTries = 12
 	sftpdConf.Bindings = []sftpd.Binding{
@@ -94,6 +98,7 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort int, enabledS
 		} else {
 			binding.Port = 49152 + rand.Intn(15000)
 		}
+		webDavConf.Bindings = []webdavd.Binding{binding}
 		webDavConf.CertificateFile = webDavCert
 		webDavConf.CertificateKeyFile = webDavKey
 		config.SetWebDAVDConfig(webDavConf)
@@ -126,8 +131,7 @@ func (s *Service) getServiceOptionalInfoString() string {
 		if config.GetWebDAVDConfig().CertificateFile != "" && config.GetWebDAVDConfig().CertificateKeyFile != "" {
 			scheme = "https"
 		}
-		info.WriteString(fmt.Sprintf("WebDAV URL: %v://<your IP>:%v/%v",
-			scheme, config.GetWebDAVDConfig().Bindings[0].Port, s.PortableUser.Username))
+		info.WriteString(fmt.Sprintf("WebDAV URL: %v://<your IP>:%v/", scheme, config.GetWebDAVDConfig().Bindings[0].Port))
 	}
 	return info.String()
 }
@@ -226,9 +230,9 @@ func (s *Service) advertiseServices(advertiseService, advertiseCredentials bool)
 
 func (s *Service) getPortableDirToServe() string {
 	var dirToServe string
-	if s.PortableUser.FsConfig.Provider == dataprovider.S3FilesystemProvider {
+	if s.PortableUser.FsConfig.Provider == vfs.S3FilesystemProvider {
 		dirToServe = s.PortableUser.FsConfig.S3Config.KeyPrefix
-	} else if s.PortableUser.FsConfig.Provider == dataprovider.GCSFilesystemProvider {
+	} else if s.PortableUser.FsConfig.Provider == vfs.GCSFilesystemProvider {
 		dirToServe = s.PortableUser.FsConfig.GCSConfig.KeyPrefix
 	} else {
 		dirToServe = s.PortableUser.HomeDir
@@ -260,31 +264,31 @@ func (s *Service) configurePortableUser() string {
 func (s *Service) configurePortableSecrets() {
 	// we created the user before to initialize the KMS so we need to create the secret here
 	switch s.PortableUser.FsConfig.Provider {
-	case dataprovider.S3FilesystemProvider:
+	case vfs.S3FilesystemProvider:
 		payload := s.PortableUser.FsConfig.S3Config.AccessSecret.GetPayload()
 		s.PortableUser.FsConfig.S3Config.AccessSecret = kms.NewEmptySecret()
 		if payload != "" {
 			s.PortableUser.FsConfig.S3Config.AccessSecret = kms.NewPlainSecret(payload)
 		}
-	case dataprovider.GCSFilesystemProvider:
+	case vfs.GCSFilesystemProvider:
 		payload := s.PortableUser.FsConfig.GCSConfig.Credentials.GetPayload()
 		s.PortableUser.FsConfig.GCSConfig.Credentials = kms.NewEmptySecret()
 		if payload != "" {
 			s.PortableUser.FsConfig.GCSConfig.Credentials = kms.NewPlainSecret(payload)
 		}
-	case dataprovider.AzureBlobFilesystemProvider:
+	case vfs.AzureBlobFilesystemProvider:
 		payload := s.PortableUser.FsConfig.AzBlobConfig.AccountKey.GetPayload()
 		s.PortableUser.FsConfig.AzBlobConfig.AccountKey = kms.NewEmptySecret()
 		if payload != "" {
 			s.PortableUser.FsConfig.AzBlobConfig.AccountKey = kms.NewPlainSecret(payload)
 		}
-	case dataprovider.CryptedFilesystemProvider:
+	case vfs.CryptedFilesystemProvider:
 		payload := s.PortableUser.FsConfig.CryptConfig.Passphrase.GetPayload()
 		s.PortableUser.FsConfig.CryptConfig.Passphrase = kms.NewEmptySecret()
 		if payload != "" {
 			s.PortableUser.FsConfig.CryptConfig.Passphrase = kms.NewPlainSecret(payload)
 		}
-	case dataprovider.SFTPFilesystemProvider:
+	case vfs.SFTPFilesystemProvider:
 		payload := s.PortableUser.FsConfig.SFTPConfig.Password.GetPayload()
 		s.PortableUser.FsConfig.SFTPConfig.Password = kms.NewEmptySecret()
 		if payload != "" {
