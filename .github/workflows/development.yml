@@ -14,8 +14,8 @@ jobs:
     services:
       crdb:
         image: cockroachdb/cockroach:latest
-        args:
-          - start-single-node --insecure --http-addr 0.0.0.0:8080 --listen-addr 0.0.0.0:26257
+        #args:
+        #  - start-single-node --insecure --http-addr 0.0.0.0:8080 --listen-addr 0.0.0.0:26257
         ports:
           - 26257:26257
         options: >-
