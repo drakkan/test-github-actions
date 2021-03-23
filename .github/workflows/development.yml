@@ -11,19 +11,6 @@ jobs:
     name: Test with Postgre/MySQL/Cockroach
     runs-on: ubuntu-latest
 
-    services:
-      crdb:
-        image: cockroachdb/cockroach:latest
-        #args:
-        #  - start-single-node --insecure --http-addr 0.0.0.0:8080 --listen-addr 0.0.0.0:26257
-        ports:
-          - 26257:26257
-        options: >-
-          --health-cmd "curl -I http://127.0.0.1:8080"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 6
-
     steps:
       - uses: actions/checkout@v2
 
@@ -37,6 +24,7 @@ jobs:
 
       - name: Run tests using CockroachDB provider
         run: |
+          docker run --health-cmd "curl -I http://127.0.0.1:8080" --health-interval 10s --health-timeout 5s --health-retries 6 -p 26257:26257 -d cockroachdb/cockroach:latest start-single-node --insecure --listen-addr 0.0.0.0:26257
           go test -v -p 1 -timeout 10m ./... -covermode=atomic
         env:
           SFTPGO_DATA_PROVIDER__DRIVER: cockroach
