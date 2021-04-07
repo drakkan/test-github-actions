@@ -237,6 +237,7 @@ jobs:
     runs-on: ubuntu-18.04
     strategy:
       matrix:
+        go: ${{ env.GO_VERSION }}
         include:
           - arch: amd64
             go-arch: amd64
@@ -309,9 +310,10 @@ jobs:
           install: |
             apt-get update -q -y
             apt-get install -q -y curl gcc git
-          run: |
-            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/${GO_VERSION}.linux-${{ matrix.go-arch }}.tar.gz
+            echo go version: ${{ matrix.go }}
+            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/${{ matrix.go }}.linux-${{ matrix.go-arch }}.tar.gz
             tar -C /usr/local -xzf go.tar.gz
+          run: |
             export PATH=$PATH:/usr/local/go/bin
             go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
             mkdir -p output/{init,sqlite,bash_completion,zsh_completion}
