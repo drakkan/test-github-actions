@@ -117,7 +117,7 @@ jobs:
       - name: Get OS name
         id: get_os_name
         run: |
-          if [ $MATRIX_OS == 'macos-latest' ]
+          if [ $MATRIX_OS == 'macos-10.15' ]
           then
             echo ::set-output name=OS::macOS
           else
@@ -309,9 +309,9 @@ jobs:
           install: |
             apt-get update -q -y
             apt-get install -q -y curl gcc git
+          run: |
             curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/${GO_VERSION}.linux-${{ matrix.go-arch }}.tar.gz
             tar -C /usr/local -xzf go.tar.gz
-          run: |
             export PATH=$PATH:/usr/local/go/bin
             go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
             mkdir -p output/{init,sqlite,bash_completion,zsh_completion}
