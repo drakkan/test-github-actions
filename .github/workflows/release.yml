@@ -237,7 +237,7 @@ jobs:
     runs-on: ubuntu-18.04
     strategy:
       matrix:
-        go: ${{ env.GO_VERSION }}
+        go: 1.16.3
         include:
           - arch: amd64
             go-arch: amd64
