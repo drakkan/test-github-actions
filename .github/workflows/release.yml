@@ -339,6 +339,12 @@ jobs:
             tar cJvf sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.tar-arch }}.tar.xz *
             cd ..
 
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.tar-arch }}.tar.xz
+          path: ./output/sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.tar-arch }}.tar.xz
+
       - name: Build Packages
         id: build_linux_pkgs
         run: |
@@ -403,8 +409,6 @@ jobs:
         run: |
           echo ::set-output name=SFTPGO_VERSION::${GITHUB_REF/refs\/tags\//}
         shell: bash
-        env:
-          GO_VERSION: ${{ env.GO_VERSION }}
 
       - name: Download amd64 artifact
         uses: actions/download-artifact@v2
