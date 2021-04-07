@@ -315,7 +315,7 @@ jobs:
             mkdir -p output/{init,sqlite,bash_completion,zsh_completion}
             echo "For documentation please take a look here:" > output/README.txt
             echo "" >> output/README.txt
-            echo "https://github.com/drakkan/sftpgo/blob/${SFTPGO_VERSION}/README.md" >> output/README.txt
+            echo "https://github.com/drakkan/sftpgo/blob/${{ steps.get_version.outputs.VERSION }}/README.md" >> output/README.txt
             cp LICENSE output/
             cp sftpgo.json output/
             cp -r templates output/
@@ -329,10 +329,8 @@ jobs:
             cp sftpgo output/
             cp sftpgo.db output/sqlite/
             cd output
-            tar cJvf sftpgo_${SFTPGO_VERSION}_linux_${{ matrix.go-arch }}.tar.xz *
+            tar cJvf sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.go-arch }}.tar.xz *
             cd ..
-          env:
-            SFTPGO_VERSION: ${{ steps.get_version.outputs.VERSION }}
 
       - name: Build Packages
         id: build_linux_pkgs
