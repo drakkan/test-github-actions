@@ -367,8 +367,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
-          asset_path: ./output/sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.go-arch }}.tar.xz
-          asset_name: sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.go-arch }}.tar.xz
+          asset_path: ./output/sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.rpm-arch }}.tar.xz
+          asset_name: sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.rpm-arch }}.tar.xz
           asset_content_type: application/x-xz
 
       - name: Upload Deb Package
