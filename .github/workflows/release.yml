@@ -237,7 +237,6 @@ jobs:
     runs-on: ubuntu-18.04
     strategy:
       matrix:
-        go: [1.16.3]
         include:
           - arch: amd64
             go-arch: amd64
@@ -304,12 +303,14 @@ jobs:
             mkdir -p "${PWD}/output"
           dockerRunArgs: |
             --volume "${PWD}/output:/output"
+          env: |
+            GO_VERSION: ${{ env.GO_VERSION }}
           shell: /bin/bash
           install: |
             apt-get update -q -y
             apt-get install -q -y curl gcc git
-            echo go version: ${{ matrix.go }}
-            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/${{ matrix.go }}.linux-${{ matrix.go-arch }}.tar.gz
+            echo go version: ${GO_VERSION}
+            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/go${GO_VERSION}.linux-${{ matrix.go-arch }}.tar.gz
             tar -C /usr/local -xzf go.tar.gz
           run: |
             export PATH=$PATH:/usr/local/go/bin
