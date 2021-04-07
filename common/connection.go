@@ -30,13 +30,14 @@ type BaseConnection struct {
 	// start time for this connection
 	startTime time.Time
 	protocol  string
+	Fs        vfs.Fs
 	sync.RWMutex
 	transferID      uint64
 	activeTransfers []ActiveTransfer
 }
 
 // NewBaseConnection returns a new BaseConnection
-func NewBaseConnection(id, protocol string, user dataprovider.User) *BaseConnection {
+func NewBaseConnection(id, protocol string, user dataprovider.User, fs vfs.Fs) *BaseConnection {
 	connID := id
 	if utils.IsStringInSlice(protocol, supportedProtocols) {
 		connID = fmt.Sprintf("%v_%v", protocol, id)
@@ -46,6 +47,7 @@ func NewBaseConnection(id, protocol string, user dataprovider.User) *BaseConnect
 		User:         user,
 		startTime:    time.Now(),
 		protocol:     protocol,
+		Fs:           fs,
 		lastActivity: time.Now().UnixNano(),
 		transferID:   0,
 	}
@@ -101,7 +103,10 @@ func (c *BaseConnection) GetLastActivity() time.Time {
 
 // CloseFS closes the underlying fs
 func (c *BaseConnection) CloseFS() error {
-	return c.User.CloseFs()
+	if c.Fs != nil {
+		return c.Fs.Close()
+	}
+	return nil
 }
 
 // AddTransfer associates a new transfer to this connection
@@ -202,25 +207,21 @@ func (c *BaseConnection) truncateOpenHandle(fsPath string, size int64) (int64, e
 	return 0, errNoTransfer
 }
 
-// ListDir reads the directory matching virtualPath and returns a list of directory entries
-func (c *BaseConnection) ListDir(virtualPath string) ([]os.FileInfo, error) {
+// ListDir reads the directory named by fsPath and returns a list of directory entries
+func (c *BaseConnection) ListDir(fsPath, virtualPath string) ([]os.FileInfo, error) {
 	if !c.User.HasPerm(dataprovider.PermListItems, virtualPath) {
 		return nil, c.GetPermissionDeniedError()
 	}
-	fs, fsPath, err := c.GetFsAndResolvedPath(virtualPath)
-	if err != nil {
-		return nil, err
-	}
-	files, err := fs.ReadDir(fsPath)
+	files, err := c.Fs.ReadDir(fsPath)
 	if err != nil {
 		c.Log(logger.LevelWarn, "error listing directory: %+v", err)
-		return nil, c.GetFsError(fs, err)
+		return nil, c.GetFsError(err)
 	}
 	return c.User.AddVirtualDirs(files, virtualPath), nil
 }
 
 // CreateDir creates a new directory at the specified fsPath
-func (c *BaseConnection) CreateDir(virtualPath string) error {
+func (c *BaseConnection) CreateDir(fsPath, virtualPath string) error {
 	if !c.User.HasPerm(dataprovider.PermCreateDirs, path.Dir(virtualPath)) {
 		return c.GetPermissionDeniedError()
 	}
@@ -228,47 +229,42 @@ func (c *BaseConnection) CreateDir(virtualPath string) error {
 		c.Log(logger.LevelWarn, "mkdir not allowed %#v is a virtual folder", virtualPath)
 		return c.GetPermissionDeniedError()
 	}
-	fs, fsPath, err := c.GetFsAndResolvedPath(virtualPath)
-	if err != nil {
-		return err
-	}
-	if err := fs.Mkdir(fsPath); err != nil {
+	if err := c.Fs.Mkdir(fsPath); err != nil {
 		c.Log(logger.LevelWarn, "error creating dir: %#v error: %+v", fsPath, err)
-		return c.GetFsError(fs, err)
+		return c.GetFsError(err)
 	}
-	vfs.SetPathPermissions(fs, fsPath, c.User.GetUID(), c.User.GetGID())
+	vfs.SetPathPermissions(c.Fs, fsPath, c.User.GetUID(), c.User.GetGID())
 
 	logger.CommandLog(mkdirLogSender, fsPath, "", c.User.Username, "", c.ID, c.protocol, -1, -1, "", "", "", -1)
 	return nil
 }
 
 // IsRemoveFileAllowed returns an error if removing this file is not allowed
-func (c *BaseConnection) IsRemoveFileAllowed(virtualPath string) error {
+func (c *BaseConnection) IsRemoveFileAllowed(fsPath, virtualPath string) error {
 	if !c.User.HasPerm(dataprovider.PermDelete, path.Dir(virtualPath)) {
 		return c.GetPermissionDeniedError()
 	}
 	if !c.User.IsFileAllowed(virtualPath) {
-		c.Log(logger.LevelDebug, "removing file %#v is not allowed", virtualPath)
+		c.Log(logger.LevelDebug, "removing file %#v is not allowed", fsPath)
 		return c.GetPermissionDeniedError()
 	}
 	return nil
 }
 
 // RemoveFile removes a file at the specified fsPath
-func (c *BaseConnection) RemoveFile(fs vfs.Fs, fsPath, virtualPath string, info os.FileInfo) error {
-	if err := c.IsRemoveFileAllowed(virtualPath); err != nil {
+func (c *BaseConnection) RemoveFile(fsPath, virtualPath string, info os.FileInfo) error {
+	if err := c.IsRemoveFileAllowed(fsPath, virtualPath); err != nil {
 		return err
 	}
-
 	size := info.Size()
 	action := newActionNotification(&c.User, operationPreDelete, fsPath, "", "", c.protocol, size, nil)
 	actionErr := actionHandler.Handle(action)
 	if actionErr == nil {
 		c.Log(logger.LevelDebug, "remove for path %#v handled by pre-delete action", fsPath)
 	} else {
-		if err := fs.Remove(fsPath, false); err != nil {
+		if err := c.Fs.Remove(fsPath, false); err != nil {
 			c.Log(logger.LevelWarn, "failed to remove a file/symlink %#v: %+v", fsPath, err)
-			return c.GetFsError(fs, err)
+			return c.GetFsError(err)
 		}
 	}
 
@@ -292,8 +288,8 @@ func (c *BaseConnection) RemoveFile(fs vfs.Fs, fsPath, virtualPath string, info 
 }
 
 // IsRemoveDirAllowed returns an error if removing this directory is not allowed
-func (c *BaseConnection) IsRemoveDirAllowed(fs vfs.Fs, fsPath, virtualPath string) error {
-	if fs.GetRelativePath(fsPath) == "/" {
+func (c *BaseConnection) IsRemoveDirAllowed(fsPath, virtualPath string) error {
+	if c.Fs.GetRelativePath(fsPath) == "/" {
 		c.Log(logger.LevelWarn, "removing root dir is not allowed")
 		return c.GetPermissionDeniedError()
 	}
@@ -316,57 +312,54 @@ func (c *BaseConnection) IsRemoveDirAllowed(fs vfs.Fs, fsPath, virtualPath strin
 }
 
 // RemoveDir removes a directory at the specified fsPath
-func (c *BaseConnection) RemoveDir(virtualPath string) error {
-	fs, fsPath, err := c.GetFsAndResolvedPath(virtualPath)
-	if err != nil {
-		return err
-	}
-	if err := c.IsRemoveDirAllowed(fs, fsPath, virtualPath); err != nil {
+func (c *BaseConnection) RemoveDir(fsPath, virtualPath string) error {
+	if err := c.IsRemoveDirAllowed(fsPath, virtualPath); err != nil {
 		return err
 	}
 
 	var fi os.FileInfo
-	if fi, err = fs.Lstat(fsPath); err != nil {
+	var err error
+	if fi, err = c.Fs.Lstat(fsPath); err != nil {
 		// see #149
-		if fs.IsNotExist(err) && fs.HasVirtualFolders() {
+		if c.Fs.IsNotExist(err) && c.Fs.HasVirtualFolders() {
 			return nil
 		}
 		c.Log(logger.LevelWarn, "failed to remove a dir %#v: stat error: %+v", fsPath, err)
-		return c.GetFsError(fs, err)
+		return c.GetFsError(err)
 	}
 	if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
 		c.Log(logger.LevelDebug, "cannot remove %#v is not a directory", fsPath)
 		return c.GetGenericError(nil)
 	}
 
-	if err := fs.Remove(fsPath, true); err != nil {
+	if err := c.Fs.Remove(fsPath, true); err != nil {
 		c.Log(logger.LevelWarn, "failed to remove directory %#v: %+v", fsPath, err)
-		return c.GetFsError(fs, err)
+		return c.GetFsError(err)
 	}
 
 	logger.CommandLog(rmdirLogSender, fsPath, "", c.User.Username, "", c.ID, c.protocol, -1, -1, "", "", "", -1)
 	return nil
 }
 
-// Rename renames (moves) virtualSourcePath to virtualTargetPath
-func (c *BaseConnection) Rename(virtualSourcePath, virtualTargetPath string) error {
-	fsSrc, fsSourcePath, err := c.GetFsAndResolvedPath(virtualSourcePath)
-	if err != nil {
-		return err
+// Rename renames (moves) fsSourcePath to fsTargetPath
+func (c *BaseConnection) Rename(fsSourcePath, fsTargetPath, virtualSourcePath, virtualTargetPath string) error {
+	if c.User.IsMappedPath(fsSourcePath) {
+		c.Log(logger.LevelWarn, "renaming a directory mapped as virtual folder is not allowed: %#v", fsSourcePath)
+		return c.GetPermissionDeniedError()
 	}
-	fsDst, fsTargetPath, err := c.GetFsAndResolvedPath(virtualTargetPath)
-	if err != nil {
-		return err
+	if c.User.IsMappedPath(fsTargetPath) {
+		c.Log(logger.LevelWarn, "renaming to a directory mapped as virtual folder is not allowed: %#v", fsTargetPath)
+		return c.GetPermissionDeniedError()
 	}
-	srcInfo, err := fsSrc.Lstat(fsSourcePath)
+	srcInfo, err := c.Fs.Lstat(fsSourcePath)
 	if err != nil {
-		return c.GetFsError(fsSrc, err)
+		return c.GetFsError(err)
 	}
-	if !c.isRenamePermitted(fsSrc, fsDst, fsSourcePath, fsTargetPath, virtualSourcePath, virtualTargetPath, srcInfo) {
+	if !c.isRenamePermitted(fsSourcePath, virtualSourcePath, virtualTargetPath, srcInfo) {
 		return c.GetPermissionDeniedError()
 	}
 	initialSize := int64(-1)
-	if dstInfo, err := fsDst.Lstat(fsTargetPath); err == nil {
+	if dstInfo, err := c.Fs.Lstat(fsTargetPath); err == nil {
 		if dstInfo.IsDir() {
 			c.Log(logger.LevelWarn, "attempted to rename %#v overwriting an existing directory %#v",
 				fsSourcePath, fsTargetPath)
@@ -377,8 +370,8 @@ func (c *BaseConnection) Rename(virtualSourcePath, virtualTargetPath string) err
 			initialSize = dstInfo.Size()
 		}
 		if !c.User.HasPerm(dataprovider.PermOverwrite, path.Dir(virtualTargetPath)) {
-			c.Log(logger.LevelDebug, "renaming %#v -> %#v is not allowed. Target exists but the user %#v"+
-				"has no overwrite permission", virtualSourcePath, virtualTargetPath, c.User.Username)
+			c.Log(logger.LevelDebug, "renaming is not allowed, %#v -> %#v. Target exists but the user "+
+				"has no overwrite permission", virtualSourcePath, virtualTargetPath)
 			return c.GetPermissionDeniedError()
 		}
 	}
@@ -388,21 +381,22 @@ func (c *BaseConnection) Rename(virtualSourcePath, virtualTargetPath string) err
 				virtualSourcePath)
 			return c.GetOpUnsupportedError()
 		}
-		if err = c.checkRecursiveRenameDirPermissions(fsSrc, fsDst, fsSourcePath, fsTargetPath); err != nil {
+		if err = c.checkRecursiveRenameDirPermissions(fsSourcePath, fsTargetPath); err != nil {
 			c.Log(logger.LevelDebug, "error checking recursive permissions before renaming %#v: %+v", fsSourcePath, err)
-			return err
+			return c.GetFsError(err)
 		}
 	}
-	if !c.hasSpaceForRename(fsSrc, virtualSourcePath, virtualTargetPath, initialSize, fsSourcePath) {
+	if !c.hasSpaceForRename(virtualSourcePath, virtualTargetPath, initialSize, fsSourcePath) {
 		c.Log(logger.LevelInfo, "denying cross rename due to space limit")
 		return c.GetGenericError(ErrQuotaExceeded)
 	}
-	if err := fsSrc.Rename(fsSourcePath, fsTargetPath); err != nil {
+	if err := c.Fs.Rename(fsSourcePath, fsTargetPath); err != nil {
 		c.Log(logger.LevelWarn, "failed to rename %#v -> %#v: %+v", fsSourcePath, fsTargetPath, err)
-		return c.GetFsError(fsSrc, err)
+		return c.GetFsError(err)
 	}
-	vfs.SetPathPermissions(fsDst, fsTargetPath, c.User.GetUID(), c.User.GetGID())
-	c.updateQuotaAfterRename(fsDst, virtualSourcePath, virtualTargetPath, fsTargetPath, initialSize) //nolint:errcheck
+	if dataprovider.GetQuotaTracking() > 0 {
+		c.updateQuotaAfterRename(virtualSourcePath, virtualTargetPath, fsTargetPath, initialSize) //nolint:errcheck
+	}
 	logger.CommandLog(renameLogSender, fsSourcePath, fsTargetPath, c.User.Username, "", c.ID, c.protocol, -1, -1,
 		"", "", "", -1)
 	action := newActionNotification(&c.User, operationRename, fsSourcePath, fsTargetPath, "", c.protocol, 0, nil)
@@ -413,42 +407,41 @@ func (c *BaseConnection) Rename(virtualSourcePath, virtualTargetPath string) err
 }
 
 // CreateSymlink creates fsTargetPath as a symbolic link to fsSourcePath
-func (c *BaseConnection) CreateSymlink(virtualSourcePath, virtualTargetPath string) error {
-	if c.isCrossFoldersRequest(virtualSourcePath, virtualTargetPath) {
-		c.Log(logger.LevelWarn, "cross folder symlink is not supported, src: %v dst: %v", virtualSourcePath, virtualTargetPath)
-		return c.GetOpUnsupportedError()
-	}
-	// we cannot have a cross folder request here so only one fs is enough
-	fs, fsSourcePath, err := c.GetFsAndResolvedPath(virtualSourcePath)
-	if err != nil {
-		return err
-	}
-	fsTargetPath, err := fs.ResolvePath(virtualTargetPath)
-	if err != nil {
-		return c.GetFsError(fs, err)
-	}
-	if fs.GetRelativePath(fsSourcePath) == "/" {
+func (c *BaseConnection) CreateSymlink(fsSourcePath, fsTargetPath, virtualSourcePath, virtualTargetPath string) error {
+	if c.Fs.GetRelativePath(fsSourcePath) == "/" {
 		c.Log(logger.LevelWarn, "symlinking root dir is not allowed")
 		return c.GetPermissionDeniedError()
 	}
-	if fs.GetRelativePath(fsTargetPath) == "/" {
-		c.Log(logger.LevelWarn, "symlinking to root dir is not allowed")
+	if c.User.IsVirtualFolder(virtualTargetPath) {
+		c.Log(logger.LevelWarn, "symlinking a virtual folder is not allowed")
 		return c.GetPermissionDeniedError()
 	}
 	if !c.User.HasPerm(dataprovider.PermCreateSymlinks, path.Dir(virtualTargetPath)) {
 		return c.GetPermissionDeniedError()
 	}
-	if err := fs.Symlink(fsSourcePath, fsTargetPath); err != nil {
+	if c.isCrossFoldersRequest(virtualSourcePath, virtualTargetPath) {
+		c.Log(logger.LevelWarn, "cross folder symlink is not supported, src: %v dst: %v", virtualSourcePath, virtualTargetPath)
+		return c.GetOpUnsupportedError()
+	}
+	if c.User.IsMappedPath(fsSourcePath) {
+		c.Log(logger.LevelWarn, "symlinking a directory mapped as virtual folder is not allowed: %#v", fsSourcePath)
+		return c.GetPermissionDeniedError()
+	}
+	if c.User.IsMappedPath(fsTargetPath) {
+		c.Log(logger.LevelWarn, "symlinking to a directory mapped as virtual folder is not allowed: %#v", fsTargetPath)
+		return c.GetPermissionDeniedError()
+	}
+	if err := c.Fs.Symlink(fsSourcePath, fsTargetPath); err != nil {
 		c.Log(logger.LevelWarn, "failed to create symlink %#v -> %#v: %+v", fsSourcePath, fsTargetPath, err)
-		return c.GetFsError(fs, err)
+		return c.GetFsError(err)
 	}
 	logger.CommandLog(symlinkLogSender, fsSourcePath, fsTargetPath, c.User.Username, "", c.ID, c.protocol, -1, -1, "", "", "", -1)
 	return nil
 }
 
-func (c *BaseConnection) getPathForSetStatPerms(fs vfs.Fs, fsPath, virtualPath string) string {
+func (c *BaseConnection) getPathForSetStatPerms(fsPath, virtualPath string) string {
 	pathForPerms := virtualPath
-	if fi, err := fs.Lstat(fsPath); err == nil {
+	if fi, err := c.Fs.Lstat(fsPath); err == nil {
 		if fi.IsDir() {
 			pathForPerms = path.Dir(virtualPath)
 		}
@@ -457,89 +450,74 @@ func (c *BaseConnection) getPathForSetStatPerms(fs vfs.Fs, fsPath, virtualPath s
 }
 
 // DoStat execute a Stat if mode = 0, Lstat if mode = 1
-func (c *BaseConnection) DoStat(virtualPath string, mode int) (os.FileInfo, error) {
-	// for some vfs we don't create intermediary folders so we cannot simply check
-	// if virtualPath is a virtual folder
-	vfolders := c.User.GetVirtualFoldersInPath(path.Dir(virtualPath))
-	if _, ok := vfolders[virtualPath]; ok {
-		return vfs.NewFileInfo(virtualPath, true, 0, time.Now(), false), nil
-	}
-
+func (c *BaseConnection) DoStat(fsPath string, mode int) (os.FileInfo, error) {
 	var info os.FileInfo
-
-	fs, fsPath, err := c.GetFsAndResolvedPath(virtualPath)
-	if err != nil {
-		return info, err
-	}
-
+	var err error
 	if mode == 1 {
-		info, err = fs.Lstat(c.getRealFsPath(fsPath))
+		info, err = c.Fs.Lstat(c.getRealFsPath(fsPath))
 	} else {
-		info, err = fs.Stat(c.getRealFsPath(fsPath))
+		info, err = c.Fs.Stat(c.getRealFsPath(fsPath))
 	}
-	if err != nil {
-		return info, c.GetFsError(fs, err)
+	if err == nil && vfs.IsCryptOsFs(c.Fs) {
+		info = c.Fs.(*vfs.CryptFs).ConvertFileInfo(info)
 	}
-	if vfs.IsCryptOsFs(fs) {
-		info = fs.(*vfs.CryptFs).ConvertFileInfo(info)
-	}
-	return info, nil
+	return info, err
 }
 
-func (c *BaseConnection) ignoreSetStat(fs vfs.Fs) bool {
+func (c *BaseConnection) ignoreSetStat() bool {
 	if Config.SetstatMode == 1 {
 		return true
 	}
-	if Config.SetstatMode == 2 && !vfs.IsLocalOrSFTPFs(fs) && !vfs.IsCryptOsFs(fs) {
+	if Config.SetstatMode == 2 && !vfs.IsLocalOrSFTPFs(c.Fs) {
 		return true
 	}
 	return false
 }
 
-func (c *BaseConnection) handleChmod(fs vfs.Fs, fsPath, pathForPerms string, attributes *StatAttributes) error {
+func (c *BaseConnection) handleChmod(fsPath, pathForPerms string, attributes *StatAttributes) error {
 	if !c.User.HasPerm(dataprovider.PermChmod, pathForPerms) {
 		return c.GetPermissionDeniedError()
 	}
-	if c.ignoreSetStat(fs) {
+	if c.ignoreSetStat() {
 		return nil
 	}
-	if err := fs.Chmod(c.getRealFsPath(fsPath), attributes.Mode); err != nil {
+	if err := c.Fs.Chmod(c.getRealFsPath(fsPath), attributes.Mode); err != nil {
 		c.Log(logger.LevelWarn, "failed to chmod path %#v, mode: %v, err: %+v", fsPath, attributes.Mode.String(), err)
-		return c.GetFsError(fs, err)
+		return c.GetFsError(err)
 	}
 	logger.CommandLog(chmodLogSender, fsPath, "", c.User.Username, attributes.Mode.String(), c.ID, c.protocol,
 		-1, -1, "", "", "", -1)
 	return nil
 }
 
-func (c *BaseConnection) handleChown(fs vfs.Fs, fsPath, pathForPerms string, attributes *StatAttributes) error {
+func (c *BaseConnection) handleChown(fsPath, pathForPerms string, attributes *StatAttributes) error {
 	if !c.User.HasPerm(dataprovider.PermChown, pathForPerms) {
 		return c.GetPermissionDeniedError()
 	}
-	if c.ignoreSetStat(fs) {
+	if c.ignoreSetStat() {
 		return nil
 	}
-	if err := fs.Chown(c.getRealFsPath(fsPath), attributes.UID, attributes.GID); err != nil {
+	if err := c.Fs.Chown(c.getRealFsPath(fsPath), attributes.UID, attributes.GID); err != nil {
 		c.Log(logger.LevelWarn, "failed to chown path %#v, uid: %v, gid: %v, err: %+v", fsPath, attributes.UID,
 			attributes.GID, err)
-		return c.GetFsError(fs, err)
+		return c.GetFsError(err)
 	}
 	logger.CommandLog(chownLogSender, fsPath, "", c.User.Username, "", c.ID, c.protocol, attributes.UID, attributes.GID,
 		"", "", "", -1)
 	return nil
 }
 
-func (c *BaseConnection) handleChtimes(fs vfs.Fs, fsPath, pathForPerms string, attributes *StatAttributes) error {
+func (c *BaseConnection) handleChtimes(fsPath, pathForPerms string, attributes *StatAttributes) error {
 	if !c.User.HasPerm(dataprovider.PermChtimes, pathForPerms) {
 		return c.GetPermissionDeniedError()
 	}
-	if c.ignoreSetStat(fs) {
+	if c.ignoreSetStat() {
 		return nil
 	}
-	if err := fs.Chtimes(c.getRealFsPath(fsPath), attributes.Atime, attributes.Mtime); err != nil {
+	if err := c.Fs.Chtimes(c.getRealFsPath(fsPath), attributes.Atime, attributes.Mtime); err != nil {
 		c.Log(logger.LevelWarn, "failed to chtimes for path %#v, access time: %v, modification time: %v, err: %+v",
 			fsPath, attributes.Atime, attributes.Mtime, err)
-		return c.GetFsError(fs, err)
+		return c.GetFsError(err)
 	}
 	accessTimeString := attributes.Atime.Format(chtimesFormat)
 	modificationTimeString := attributes.Mtime.Format(chtimesFormat)
@@ -549,23 +527,19 @@ func (c *BaseConnection) handleChtimes(fs vfs.Fs, fsPath, pathForPerms string, a
 }
 
 // SetStat set StatAttributes for the specified fsPath
-func (c *BaseConnection) SetStat(virtualPath string, attributes *StatAttributes) error {
-	fs, fsPath, err := c.GetFsAndResolvedPath(virtualPath)
-	if err != nil {
-		return err
-	}
-	pathForPerms := c.getPathForSetStatPerms(fs, fsPath, virtualPath)
+func (c *BaseConnection) SetStat(fsPath, virtualPath string, attributes *StatAttributes) error {
+	pathForPerms := c.getPathForSetStatPerms(fsPath, virtualPath)
 
 	if attributes.Flags&StatAttrPerms != 0 {
-		return c.handleChmod(fs, fsPath, pathForPerms, attributes)
+		return c.handleChmod(fsPath, pathForPerms, attributes)
 	}
 
 	if attributes.Flags&StatAttrUIDGID != 0 {
-		return c.handleChown(fs, fsPath, pathForPerms, attributes)
+		return c.handleChown(fsPath, pathForPerms, attributes)
 	}
 
 	if attributes.Flags&StatAttrTimes != 0 {
-		return c.handleChtimes(fs, fsPath, pathForPerms, attributes)
+		return c.handleChtimes(fsPath, pathForPerms, attributes)
 	}
 
 	if attributes.Flags&StatAttrSize != 0 {
@@ -573,9 +547,9 @@ func (c *BaseConnection) SetStat(virtualPath string, attributes *StatAttributes)
 			return c.GetPermissionDeniedError()
 		}
 
-		if err := c.truncateFile(fs, fsPath, virtualPath, attributes.Size); err != nil {
+		if err := c.truncateFile(fsPath, virtualPath, attributes.Size); err != nil {
 			c.Log(logger.LevelWarn, "failed to truncate path %#v, size: %v, err: %+v", fsPath, attributes.Size, err)
-			return c.GetFsError(fs, err)
+			return c.GetFsError(err)
 		}
 		logger.CommandLog(truncateLogSender, fsPath, "", c.User.Username, "", c.ID, c.protocol, -1, -1, "", "", "", attributes.Size)
 	}
@@ -583,7 +557,7 @@ func (c *BaseConnection) SetStat(virtualPath string, attributes *StatAttributes)
 	return nil
 }
 
-func (c *BaseConnection) truncateFile(fs vfs.Fs, fsPath, virtualPath string, size int64) error {
+func (c *BaseConnection) truncateFile(fsPath, virtualPath string, size int64) error {
 	// check first if we have an open transfer for the given path and try to truncate the file already opened
 	// if we found no transfer we truncate by path.
 	var initialSize int64
@@ -592,14 +566,14 @@ func (c *BaseConnection) truncateFile(fs vfs.Fs, fsPath, virtualPath string, siz
 	if err == errNoTransfer {
 		c.Log(logger.LevelDebug, "file path %#v not found in active transfers, execute trucate by path", fsPath)
 		var info os.FileInfo
-		info, err = fs.Stat(fsPath)
+		info, err = c.Fs.Stat(fsPath)
 		if err != nil {
 			return err
 		}
 		initialSize = info.Size()
-		err = fs.Truncate(fsPath, size)
+		err = c.Fs.Truncate(fsPath, size)
 	}
-	if err == nil && vfs.IsLocalOrSFTPFs(fs) {
+	if err == nil && vfs.IsLocalOrSFTPFs(c.Fs) {
 		sizeDiff := initialSize - size
 		vfolder, err := c.User.GetVirtualFolderForPath(path.Dir(virtualPath))
 		if err == nil {
@@ -614,20 +588,20 @@ func (c *BaseConnection) truncateFile(fs vfs.Fs, fsPath, virtualPath string, siz
 	return err
 }
 
-func (c *BaseConnection) checkRecursiveRenameDirPermissions(fsSrc, fsDst vfs.Fs, sourcePath, targetPath string) error {
+func (c *BaseConnection) checkRecursiveRenameDirPermissions(sourcePath, targetPath string) error {
 	dstPerms := []string{
 		dataprovider.PermCreateDirs,
 		dataprovider.PermUpload,
 		dataprovider.PermCreateSymlinks,
 	}
 
-	err := fsSrc.Walk(sourcePath, func(walkedPath string, info os.FileInfo, err error) error {
+	err := c.Fs.Walk(sourcePath, func(walkedPath string, info os.FileInfo, err error) error {
 		if err != nil {
-			return c.GetFsError(fsSrc, err)
+			return err
 		}
 		dstPath := strings.Replace(walkedPath, sourcePath, targetPath, 1)
-		virtualSrcPath := fsSrc.GetRelativePath(walkedPath)
-		virtualDstPath := fsDst.GetRelativePath(dstPath)
+		virtualSrcPath := c.Fs.GetRelativePath(walkedPath)
+		virtualDstPath := c.Fs.GetRelativePath(dstPath)
 		// walk scans the directory tree in order, checking the parent directory permissions we are sure that all contents
 		// inside the parent path was checked. If the current dir has no subdirs with defined permissions inside it
 		// and it has all the possible permissions we can stop scanning
@@ -641,10 +615,10 @@ func (c *BaseConnection) checkRecursiveRenameDirPermissions(fsSrc, fsDst vfs.Fs,
 				return ErrSkipPermissionsCheck
 			}
 		}
-		if !c.isRenamePermitted(fsSrc, fsDst, walkedPath, dstPath, virtualSrcPath, virtualDstPath, info) {
+		if !c.isRenamePermitted(walkedPath, virtualSrcPath, virtualDstPath, info) {
 			c.Log(logger.LevelInfo, "rename %#v -> %#v is not allowed, virtual destination path: %#v",
 				walkedPath, dstPath, virtualDstPath)
-			return c.GetPermissionDeniedError()
+			return os.ErrPermission
 		}
 		return nil
 	})
@@ -654,7 +628,22 @@ func (c *BaseConnection) checkRecursiveRenameDirPermissions(fsSrc, fsDst vfs.Fs,
 	return err
 }
 
-func (c *BaseConnection) hasRenamePerms(virtualSourcePath, virtualTargetPath string, fi os.FileInfo) bool {
+func (c *BaseConnection) isRenamePermitted(fsSourcePath, virtualSourcePath, virtualTargetPath string, fi os.FileInfo) bool {
+	if c.Fs.GetRelativePath(fsSourcePath) == "/" {
+		c.Log(logger.LevelWarn, "renaming root dir is not allowed")
+		return false
+	}
+	if c.User.IsVirtualFolder(virtualSourcePath) || c.User.IsVirtualFolder(virtualTargetPath) {
+		c.Log(logger.LevelWarn, "renaming a virtual folder is not allowed")
+		return false
+	}
+	if !c.User.IsFileAllowed(virtualSourcePath) || !c.User.IsFileAllowed(virtualTargetPath) {
+		if fi != nil && fi.Mode().IsRegular() {
+			c.Log(logger.LevelDebug, "renaming file is not allowed, source: %#v target: %#v",
+				virtualSourcePath, virtualTargetPath)
+			return false
+		}
+	}
 	if c.User.HasPerm(dataprovider.PermRename, path.Dir(virtualSourcePath)) &&
 		c.User.HasPerm(dataprovider.PermRename, path.Dir(virtualTargetPath)) {
 		return true
@@ -672,39 +661,7 @@ func (c *BaseConnection) hasRenamePerms(virtualSourcePath, virtualTargetPath str
 	return c.User.HasPerm(dataprovider.PermUpload, path.Dir(virtualTargetPath))
 }
 
-func (c *BaseConnection) isRenamePermitted(fsSrc, fsDst vfs.Fs, fsSourcePath, fsTargetPath, virtualSourcePath, virtualTargetPath string, fi os.FileInfo) bool {
-	if !c.isLocalOrSameFolderRename(virtualSourcePath, virtualTargetPath) {
-		c.Log(logger.LevelInfo, "rename %#v->%#v is not allowed: the paths must be local or on the same virtual folder",
-			virtualSourcePath, virtualTargetPath)
-		return false
-	}
-	if c.User.IsMappedPath(fsSourcePath) && vfs.IsLocalOrCryptoFs(fsSrc) {
-		c.Log(logger.LevelWarn, "renaming a directory mapped as virtual folder is not allowed: %#v", fsSourcePath)
-		return false
-	}
-	if c.User.IsMappedPath(fsTargetPath) && vfs.IsLocalOrCryptoFs(fsDst) {
-		c.Log(logger.LevelWarn, "renaming to a directory mapped as virtual folder is not allowed: %#v", fsTargetPath)
-		return false
-	}
-	if fsSrc.GetRelativePath(fsSourcePath) == "/" {
-		c.Log(logger.LevelWarn, "renaming root dir is not allowed")
-		return false
-	}
-	if c.User.IsVirtualFolder(virtualSourcePath) || c.User.IsVirtualFolder(virtualTargetPath) {
-		c.Log(logger.LevelWarn, "renaming a virtual folder is not allowed")
-		return false
-	}
-	if !c.User.IsFileAllowed(virtualSourcePath) || !c.User.IsFileAllowed(virtualTargetPath) {
-		if fi != nil && fi.Mode().IsRegular() {
-			c.Log(logger.LevelDebug, "renaming file is not allowed, source: %#v target: %#v",
-				virtualSourcePath, virtualTargetPath)
-			return false
-		}
-	}
-	return c.hasRenamePerms(virtualSourcePath, virtualTargetPath, fi)
-}
-
-func (c *BaseConnection) hasSpaceForRename(fs vfs.Fs, virtualSourcePath, virtualTargetPath string, initialSize int64,
+func (c *BaseConnection) hasSpaceForRename(virtualSourcePath, virtualTargetPath string, initialSize int64,
 	fsSourcePath string) bool {
 	if dataprovider.GetQuotaTracking() == 0 {
 		return true
@@ -717,7 +674,7 @@ func (c *BaseConnection) hasSpaceForRename(fs vfs.Fs, virtualSourcePath, virtual
 	}
 	if errSrc == nil && errDst == nil {
 		// rename between virtual folders
-		if sourceFolder.Name == dstFolder.Name {
+		if sourceFolder.MappedPath == dstFolder.MappedPath {
 			// rename inside the same virtual folder
 			return true
 		}
@@ -727,16 +684,16 @@ func (c *BaseConnection) hasSpaceForRename(fs vfs.Fs, virtualSourcePath, virtual
 		return true
 	}
 	quotaResult := c.HasSpace(true, false, virtualTargetPath)
-	return c.hasSpaceForCrossRename(fs, quotaResult, initialSize, fsSourcePath)
+	return c.hasSpaceForCrossRename(quotaResult, initialSize, fsSourcePath)
 }
 
 // hasSpaceForCrossRename checks the quota after a rename between different folders
-func (c *BaseConnection) hasSpaceForCrossRename(fs vfs.Fs, quotaResult vfs.QuotaCheckResult, initialSize int64, sourcePath string) bool {
+func (c *BaseConnection) hasSpaceForCrossRename(quotaResult vfs.QuotaCheckResult, initialSize int64, sourcePath string) bool {
 	if !quotaResult.HasSpace && initialSize == -1 {
 		// we are over quota and this is not a file replace
 		return false
 	}
-	fi, err := fs.Lstat(sourcePath)
+	fi, err := c.Fs.Lstat(sourcePath)
 	if err != nil {
 		c.Log(logger.LevelWarn, "cross rename denied, stat error for path %#v: %v", sourcePath, err)
 		return false
@@ -751,7 +708,7 @@ func (c *BaseConnection) hasSpaceForCrossRename(fs vfs.Fs, quotaResult vfs.Quota
 			filesDiff = 0
 		}
 	} else if fi.IsDir() {
-		filesDiff, sizeDiff, err = fs.GetDirSize(sourcePath)
+		filesDiff, sizeDiff, err = c.Fs.GetDirSize(sourcePath)
 		if err != nil {
 			c.Log(logger.LevelWarn, "cross rename denied, error getting size for directory %#v: %v", sourcePath, err)
 			return false
@@ -788,11 +745,11 @@ func (c *BaseConnection) hasSpaceForCrossRename(fs vfs.Fs, quotaResult vfs.Quota
 
 // GetMaxWriteSize returns the allowed size for an upload or an error
 // if no enough size is available for a resume/append
-func (c *BaseConnection) GetMaxWriteSize(quotaResult vfs.QuotaCheckResult, isResume bool, fileSize int64, isUploadResumeSupported bool) (int64, error) {
+func (c *BaseConnection) GetMaxWriteSize(quotaResult vfs.QuotaCheckResult, isResume bool, fileSize int64) (int64, error) {
 	maxWriteSize := quotaResult.GetRemainingSize()
 
 	if isResume {
-		if !isUploadResumeSupported {
+		if !c.Fs.IsUploadResumeSupported() {
 			return 0, c.GetOpUnsupportedError()
 		}
 		if c.User.Filters.MaxUploadFileSize > 0 && c.User.Filters.MaxUploadFileSize <= fileSize {
@@ -866,40 +823,6 @@ func (c *BaseConnection) HasSpace(checkFiles, getUsage bool, requestPath string)
 	return result
 }
 
-// returns true if this is a rename on the same fs or local virtual folders
-func (c *BaseConnection) isLocalOrSameFolderRename(virtualSourcePath, virtualTargetPath string) bool {
-	sourceFolder, errSrc := c.User.GetVirtualFolderForPath(virtualSourcePath)
-	dstFolder, errDst := c.User.GetVirtualFolderForPath(virtualTargetPath)
-	if errSrc != nil && errDst != nil {
-		return true
-	}
-	if errSrc == nil && errDst == nil {
-		if sourceFolder.Name == dstFolder.Name {
-			return true
-		}
-		// we have different folders, only local fs is supported
-		if sourceFolder.FsConfig.Provider == vfs.LocalFilesystemProvider &&
-			dstFolder.FsConfig.Provider == vfs.LocalFilesystemProvider {
-			return true
-		}
-		return false
-	}
-	if c.User.FsConfig.Provider != vfs.LocalFilesystemProvider {
-		return false
-	}
-	if errSrc == nil {
-		if sourceFolder.FsConfig.Provider == vfs.LocalFilesystemProvider {
-			return true
-		}
-	}
-	if errDst == nil {
-		if dstFolder.FsConfig.Provider == vfs.LocalFilesystemProvider {
-			return true
-		}
-	}
-	return false
-}
-
 func (c *BaseConnection) isCrossFoldersRequest(virtualSourcePath, virtualTargetPath string) bool {
 	sourceFolder, errSrc := c.User.GetVirtualFolderForPath(virtualSourcePath)
 	dstFolder, errDst := c.User.GetVirtualFolderForPath(virtualTargetPath)
@@ -907,14 +830,14 @@ func (c *BaseConnection) isCrossFoldersRequest(virtualSourcePath, virtualTargetP
 		return false
 	}
 	if errSrc == nil && errDst == nil {
-		return sourceFolder.Name != dstFolder.Name
+		return sourceFolder.MappedPath != dstFolder.MappedPath
 	}
 	return true
 }
 
 func (c *BaseConnection) updateQuotaMoveBetweenVFolders(sourceFolder, dstFolder *vfs.VirtualFolder, initialSize,
 	filesSize int64, numFiles int) {
-	if sourceFolder.Name == dstFolder.Name {
+	if sourceFolder.MappedPath == dstFolder.MappedPath {
 		// both files are inside the same virtual folder
 		if initialSize != -1 {
 			dataprovider.UpdateVirtualFolderQuota(&dstFolder.BaseVirtualFolder, -numFiles, -initialSize, false) //nolint:errcheck
@@ -974,10 +897,7 @@ func (c *BaseConnection) updateQuotaMoveToVFolder(dstFolder *vfs.VirtualFolder, 
 	}
 }
 
-func (c *BaseConnection) updateQuotaAfterRename(fs vfs.Fs, virtualSourcePath, virtualTargetPath, targetPath string, initialSize int64) error {
-	if dataprovider.GetQuotaTracking() == 0 {
-		return nil
-	}
+func (c *BaseConnection) updateQuotaAfterRename(virtualSourcePath, virtualTargetPath, targetPath string, initialSize int64) error {
 	// we don't allow to overwrite an existing directory so targetPath can be:
 	// - a new file, a symlink is as a new file here
 	// - a file overwriting an existing one
@@ -988,8 +908,7 @@ func (c *BaseConnection) updateQuotaAfterRename(fs vfs.Fs, virtualSourcePath, vi
 	if errSrc != nil && errDst != nil {
 		// both files are contained inside the user home dir
 		if initialSize != -1 {
-			// we cannot have a directory here, we are overwriting an existing file
-			// we need to subtract the size of the overwritten file from the user quota
+			// we cannot have a directory here
 			dataprovider.UpdateUserQuota(&c.User, -1, -initialSize, false) //nolint:errcheck
 		}
 		return nil
@@ -997,9 +916,9 @@ func (c *BaseConnection) updateQuotaAfterRename(fs vfs.Fs, virtualSourcePath, vi
 
 	filesSize := int64(0)
 	numFiles := 1
-	if fi, err := fs.Stat(targetPath); err == nil {
+	if fi, err := c.Fs.Stat(targetPath); err == nil {
 		if fi.Mode().IsDir() {
-			numFiles, filesSize, err = fs.GetDirSize(targetPath)
+			numFiles, filesSize, err = c.Fs.GetDirSize(targetPath)
 			if err != nil {
 				c.Log(logger.LevelWarn, "failed to update quota after rename, error scanning moved folder %#v: %v",
 					targetPath, err)
@@ -1076,35 +995,15 @@ func (c *BaseConnection) GetGenericError(err error) error {
 }
 
 // GetFsError converts a filesystem error to a protocol error
-func (c *BaseConnection) GetFsError(fs vfs.Fs, err error) error {
-	if fs.IsNotExist(err) {
+func (c *BaseConnection) GetFsError(err error) error {
+	if c.Fs.IsNotExist(err) {
 		return c.GetNotExistError()
-	} else if fs.IsPermission(err) {
+	} else if c.Fs.IsPermission(err) {
 		return c.GetPermissionDeniedError()
-	} else if fs.IsNotSupported(err) {
+	} else if c.Fs.IsNotSupported(err) {
 		return c.GetOpUnsupportedError()
 	} else if err != nil {
 		return c.GetGenericError(err)
 	}
 	return nil
-}
-
-// GetFsAndResolvedPath returns the fs and the fs path matching virtualPath
-func (c *BaseConnection) GetFsAndResolvedPath(virtualPath string) (vfs.Fs, string, error) {
-	fs, err := c.User.GetFilesystemForPath(virtualPath, c.ID)
-	if err != nil {
-		if c.protocol == ProtocolWebDAV && strings.Contains(err.Error(), vfs.ErrSFTPLoop.Error()) {
-			// if there is an SFTP loop we return a permission error, for WebDAV, so the problematic folder
-			// will not be listed
-			return nil, "", c.GetPermissionDeniedError()
-		}
-		return nil, "", err
-	}
-
-	fsPath, err := fs.ResolvePath(virtualPath)
-	if err != nil {
-		return nil, "", c.GetFsError(fs, err)
-	}
-
-	return fs, fsPath, nil
 }

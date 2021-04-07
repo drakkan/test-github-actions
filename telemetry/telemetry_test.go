@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -64,9 +65,9 @@ func TestInitialization(t *testing.T) {
 
 	certPath := filepath.Join(os.TempDir(), "test.crt")
 	keyPath := filepath.Join(os.TempDir(), "test.key")
-	err = os.WriteFile(certPath, []byte(httpsCert), os.ModePerm)
+	err = ioutil.WriteFile(certPath, []byte(httpsCert), os.ModePerm)
 	require.NoError(t, err)
-	err = os.WriteFile(keyPath, []byte(httpsKey), os.ModePerm)
+	err = ioutil.WriteFile(keyPath, []byte(httpsKey), os.ModePerm)
 	require.NoError(t, err)
 
 	c.CertificateFile = certPath
@@ -103,7 +104,7 @@ func TestShouldBind(t *testing.T) {
 func TestRouter(t *testing.T) {
 	authUserFile := filepath.Join(os.TempDir(), "http_users.txt")
 	authUserData := []byte("test1:$2y$05$bcHSED7aO1cfLto6ZdDBOOKzlwftslVhtpIkRhAtSa4GuLmk5mola\n")
-	err := os.WriteFile(authUserFile, authUserData, os.ModePerm)
+	err := ioutil.WriteFile(authUserFile, authUserData, os.ModePerm)
 	require.NoError(t, err)
 
 	httpAuth, err = common.NewBasicAuthProvider(authUserFile)

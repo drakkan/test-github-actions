@@ -34,7 +34,7 @@ func updateUserQuotaUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if u.UsedQuotaFiles < 0 || u.UsedQuotaSize < 0 {
-		sendAPIResponse(w, r, errors.New("invalid used quota parameters, negative values are not allowed"),
+		sendAPIResponse(w, r, errors.New("Invalid used quota parameters, negative values are not allowed"),
 			"", http.StatusBadRequest)
 		return
 	}
@@ -75,7 +75,7 @@ func updateVFolderQuotaUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if f.UsedQuotaFiles < 0 || f.UsedQuotaSize < 0 {
-		sendAPIResponse(w, r, errors.New("invalid used quota parameters, negative values are not allowed"),
+		sendAPIResponse(w, r, errors.New("Invalid used quota parameters, negative values are not allowed"),
 			"", http.StatusBadRequest)
 		return
 	}
@@ -154,25 +154,28 @@ func startVFolderQuotaScan(w http.ResponseWriter, r *http.Request) {
 
 func doQuotaScan(user dataprovider.User) error {
 	defer common.QuotaScans.RemoveUserQuotaScan(user.Username)
-	numFiles, size, err := user.ScanQuota()
+	fs, err := user.GetFilesystem("")
 	if err != nil {
-		logger.Warn(logSender, "", "error scanning user quota %#v: %v", user.Username, err)
+		logger.Warn(logSender, "", "unable scan quota for user %#v error creating filesystem: %v", user.Username, err)
+		return err
+	}
+	defer fs.Close()
+	numFiles, size, err := fs.ScanRootDirContents()
+	if err != nil {
+		logger.Warn(logSender, "", "error scanning user home dir %#v: %v", user.Username, err)
 		return err
 	}
 	err = dataprovider.UpdateUserQuota(&user, numFiles, size, true)
-	logger.Debug(logSender, "", "user quota scanned, user: %#v, error: %v", user.Username, err)
+	logger.Debug(logSender, "", "user home dir scanned, user: %#v, error: %v", user.Username, err)
 	return err
 }
 
 func doFolderQuotaScan(folder vfs.BaseVirtualFolder) error {
 	defer common.QuotaScans.RemoveVFolderQuotaScan(folder.Name)
-	f := vfs.VirtualFolder{
-		BaseVirtualFolder: folder,
-		VirtualPath:       "/",
-	}
-	numFiles, size, err := f.ScanQuota()
+	fs := vfs.NewOsFs("", "", nil).(*vfs.OsFs)
+	numFiles, size, err := fs.GetDirSize(folder.MappedPath)
 	if err != nil {
-		logger.Warn(logSender, "", "error scanning folder %#v: %v", folder.Name, err)
+		logger.Warn(logSender, "", "error scanning folder %#v: %v", folder.MappedPath, err)
 		return err
 	}
 	err = dataprovider.UpdateVirtualFolderQuota(&folder, numFiles, size, true)
@@ -185,7 +188,7 @@ func getQuotaUpdateMode(r *http.Request) (string, error) {
 	if _, ok := r.URL.Query()["mode"]; ok {
 		mode = r.URL.Query().Get("mode")
 		if mode != quotaUpdateModeReset && mode != quotaUpdateModeAdd {
-			return "", errors.New("invalid mode")
+			return "", errors.New("Invalid mode")
 		}
 	}
 	return mode, nil

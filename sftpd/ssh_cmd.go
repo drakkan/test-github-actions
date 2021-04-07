@@ -3,7 +3,6 @@ package sftpd
 import (
 	"crypto/md5"
 	"crypto/sha1"
-	"crypto/sha256"
 	"crypto/sha512"
 	"errors"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/google/shlex"
+	"github.com/minio/sha256-simd"
 	fscopy "github.com/otiai10/copy"
 	"golang.org/x/crypto/ssh"
 
@@ -47,7 +47,6 @@ type systemCommand struct {
 	cmd            *exec.Cmd
 	fsPath         string
 	quotaCheckPath string
-	fs             vfs.Fs
 }
 
 func processSSHCommand(payload []byte, connection *Connection, enabledSSHCommands []string) bool {
@@ -83,8 +82,7 @@ func processSSHCommand(payload []byte, connection *Connection, enabledSSHCommand
 			connection.Log(logger.LevelInfo, "ssh command not enabled/supported: %#v", name)
 		}
 	}
-	err := connection.CloseFS()
-	connection.Log(logger.LevelDebug, "unable to unmarsh ssh command, close fs, err: %v", err)
+	connection.Fs.Close()
 	return false
 }
 
@@ -114,42 +112,45 @@ func (c *sshCommand) handle() (err error) {
 		c.connection.channel.Write([]byte("/\n")) //nolint:errcheck
 		c.sendExitStatus(nil)
 	} else if c.command == "sftpgo-copy" {
-		return c.handleSFTPGoCopy()
+		return c.handeSFTPGoCopy()
 	} else if c.command == "sftpgo-remove" {
-		return c.handleSFTPGoRemove()
+		return c.handeSFTPGoRemove()
 	}
 	return
 }
 
-func (c *sshCommand) handleSFTPGoCopy() error {
-	fsSrc, fsDst, sshSourcePath, sshDestPath, fsSourcePath, fsDestPath, err := c.getFsAndCopyPaths()
+func (c *sshCommand) handeSFTPGoCopy() error {
+	if !vfs.IsLocalOsFs(c.connection.Fs) {
+		return c.sendErrorResponse(errUnsupportedConfig)
+	}
+	sshSourcePath, sshDestPath, err := c.getCopyPaths()
 	if err != nil {
 		return c.sendErrorResponse(err)
 	}
-	if !c.isLocalCopy(sshSourcePath, sshDestPath) {
-		return c.sendErrorResponse(errUnsupportedConfig)
+	fsSourcePath, fsDestPath, err := c.resolveCopyPaths(sshSourcePath, sshDestPath)
+	if err != nil {
+		return c.sendErrorResponse(err)
 	}
-
-	if err := c.checkCopyDestination(fsDst, fsDestPath); err != nil {
-		return c.sendErrorResponse(c.connection.GetFsError(fsDst, err))
+	if err := c.checkCopyDestination(fsDestPath); err != nil {
+		return c.sendErrorResponse(err)
 	}
 
 	c.connection.Log(logger.LevelDebug, "requested copy %#v -> %#v sftp paths %#v -> %#v",
 		fsSourcePath, fsDestPath, sshSourcePath, sshDestPath)
 
-	fi, err := fsSrc.Lstat(fsSourcePath)
+	fi, err := c.connection.Fs.Lstat(fsSourcePath)
 	if err != nil {
-		return c.sendErrorResponse(c.connection.GetFsError(fsSrc, err))
+		return c.sendErrorResponse(err)
 	}
-	if err := c.checkCopyPermissions(fsSrc, fsDst, fsSourcePath, fsDestPath, sshSourcePath, sshDestPath, fi); err != nil {
+	if err := c.checkCopyPermissions(fsSourcePath, fsDestPath, sshSourcePath, sshDestPath, fi); err != nil {
 		return c.sendErrorResponse(err)
 	}
 	filesNum := 0
 	filesSize := int64(0)
 	if fi.IsDir() {
-		filesNum, filesSize, err = fsSrc.GetDirSize(fsSourcePath)
+		filesNum, filesSize, err = c.connection.Fs.GetDirSize(fsSourcePath)
 		if err != nil {
-			return c.sendErrorResponse(c.connection.GetFsError(fsSrc, err))
+			return c.sendErrorResponse(err)
 		}
 		if c.connection.User.HasVirtualFoldersInside(sshSourcePath) {
 			err := errors.New("unsupported copy source: the source directory contains virtual folders")
@@ -176,7 +177,7 @@ func (c *sshCommand) handleSFTPGoCopy() error {
 	c.connection.Log(logger.LevelDebug, "start copy %#v -> %#v", fsSourcePath, fsDestPath)
 	err = fscopy.Copy(fsSourcePath, fsDestPath)
 	if err != nil {
-		return c.sendErrorResponse(c.connection.GetFsError(fsSrc, err))
+		return c.sendErrorResponse(err)
 	}
 	c.updateQuota(sshDestPath, filesNum, filesSize)
 	c.connection.channel.Write([]byte("OK\n")) //nolint:errcheck
@@ -184,7 +185,10 @@ func (c *sshCommand) handleSFTPGoCopy() error {
 	return nil
 }
 
-func (c *sshCommand) handleSFTPGoRemove() error {
+func (c *sshCommand) handeSFTPGoRemove() error {
+	if !vfs.IsLocalOsFs(c.connection.Fs) {
+		return c.sendErrorResponse(errUnsupportedConfig)
+	}
 	sshDestPath, err := c.getRemovePath()
 	if err != nil {
 		return c.sendErrorResponse(err)
@@ -192,23 +196,20 @@ func (c *sshCommand) handleSFTPGoRemove() error {
 	if !c.connection.User.HasPerm(dataprovider.PermDelete, path.Dir(sshDestPath)) {
 		return c.sendErrorResponse(common.ErrPermissionDenied)
 	}
-	fs, fsDestPath, err := c.connection.GetFsAndResolvedPath(sshDestPath)
+	fsDestPath, err := c.connection.Fs.ResolvePath(sshDestPath)
 	if err != nil {
 		return c.sendErrorResponse(err)
 	}
-	if !vfs.IsLocalOrCryptoFs(fs) {
-		return c.sendErrorResponse(errUnsupportedConfig)
-	}
-	fi, err := fs.Lstat(fsDestPath)
+	fi, err := c.connection.Fs.Lstat(fsDestPath)
 	if err != nil {
-		return c.sendErrorResponse(c.connection.GetFsError(fs, err))
+		return c.sendErrorResponse(err)
 	}
 	filesNum := 0
 	filesSize := int64(0)
 	if fi.IsDir() {
-		filesNum, filesSize, err = fs.GetDirSize(fsDestPath)
+		filesNum, filesSize, err = c.connection.Fs.GetDirSize(fsDestPath)
 		if err != nil {
-			return c.sendErrorResponse(c.connection.GetFsError(fs, err))
+			return c.sendErrorResponse(err)
 		}
 		if sshDestPath == "/" {
 			err := errors.New("removing root dir is not allowed")
@@ -220,6 +221,10 @@ func (c *sshCommand) handleSFTPGoRemove() error {
 		}
 		if c.connection.User.IsVirtualFolder(sshDestPath) {
 			err := errors.New("unsupported remove source: this directory is a virtual folder")
+			return c.sendErrorResponse(err)
+		}
+		if c.connection.User.IsMappedPath(fsDestPath) {
+			err := errors.New("removing a directory mapped as virtual folder is not allowed")
 			return c.sendErrorResponse(err)
 		}
 	} else if fi.Mode().IsRegular() {
@@ -279,18 +284,18 @@ func (c *sshCommand) handleHashCommands() error {
 		sshPath := c.getDestPath()
 		if !c.connection.User.IsFileAllowed(sshPath) {
 			c.connection.Log(logger.LevelInfo, "hash not allowed for file %#v", sshPath)
-			return c.sendErrorResponse(c.connection.GetPermissionDeniedError())
+			return c.sendErrorResponse(common.ErrPermissionDenied)
 		}
-		fs, fsPath, err := c.connection.GetFsAndResolvedPath(sshPath)
+		fsPath, err := c.connection.Fs.ResolvePath(sshPath)
 		if err != nil {
 			return c.sendErrorResponse(err)
 		}
 		if !c.connection.User.HasPerm(dataprovider.PermListItems, sshPath) {
-			return c.sendErrorResponse(c.connection.GetPermissionDeniedError())
+			return c.sendErrorResponse(common.ErrPermissionDenied)
 		}
-		hash, err := c.computeHashForFile(fs, h, fsPath)
+		hash, err := c.computeHashForFile(h, fsPath)
 		if err != nil {
-			return c.sendErrorResponse(c.connection.GetFsError(fs, err))
+			return c.sendErrorResponse(err)
 		}
 		response = fmt.Sprintf("%v  %v\n", hash, sshPath)
 	}
@@ -300,10 +305,10 @@ func (c *sshCommand) handleHashCommands() error {
 }
 
 func (c *sshCommand) executeSystemCommand(command systemCommand) error {
-	sshDestPath := c.getDestPath()
-	if !c.isLocalPath(sshDestPath) {
+	if !vfs.IsLocalOsFs(c.connection.Fs) {
 		return c.sendErrorResponse(errUnsupportedConfig)
 	}
+	sshDestPath := c.getDestPath()
 	quotaResult := c.connection.HasSpace(true, false, command.quotaCheckPath)
 	if !quotaResult.HasSpace {
 		return c.sendErrorResponse(common.ErrQuotaExceeded)
@@ -311,10 +316,10 @@ func (c *sshCommand) executeSystemCommand(command systemCommand) error {
 	perms := []string{dataprovider.PermDownload, dataprovider.PermUpload, dataprovider.PermCreateDirs, dataprovider.PermListItems,
 		dataprovider.PermOverwrite, dataprovider.PermDelete}
 	if !c.connection.User.HasPerms(perms, sshDestPath) {
-		return c.sendErrorResponse(c.connection.GetPermissionDeniedError())
+		return c.sendErrorResponse(common.ErrPermissionDenied)
 	}
 
-	initialFiles, initialSize, err := c.getSizeForPath(command.fs, command.fsPath)
+	initialFiles, initialSize, err := c.getSizeForPath(command.fsPath)
 	if err != nil {
 		return c.sendErrorResponse(err)
 	}
@@ -351,7 +356,7 @@ func (c *sshCommand) executeSystemCommand(command systemCommand) error {
 	go func() {
 		defer stdin.Close()
 		baseTransfer := common.NewBaseTransfer(nil, c.connection.BaseConnection, nil, command.fsPath, sshDestPath,
-			common.TransferUpload, 0, 0, remainingQuotaSize, false, command.fs)
+			common.TransferUpload, 0, 0, remainingQuotaSize, false, c.connection.Fs)
 		transfer := newTransfer(baseTransfer, nil, nil, nil)
 
 		w, e := transfer.copyFromReaderToWriter(stdin, c.connection.channel)
@@ -364,7 +369,7 @@ func (c *sshCommand) executeSystemCommand(command systemCommand) error {
 
 	go func() {
 		baseTransfer := common.NewBaseTransfer(nil, c.connection.BaseConnection, nil, command.fsPath, sshDestPath,
-			common.TransferDownload, 0, 0, 0, false, command.fs)
+			common.TransferDownload, 0, 0, 0, false, c.connection.Fs)
 		transfer := newTransfer(baseTransfer, nil, nil, nil)
 
 		w, e := transfer.copyFromReaderToWriter(c.connection.channel, stdout)
@@ -378,7 +383,7 @@ func (c *sshCommand) executeSystemCommand(command systemCommand) error {
 
 	go func() {
 		baseTransfer := common.NewBaseTransfer(nil, c.connection.BaseConnection, nil, command.fsPath, sshDestPath,
-			common.TransferDownload, 0, 0, 0, false, command.fs)
+			common.TransferDownload, 0, 0, 0, false, c.connection.Fs)
 		transfer := newTransfer(baseTransfer, nil, nil, nil)
 
 		w, e := transfer.copyFromReaderToWriter(c.connection.channel.(ssh.Channel).Stderr(), stderr)
@@ -394,14 +399,14 @@ func (c *sshCommand) executeSystemCommand(command systemCommand) error {
 	err = command.cmd.Wait()
 	c.sendExitStatus(err)
 
-	numFiles, dirSize, errSize := c.getSizeForPath(command.fs, command.fsPath)
+	numFiles, dirSize, errSize := c.getSizeForPath(command.fsPath)
 	if errSize == nil {
 		c.updateQuota(sshDestPath, numFiles-initialFiles, dirSize-initialSize)
 	}
 	c.connection.Log(logger.LevelDebug, "command %#v finished for path %#v, initial files %v initial size %v "+
 		"current files %v current size %v size err: %v", c.connection.command, command.fsPath, initialFiles, initialSize,
 		numFiles, dirSize, errSize)
-	return c.connection.GetFsError(command.fs, err)
+	return err
 }
 
 func (c *sshCommand) isSystemCommandAllowed() error {
@@ -445,26 +450,21 @@ func (c *sshCommand) isSystemCommandAllowed() error {
 func (c *sshCommand) getSystemCommand() (systemCommand, error) {
 	command := systemCommand{
 		cmd:            nil,
-		fs:             nil,
 		fsPath:         "",
 		quotaCheckPath: "",
 	}
 	args := make([]string, len(c.args))
 	copy(args, c.args)
 	var fsPath, quotaPath string
-	sshPath := c.getDestPath()
-	fs, err := c.connection.User.GetFilesystemForPath(sshPath, c.connection.ID)
-	if err != nil {
-		return command, err
-	}
 	if len(c.args) > 0 {
 		var err error
-		fsPath, err = fs.ResolvePath(sshPath)
+		sshPath := c.getDestPath()
+		fsPath, err = c.connection.Fs.ResolvePath(sshPath)
 		if err != nil {
-			return command, c.connection.GetFsError(fs, err)
+			return command, err
 		}
 		quotaPath = sshPath
-		fi, err := fs.Stat(fsPath)
+		fi, err := c.connection.Fs.Stat(fsPath)
 		if err == nil && fi.IsDir() {
 			// if the target is an existing dir the command will write inside this dir
 			// so we need to check the quota for this directory and not its parent dir
@@ -506,7 +506,6 @@ func (c *sshCommand) getSystemCommand() (systemCommand, error) {
 	command.cmd = cmd
 	command.fsPath = fsPath
 	command.quotaCheckPath = quotaPath
-	command.fs = fs
 	return command, nil
 }
 
@@ -536,7 +535,7 @@ func cleanCommandPath(name string) string {
 	return result
 }
 
-func (c *sshCommand) getFsAndCopyPaths() (vfs.Fs, vfs.Fs, string, string, string, string, error) {
+func (c *sshCommand) getCopyPaths() (string, string, error) {
 	sshSourcePath := strings.TrimSuffix(c.getSourcePath(), "/")
 	sshDestPath := c.getDestPath()
 	if strings.HasSuffix(sshDestPath, "/") {
@@ -544,17 +543,9 @@ func (c *sshCommand) getFsAndCopyPaths() (vfs.Fs, vfs.Fs, string, string, string
 	}
 	if sshSourcePath == "" || sshDestPath == "" || len(c.args) != 2 {
 		err := errors.New("usage sftpgo-copy <source dir path> <destination dir path>")
-		return nil, nil, "", "", "", "", err
+		return "", "", err
 	}
-	fsSrc, fsSourcePath, err := c.connection.GetFsAndResolvedPath(sshSourcePath)
-	if err != nil {
-		return nil, nil, "", "", "", "", err
-	}
-	fsDst, fsDestPath, err := c.connection.GetFsAndResolvedPath(sshDestPath)
-	if err != nil {
-		return nil, nil, "", "", "", "", err
-	}
-	return fsSrc, fsDst, sshSourcePath, sshDestPath, fsSourcePath, fsDestPath, nil
+	return sshSourcePath, sshDestPath, nil
 }
 
 func (c *sshCommand) hasCopyPermissions(sshSourcePath, sshDestPath string, srcInfo os.FileInfo) bool {
@@ -570,7 +561,7 @@ func (c *sshCommand) hasCopyPermissions(sshSourcePath, sshDestPath string, srcIn
 }
 
 // fsSourcePath must be a directory
-func (c *sshCommand) checkRecursiveCopyPermissions(fsSrc vfs.Fs, fsDst vfs.Fs, fsSourcePath, fsDestPath, sshDestPath string) error {
+func (c *sshCommand) checkRecursiveCopyPermissions(fsSourcePath, fsDestPath, sshDestPath string) error {
 	if !c.connection.User.HasPerm(dataprovider.PermCreateDirs, path.Dir(sshDestPath)) {
 		return common.ErrPermissionDenied
 	}
@@ -580,13 +571,13 @@ func (c *sshCommand) checkRecursiveCopyPermissions(fsSrc vfs.Fs, fsDst vfs.Fs, f
 		dataprovider.PermUpload,
 	}
 
-	err := fsSrc.Walk(fsSourcePath, func(walkedPath string, info os.FileInfo, err error) error {
+	err := c.connection.Fs.Walk(fsSourcePath, func(walkedPath string, info os.FileInfo, err error) error {
 		if err != nil {
-			return c.connection.GetFsError(fsSrc, err)
+			return err
 		}
 		fsDstSubPath := strings.Replace(walkedPath, fsSourcePath, fsDestPath, 1)
-		sshSrcSubPath := fsSrc.GetRelativePath(walkedPath)
-		sshDstSubPath := fsDst.GetRelativePath(fsDstSubPath)
+		sshSrcSubPath := c.connection.Fs.GetRelativePath(walkedPath)
+		sshDstSubPath := c.connection.Fs.GetRelativePath(fsDstSubPath)
 		// If the current dir has no subdirs with defined permissions inside it
 		// and it has all the possible permissions we can stop scanning
 		if !c.connection.User.HasPermissionsInside(path.Dir(sshSrcSubPath)) &&
@@ -607,12 +598,12 @@ func (c *sshCommand) checkRecursiveCopyPermissions(fsSrc vfs.Fs, fsDst vfs.Fs, f
 	return err
 }
 
-func (c *sshCommand) checkCopyPermissions(fsSrc vfs.Fs, fsDst vfs.Fs, fsSourcePath, fsDestPath, sshSourcePath, sshDestPath string, info os.FileInfo) error {
+func (c *sshCommand) checkCopyPermissions(fsSourcePath, fsDestPath, sshSourcePath, sshDestPath string, info os.FileInfo) error {
 	if info.IsDir() {
-		return c.checkRecursiveCopyPermissions(fsSrc, fsDst, fsSourcePath, fsDestPath, sshDestPath)
+		return c.checkRecursiveCopyPermissions(fsSourcePath, fsDestPath, sshDestPath)
 	}
 	if !c.hasCopyPermissions(sshSourcePath, sshDestPath, info) {
-		return c.connection.GetPermissionDeniedError()
+		return common.ErrPermissionDenied
 	}
 	return nil
 }
@@ -629,28 +620,24 @@ func (c *sshCommand) getRemovePath() (string, error) {
 	return sshDestPath, nil
 }
 
-func (c *sshCommand) isLocalPath(virtualPath string) bool {
-	folder, err := c.connection.User.GetVirtualFolderForPath(virtualPath)
+func (c *sshCommand) resolveCopyPaths(sshSourcePath, sshDestPath string) (string, string, error) {
+	fsSourcePath, err := c.connection.Fs.ResolvePath(sshSourcePath)
 	if err != nil {
-		return c.connection.User.FsConfig.Provider == vfs.LocalFilesystemProvider
+		return "", "", err
 	}
-	return folder.FsConfig.Provider == vfs.LocalFilesystemProvider
+	fsDestPath, err := c.connection.Fs.ResolvePath(sshDestPath)
+	if err != nil {
+		return "", "", err
+	}
+	return fsSourcePath, fsDestPath, nil
 }
 
-func (c *sshCommand) isLocalCopy(virtualSourcePath, virtualTargetPath string) bool {
-	if !c.isLocalPath(virtualSourcePath) {
-		return false
-	}
-
-	return c.isLocalPath(virtualTargetPath)
-}
-
-func (c *sshCommand) checkCopyDestination(fs vfs.Fs, fsDestPath string) error {
-	_, err := fs.Lstat(fsDestPath)
+func (c *sshCommand) checkCopyDestination(fsDestPath string) error {
+	_, err := c.connection.Fs.Lstat(fsDestPath)
 	if err == nil {
 		err := errors.New("invalid copy destination: cannot overwrite an existing file or directory")
 		return err
-	} else if !fs.IsNotExist(err) {
+	} else if !c.connection.Fs.IsNotExist(err) {
 		return err
 	}
 	return nil
@@ -680,18 +667,18 @@ func (c *sshCommand) checkCopyQuota(numFiles int, filesSize int64, requestPath s
 	return nil
 }
 
-func (c *sshCommand) getSizeForPath(fs vfs.Fs, name string) (int, int64, error) {
+func (c *sshCommand) getSizeForPath(name string) (int, int64, error) {
 	if dataprovider.GetQuotaTracking() > 0 {
-		fi, err := fs.Lstat(name)
+		fi, err := c.connection.Fs.Lstat(name)
 		if err != nil {
-			if fs.IsNotExist(err) {
+			if c.connection.Fs.IsNotExist(err) {
 				return 0, 0, nil
 			}
 			c.connection.Log(logger.LevelDebug, "unable to stat %#v error: %v", name, err)
 			return 0, 0, err
 		}
 		if fi.IsDir() {
-			files, size, err := fs.GetDirSize(name)
+			files, size, err := c.connection.Fs.GetDirSize(name)
 			if err != nil {
 				c.connection.Log(logger.LevelDebug, "unable to get size for dir %#v error: %v", name, err)
 			}
@@ -704,7 +691,7 @@ func (c *sshCommand) getSizeForPath(fs vfs.Fs, name string) (int, int64, error) 
 }
 
 func (c *sshCommand) sendErrorResponse(err error) error {
-	errorString := fmt.Sprintf("%v: %v %v\n", c.command, c.getDestPath(), err)
+	errorString := fmt.Sprintf("%v: %v %v\n", c.command, c.getDestPath(), c.connection.GetFsError(err))
 	c.connection.channel.Write([]byte(errorString)) //nolint:errcheck
 	c.sendExitStatus(err)
 	return err
@@ -735,15 +722,15 @@ func (c *sshCommand) sendExitStatus(err error) {
 	// for scp we notify single uploads/downloads
 	if c.command != scpCmdName {
 		metrics.SSHCommandCompleted(err)
-		if cmdPath != "" {
-			_, p, errFs := c.connection.GetFsAndResolvedPath(cmdPath)
-			if errFs == nil {
+		if len(cmdPath) > 0 {
+			p, e := c.connection.Fs.ResolvePath(cmdPath)
+			if e == nil {
 				cmdPath = p
 			}
 		}
-		if targetPath != "" {
-			_, p, errFs := c.connection.GetFsAndResolvedPath(targetPath)
-			if errFs == nil {
+		if len(targetPath) > 0 {
+			p, e := c.connection.Fs.ResolvePath(targetPath)
+			if e == nil {
 				targetPath = p
 			}
 		}
@@ -751,9 +738,9 @@ func (c *sshCommand) sendExitStatus(err error) {
 	}
 }
 
-func (c *sshCommand) computeHashForFile(fs vfs.Fs, hasher hash.Hash, path string) (string, error) {
+func (c *sshCommand) computeHashForFile(hasher hash.Hash, path string) (string, error) {
 	hash := ""
-	f, r, _, err := fs.Open(path, 0)
+	f, r, _, err := c.connection.Fs.Open(path, 0)
 	if err != nil {
 		return hash, err
 	}

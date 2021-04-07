@@ -9,7 +9,6 @@
     "setstat_mode": 0,
     "proxy_protocol": 0,
     "proxy_allowed": [],
-    "startup_hook": "",
     "post_connect_hook": "",
     "max_total_connections": 0,
     "defender": {
@@ -87,8 +86,7 @@
         "address": "",
         "enable_https": false,
         "client_auth_type": 0,
-        "tls_cipher_suites": [],
-        "prefix": ""
+        "tls_cipher_suites": []
       }
     ],
     "certificate_file": "",

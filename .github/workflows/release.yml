@@ -10,7 +10,7 @@ env:
 jobs:
   create-release:
     name: Create
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04
     steps:
       - name: Create Release
         id: create_release
@@ -36,7 +36,7 @@ jobs:
   release-sources-with-deps:
     name: Publish sources
     needs: create-release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04
     steps:
       - uses: actions/checkout@v2
       - name: Set up Go

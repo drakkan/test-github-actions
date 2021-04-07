@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -21,7 +23,6 @@ import (
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/metrics"
 	"github.com/drakkan/sftpgo/utils"
-	"github.com/drakkan/sftpgo/vfs"
 )
 
 const (
@@ -233,7 +234,6 @@ func (c *Configuration) Initialize(configDir string) error {
 
 		go func(binding Binding) {
 			addr := binding.GetAddress()
-			utils.CheckTCP4Port(binding.Port)
 			listener, err := net.Listen("tcp", addr)
 			if err != nil {
 				logger.Warn(logSender, "", "error starting listener on address %v: %v", addr, err)
@@ -309,7 +309,7 @@ func (c *Configuration) configureLoginBanner(serverConfig *ssh.ServerConfig, con
 		if !filepath.IsAbs(bannerFilePath) {
 			bannerFilePath = filepath.Join(configDir, bannerFilePath)
 		}
-		bannerContent, err := os.ReadFile(bannerFilePath)
+		bannerContent, err := ioutil.ReadFile(bannerFilePath)
 		if err == nil {
 			banner := string(bannerContent)
 			serverConfig.BannerCallback = func(conn ssh.ConnMetadata) string {
@@ -401,13 +401,9 @@ func (c *Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Serve
 	loginType := sconn.Permissions.Extensions["sftpgo_login_method"]
 	connectionID := hex.EncodeToString(sconn.SessionID())
 
-	if err = user.CheckFsRoot(connectionID); err != nil {
-		errClose := user.CloseFs()
-		logger.Warn(logSender, connectionID, "unable to check fs root: %v close fs error: %v", err, errClose)
+	if err = checkRootPath(&user, connectionID); err != nil {
 		return
 	}
-
-	defer user.CloseFs() //nolint:errcheck
 
 	logger.Log(logger.LevelInfo, common.ProtocolSSH, connectionID,
 		"User id: %d, logged in with: %#v, username: %#v, home_dir: %#v remote addr: %#v",
@@ -450,24 +446,34 @@ func (c *Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Serve
 				switch req.Type {
 				case "subsystem":
 					if string(req.Payload[4:]) == "sftp" {
-						ok = true
+						fs, err := user.GetFilesystem(connID)
+						if err == nil {
+							ok = true
+							connection := Connection{
+								BaseConnection: common.NewBaseConnection(connID, common.ProtocolSFTP, user, fs),
+								ClientVersion:  string(sconn.ClientVersion()),
+								RemoteAddr:     conn.RemoteAddr(),
+								channel:        channel,
+							}
+							go c.handleSftpConnection(channel, &connection)
+						} else {
+							logger.Debug(logSender, connID, "unable to create filesystem: %v", err)
+						}
+					}
+				case "exec":
+					// protocol will be set later inside processSSHCommand it could be SSH or SCP
+					fs, err := user.GetFilesystem(connID)
+					if err == nil {
 						connection := Connection{
-							BaseConnection: common.NewBaseConnection(connID, common.ProtocolSFTP, user),
+							BaseConnection: common.NewBaseConnection(connID, "sshd_exec", user, fs),
 							ClientVersion:  string(sconn.ClientVersion()),
 							RemoteAddr:     conn.RemoteAddr(),
 							channel:        channel,
 						}
-						go c.handleSftpConnection(channel, &connection)
+						ok = processSSHCommand(req.Payload, &connection, c.EnabledSSHCommands)
+					} else {
+						logger.Debug(sshCommandLogSender, connID, "unable to create filesystem: %v", err)
 					}
-				case "exec":
-					// protocol will be set later inside processSSHCommand it could be SSH or SCP
-					connection := Connection{
-						BaseConnection: common.NewBaseConnection(connID, "sshd_exec", user),
-						ClientVersion:  string(sconn.ClientVersion()),
-						RemoteAddr:     conn.RemoteAddr(),
-						channel:        channel,
-					}
-					ok = processSSHCommand(req.Payload, &connection, c.EnabledSSHCommands)
 				}
 				if req.WantReply {
 					req.Reply(ok, nil) //nolint:errcheck
@@ -536,6 +542,21 @@ func checkAuthError(ip string, err error) {
 	}
 }
 
+func checkRootPath(user *dataprovider.User, connectionID string) error {
+	if user.FsConfig.Provider != dataprovider.SFTPFilesystemProvider {
+		// for sftp fs check root path does nothing so don't open a useless SFTP connection
+		fs, err := user.GetFilesystem(connectionID)
+		if err != nil {
+			logger.Warn(logSender, "", "could not create filesystem for user %#v err: %v", user.Username, err)
+			return err
+		}
+
+		fs.CheckRootPath(user.Username, user.GetUID(), user.GetGID())
+		fs.Close()
+	}
+	return nil
+}
+
 func loginUser(user *dataprovider.User, loginMethod, publicKey string, conn ssh.ConnMetadata) (*ssh.Permissions, error) {
 	connectionID := ""
 	if conn != nil {
@@ -548,7 +569,7 @@ func loginUser(user *dataprovider.User, loginMethod, publicKey string, conn ssh.
 	}
 	if utils.IsStringInSlice(common.ProtocolSSH, user.Filters.DeniedProtocols) {
 		logger.Debug(logSender, connectionID, "cannot login user %#v, protocol SSH is not allowed", user.Username)
-		return nil, fmt.Errorf("protocol SSH is not allowed for user %#v", user.Username)
+		return nil, fmt.Errorf("Protocol SSH is not allowed for user %#v", user.Username)
 	}
 	if user.MaxSessions > 0 {
 		activeSessions := common.Connections.GetActiveSessions(user.Username)
@@ -560,12 +581,17 @@ func loginUser(user *dataprovider.User, loginMethod, publicKey string, conn ssh.
 	}
 	if !user.IsLoginMethodAllowed(loginMethod, conn.PartialSuccessMethods()) {
 		logger.Debug(logSender, connectionID, "cannot login user %#v, login method %#v is not allowed", user.Username, loginMethod)
-		return nil, fmt.Errorf("login method %#v is not allowed for user %#v", loginMethod, user.Username)
+		return nil, fmt.Errorf("Login method %#v is not allowed for user %#v", loginMethod, user.Username)
+	}
+	if dataprovider.GetQuotaTracking() > 0 && user.HasOverlappedMappedPaths() {
+		logger.Debug(logSender, connectionID, "cannot login user %#v, overlapping mapped folders are allowed only with quota tracking disabled",
+			user.Username)
+		return nil, errors.New("overlapping mapped folders are allowed only with quota tracking disabled")
 	}
 	remoteAddr := conn.RemoteAddr().String()
 	if !user.IsLoginFromAddrAllowed(remoteAddr) {
 		logger.Debug(logSender, connectionID, "cannot login user %#v, remote address is not allowed: %v", user.Username, remoteAddr)
-		return nil, fmt.Errorf("login for user %#v is not allowed from this address: %v", user.Username, remoteAddr)
+		return nil, fmt.Errorf("Login for user %#v is not allowed from this address: %v", user.Username, remoteAddr)
 	}
 
 	json, err := json.Marshal(user)
@@ -692,7 +718,7 @@ func (c *Configuration) checkAndLoadHostKeys(configDir string, serverConfig *ssh
 		}
 		logger.Info(logSender, "", "Loading private host key %#v", hostKey)
 
-		privateBytes, err := os.ReadFile(hostKey)
+		privateBytes, err := ioutil.ReadFile(hostKey)
 		if err != nil {
 			return err
 		}
@@ -712,12 +738,6 @@ func (c *Configuration) checkAndLoadHostKeys(configDir string, serverConfig *ssh
 		// Add private key to the server configuration.
 		serverConfig.AddHostKey(private)
 	}
-	var fp []string
-	for idx := range serviceStatus.HostKeys {
-		h := &serviceStatus.HostKeys[idx]
-		fp = append(fp, h.Fingerprint)
-	}
-	vfs.SetSFTPFingerprints(fp)
 	return nil
 }
 
@@ -731,7 +751,7 @@ func (c *Configuration) initializeCertChecker(configDir string) error {
 		if !filepath.IsAbs(keyPath) {
 			keyPath = filepath.Join(configDir, keyPath)
 		}
-		keyBytes, err := os.ReadFile(keyPath)
+		keyBytes, err := ioutil.ReadFile(keyPath)
 		if err != nil {
 			logger.Warn(logSender, "", "error loading trusted user CA key %#v: %v", keyPath, err)
 			logger.WarnToConsole("error loading trusted user CA key %#v: %v", keyPath, err)

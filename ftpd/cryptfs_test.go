@@ -1,6 +1,7 @@
 package ftpd_test
 
 import (
+	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
@@ -15,7 +16,6 @@ import (
 	"github.com/drakkan/sftpgo/dataprovider"
 	"github.com/drakkan/sftpgo/httpdtest"
 	"github.com/drakkan/sftpgo/kms"
-	"github.com/drakkan/sftpgo/vfs"
 )
 
 func TestBasicFTPHandlingCryptFs(t *testing.T) {
@@ -23,7 +23,7 @@ func TestBasicFTPHandlingCryptFs(t *testing.T) {
 	u.QuotaSize = 6553600
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
-	client, err := getFTPClient(user, true, nil)
+	client, err := getFTPClient(user, true)
 	if assert.NoError(t, err) {
 		assert.Len(t, common.Connections.GetStats(), 1)
 		testFilePath := filepath.Join(homeBasePath, testFileName)
@@ -119,13 +119,13 @@ func TestZeroBytesTransfersCryptFs(t *testing.T) {
 	u := getTestUserWithCryptFs()
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
-	client, err := getFTPClient(user, true, nil)
+	client, err := getFTPClient(user, true)
 	if assert.NoError(t, err) {
 		testFileName := "testfilename"
 		err = checkBasicFTP(client)
 		assert.NoError(t, err)
 		localDownloadPath := filepath.Join(homeBasePath, "emptydownload")
-		err = os.WriteFile(localDownloadPath, []byte(""), os.ModePerm)
+		err = ioutil.WriteFile(localDownloadPath, []byte(""), os.ModePerm)
 		assert.NoError(t, err)
 		err = ftpUploadFile(localDownloadPath, testFileName, 0, client, 0)
 		assert.NoError(t, err)
@@ -156,26 +156,26 @@ func TestResumeCryptFs(t *testing.T) {
 	u := getTestUserWithCryptFs()
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
-	client, err := getFTPClient(user, true, nil)
+	client, err := getFTPClient(user, true)
 	if assert.NoError(t, err) {
 		testFilePath := filepath.Join(homeBasePath, testFileName)
 		data := []byte("test data")
-		err = os.WriteFile(testFilePath, data, os.ModePerm)
+		err = ioutil.WriteFile(testFilePath, data, os.ModePerm)
 		assert.NoError(t, err)
 		err = ftpUploadFile(testFilePath, testFileName, int64(len(data)), client, 0)
 		assert.NoError(t, err)
-		// resuming uploads is not supported
+		// upload resume is not supported
 		err = ftpUploadFile(testFilePath, testFileName, int64(len(data)+5), client, 5)
 		assert.Error(t, err)
 		localDownloadPath := filepath.Join(homeBasePath, testDLFileName)
 		err = ftpDownloadFile(testFileName, localDownloadPath, int64(4), client, 5)
 		assert.NoError(t, err)
-		readed, err := os.ReadFile(localDownloadPath)
+		readed, err := ioutil.ReadFile(localDownloadPath)
 		assert.NoError(t, err)
 		assert.Equal(t, data[5:], readed)
 		err = ftpDownloadFile(testFileName, localDownloadPath, int64(8), client, 1)
 		assert.NoError(t, err)
-		readed, err = os.ReadFile(localDownloadPath)
+		readed, err = ioutil.ReadFile(localDownloadPath)
 		assert.NoError(t, err)
 		assert.Equal(t, data[1:], readed)
 		err = ftpDownloadFile(testFileName, localDownloadPath, int64(0), client, 9)
@@ -196,7 +196,7 @@ func TestResumeCryptFs(t *testing.T) {
 			assert.Equal(t, int64(len(data)), size)
 			err = ftpDownloadFile(testFileName, localDownloadPath, int64(len(data)), client, 0)
 			assert.NoError(t, err)
-			readed, err = os.ReadFile(localDownloadPath)
+			readed, err = ioutil.ReadFile(localDownloadPath)
 			assert.NoError(t, err)
 			assert.Equal(t, data, readed)
 		}
@@ -215,7 +215,7 @@ func TestResumeCryptFs(t *testing.T) {
 
 func getTestUserWithCryptFs() dataprovider.User {
 	user := getTestUser()
-	user.FsConfig.Provider = vfs.CryptedFilesystemProvider
+	user.FsConfig.Provider = dataprovider.CryptedFilesystemProvider
 	user.FsConfig.CryptConfig.Passphrase = kms.NewPlainSecret("testPassphrase")
 	return user
 }

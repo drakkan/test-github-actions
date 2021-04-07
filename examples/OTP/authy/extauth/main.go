@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -88,7 +88,7 @@ func main() {
 				printResponse("")
 			}
 			var authyResponse map[string]interface{}
-			respBody, err := io.ReadAll(resp.Body)
+			respBody, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
 				printResponse("")
 			}

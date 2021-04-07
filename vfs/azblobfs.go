@@ -36,10 +36,8 @@ var maxTryTimeout = time.Hour * 24 * 365
 
 // AzureBlobFs is a Fs implementation for Azure Blob storage.
 type AzureBlobFs struct {
-	connectionID string
-	localTempDir string
-	// if not empty this fs is mouted as virtual folder in the specified path
-	mountPath      string
+	connectionID   string
+	localTempDir   string
 	config         *AzBlobFsConfig
 	svc            *azblob.ServiceURL
 	containerURL   azblob.ContainerURL
@@ -52,14 +50,10 @@ func init() {
 }
 
 // NewAzBlobFs returns an AzBlobFs object that allows to interact with Azure Blob storage
-func NewAzBlobFs(connectionID, localTempDir, mountPath string, config AzBlobFsConfig) (Fs, error) {
-	if localTempDir == "" {
-		localTempDir = filepath.Clean(os.TempDir())
-	}
+func NewAzBlobFs(connectionID, localTempDir string, config AzBlobFsConfig) (Fs, error) {
 	fs := &AzureBlobFs{
 		connectionID:   connectionID,
 		localTempDir:   localTempDir,
-		mountPath:      mountPath,
 		config:         &config,
 		ctxTimeout:     30 * time.Second,
 		ctxLongTimeout: 300 * time.Second,
@@ -67,9 +61,11 @@ func NewAzBlobFs(connectionID, localTempDir, mountPath string, config AzBlobFsCo
 	if err := fs.config.Validate(); err != nil {
 		return fs, err
 	}
-
-	if err := fs.config.AccountKey.TryDecrypt(); err != nil {
-		return fs, err
+	if fs.config.AccountKey.IsEncrypted() {
+		err := fs.config.AccountKey.Decrypt()
+		if err != nil {
+			return fs, err
+		}
 	}
 	fs.setConfigDefaults()
 
@@ -93,7 +89,7 @@ func NewAzBlobFs(connectionID, localTempDir, mountPath string, config AzBlobFsCo
 		parts := azblob.NewBlobURLParts(*u)
 		if parts.ContainerName != "" {
 			if fs.config.Container != "" && fs.config.Container != parts.ContainerName {
-				return fs, fmt.Errorf("container name in SAS URL %#v and container provided %#v do not match",
+				return fs, fmt.Errorf("Container name in SAS URL %#v and container provided %#v do not match",
 					parts.ContainerName, fs.config.Container)
 			}
 			fs.svc = nil
@@ -286,7 +282,7 @@ func (fs *AzureBlobFs) Rename(source, target string) error {
 			return err
 		}
 		if hasContents {
-			return fmt.Errorf("cannot rename non empty directory: %#v", source)
+			return fmt.Errorf("Cannot rename non empty directory: %#v", source)
 		}
 	}
 	dstBlobURL := fs.containerURL.NewBlobURL(target)
@@ -322,7 +318,7 @@ func (fs *AzureBlobFs) Rename(source, target string) error {
 		}
 	}
 	if copyStatus != azblob.CopyStatusSuccess {
-		err := fmt.Errorf("copy failed with status: %s", copyStatus)
+		err := fmt.Errorf("Copy failed with status: %s", copyStatus)
 		metrics.AZCopyObjectCompleted(err)
 		return err
 	}
@@ -338,7 +334,7 @@ func (fs *AzureBlobFs) Remove(name string, isDir bool) error {
 			return err
 		}
 		if hasContents {
-			return fmt.Errorf("cannot remove non empty directory: %#v", name)
+			return fmt.Errorf("Cannot remove non empty directory: %#v", name)
 		}
 	}
 	blobBlockURL := fs.containerURL.NewBlockBlobURL(name)
@@ -361,11 +357,6 @@ func (fs *AzureBlobFs) Mkdir(name string) error {
 		return err
 	}
 	return w.Close()
-}
-
-// MkdirAll does nothing, we don't have folder
-func (*AzureBlobFs) MkdirAll(name string, uid int, gid int) error {
-	return nil
 }
 
 // Symlink creates source as a symbolic link to target.
@@ -473,8 +464,8 @@ func (fs *AzureBlobFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 	return result, nil
 }
 
-// IsUploadResumeSupported returns true if resuming uploads is supported.
-// Resuming uploads is not supported on Azure Blob
+// IsUploadResumeSupported returns true if upload resume is supported.
+// Upload Resume is not supported on Azure Blob
 func (*AzureBlobFs) IsUploadResumeSupported() bool {
 	return false
 }
@@ -537,7 +528,7 @@ func (*AzureBlobFs) IsNotSupported(err error) bool {
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *AzureBlobFs) CheckRootPath(username string, uid int, gid int) bool {
 	// we need a local directory for temporary files
-	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
+	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, nil)
 	return osFs.CheckRootPath(username, uid, gid)
 }
 
@@ -616,9 +607,6 @@ func (fs *AzureBlobFs) GetRelativePath(name string) string {
 		}
 		rel = path.Clean("/" + strings.TrimPrefix(rel, "/"+fs.config.KeyPrefix))
 	}
-	if fs.mountPath != "" {
-		rel = path.Join(fs.mountPath, rel)
-	}
 	return rel
 }
 
@@ -687,9 +675,6 @@ func (*AzureBlobFs) HasVirtualFolders() bool {
 
 // ResolvePath returns the matching filesystem path for the specified sftp path
 func (fs *AzureBlobFs) ResolvePath(virtualPath string) (string, error) {
-	if fs.mountPath != "" {
-		virtualPath = strings.TrimPrefix(virtualPath, fs.mountPath)
-	}
 	if !path.IsAbs(virtualPath) {
 		virtualPath = path.Clean("/" + virtualPath)
 	}

@@ -3,6 +3,7 @@ package common
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,7 @@ func TestNewActionNotification(t *testing.T) {
 	user := &dataprovider.User{
 		Username: "username",
 	}
-	user.FsConfig.Provider = vfs.LocalFilesystemProvider
+	user.FsConfig.Provider = dataprovider.LocalFilesystemProvider
 	user.FsConfig.S3Config = vfs.S3FsConfig{
 		Bucket:   "s3bucket",
 		Endpoint: "endpoint",
@@ -38,19 +39,19 @@ func TestNewActionNotification(t *testing.T) {
 	assert.Equal(t, 0, len(a.Endpoint))
 	assert.Equal(t, 0, a.Status)
 
-	user.FsConfig.Provider = vfs.S3FilesystemProvider
+	user.FsConfig.Provider = dataprovider.S3FilesystemProvider
 	a = newActionNotification(user, operationDownload, "path", "target", "", ProtocolSSH, 123, nil)
 	assert.Equal(t, "s3bucket", a.Bucket)
 	assert.Equal(t, "endpoint", a.Endpoint)
 	assert.Equal(t, 1, a.Status)
 
-	user.FsConfig.Provider = vfs.GCSFilesystemProvider
+	user.FsConfig.Provider = dataprovider.GCSFilesystemProvider
 	a = newActionNotification(user, operationDownload, "path", "target", "", ProtocolSCP, 123, ErrQuotaExceeded)
 	assert.Equal(t, "gcsbucket", a.Bucket)
 	assert.Equal(t, 0, len(a.Endpoint))
 	assert.Equal(t, 2, a.Status)
 
-	user.FsConfig.Provider = vfs.AzureBlobFilesystemProvider
+	user.FsConfig.Provider = dataprovider.AzureBlobFilesystemProvider
 	a = newActionNotification(user, operationDownload, "path", "target", "", ProtocolSCP, 123, nil)
 	assert.Equal(t, "azcontainer", a.Bucket)
 	assert.Equal(t, "azsasurl", a.Endpoint)
@@ -179,15 +180,15 @@ func TestPreDeleteAction(t *testing.T) {
 	}
 	user.Permissions = make(map[string][]string)
 	user.Permissions["/"] = []string{dataprovider.PermAny}
-	fs := vfs.NewOsFs("id", homeDir, "")
-	c := NewBaseConnection("id", ProtocolSFTP, user)
+	fs := vfs.NewOsFs("id", homeDir, nil)
+	c := NewBaseConnection("id", ProtocolSFTP, user, fs)
 
 	testfile := filepath.Join(user.HomeDir, "testfile")
-	err = os.WriteFile(testfile, []byte("test"), os.ModePerm)
+	err = ioutil.WriteFile(testfile, []byte("test"), os.ModePerm)
 	assert.NoError(t, err)
 	info, err := os.Stat(testfile)
 	assert.NoError(t, err)
-	err = c.RemoveFile(fs, testfile, "testfile", info)
+	err = c.RemoveFile(testfile, "testfile", info)
 	assert.NoError(t, err)
 	assert.FileExists(t, testfile)
 

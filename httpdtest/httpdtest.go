@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -815,7 +817,7 @@ func checkResponse(actual int, expected int) error {
 }
 
 func getResponseBody(resp *http.Response) ([]byte, error) {
-	return io.ReadAll(resp.Body)
+	return ioutil.ReadAll(resp.Body)
 }
 
 func checkFolder(expected *vfs.BaseVirtualFolder, actual *vfs.BaseVirtualFolder) error {
@@ -834,18 +836,29 @@ func checkFolder(expected *vfs.BaseVirtualFolder, actual *vfs.BaseVirtualFolder)
 	if expected.MappedPath != actual.MappedPath {
 		return errors.New("mapped path mismatch")
 	}
-	if expected.Description != actual.Description {
-		return errors.New("description mismatch")
+	if expected.LastQuotaUpdate != actual.LastQuotaUpdate {
+		return errors.New("last quota update mismatch")
 	}
-	if err := compareFsConfig(&expected.FsConfig, &actual.FsConfig); err != nil {
-		return err
+	if expected.UsedQuotaSize != actual.UsedQuotaSize {
+		return errors.New("used quota size mismatch")
+	}
+	if expected.UsedQuotaFiles != actual.UsedQuotaFiles {
+		return errors.New("used quota files mismatch")
+	}
+	if len(expected.Users) != len(actual.Users) {
+		return errors.New("folder users mismatch")
+	}
+	for _, u := range actual.Users {
+		if !utils.IsStringInSlice(u, expected.Users) {
+			return errors.New("folder users mismatch")
+		}
 	}
 	return nil
 }
 
 func checkAdmin(expected *dataprovider.Admin, actual *dataprovider.Admin) error {
 	if actual.Password != "" {
-		return errors.New("admin password must not be visible")
+		return errors.New("Admin password must not be visible")
 	}
 	if expected.ID <= 0 {
 		if actual.ID <= 0 {
@@ -856,51 +869,41 @@ func checkAdmin(expected *dataprovider.Admin, actual *dataprovider.Admin) error 
 			return errors.New("admin ID mismatch")
 		}
 	}
-	if err := compareAdminEqualFields(expected, actual); err != nil {
-		return err
+	if expected.Username != actual.Username {
+		return errors.New("Username mismatch")
+	}
+	if expected.Email != actual.Email {
+		return errors.New("Email mismatch")
+	}
+	if expected.Status != actual.Status {
+		return errors.New("Status mismatch")
+	}
+	if expected.AdditionalInfo != actual.AdditionalInfo {
+		return errors.New("AdditionalInfo mismatch")
 	}
 	if len(expected.Permissions) != len(actual.Permissions) {
-		return errors.New("permissions mismatch")
+		return errors.New("Permissions mismatch")
 	}
 	for _, p := range expected.Permissions {
 		if !utils.IsStringInSlice(p, actual.Permissions) {
-			return errors.New("permissions content mismatch")
+			return errors.New("Permissions content mismatch")
 		}
 	}
 	if len(expected.Filters.AllowList) != len(actual.Filters.AllowList) {
-		return errors.New("allow list mismatch")
+		return errors.New("AllowList mismatch")
 	}
 	for _, v := range expected.Filters.AllowList {
 		if !utils.IsStringInSlice(v, actual.Filters.AllowList) {
-			return errors.New("allow list content mismatch")
+			return errors.New("AllowList content mismatch")
 		}
 	}
 
-	return nil
-}
-
-func compareAdminEqualFields(expected *dataprovider.Admin, actual *dataprovider.Admin) error {
-	if expected.Username != actual.Username {
-		return errors.New("sername mismatch")
-	}
-	if expected.Email != actual.Email {
-		return errors.New("email mismatch")
-	}
-	if expected.Status != actual.Status {
-		return errors.New("status mismatch")
-	}
-	if expected.Description != actual.Description {
-		return errors.New("description mismatch")
-	}
-	if expected.AdditionalInfo != actual.AdditionalInfo {
-		return errors.New("additional info mismatch")
-	}
 	return nil
 }
 
 func checkUser(expected *dataprovider.User, actual *dataprovider.User) error {
 	if actual.Password != "" {
-		return errors.New("user password must not be visible")
+		return errors.New("User password must not be visible")
 	}
 	if expected.ID <= 0 {
 		if actual.ID <= 0 {
@@ -912,23 +915,23 @@ func checkUser(expected *dataprovider.User, actual *dataprovider.User) error {
 		}
 	}
 	if len(expected.Permissions) != len(actual.Permissions) {
-		return errors.New("permissions mismatch")
+		return errors.New("Permissions mismatch")
 	}
 	for dir, perms := range expected.Permissions {
 		if actualPerms, ok := actual.Permissions[dir]; ok {
 			for _, v := range actualPerms {
 				if !utils.IsStringInSlice(v, perms) {
-					return errors.New("permissions contents mismatch")
+					return errors.New("Permissions contents mismatch")
 				}
 			}
 		} else {
-			return errors.New("permissions directories mismatch")
+			return errors.New("Permissions directories mismatch")
 		}
 	}
 	if err := compareUserFilters(expected, actual); err != nil {
 		return err
 	}
-	if err := compareFsConfig(&expected.FsConfig, &actual.FsConfig); err != nil {
+	if err := compareUserFsConfig(expected, actual); err != nil {
 		return err
 	}
 	if err := compareUserVirtualFolders(expected, actual); err != nil {
@@ -939,35 +942,27 @@ func checkUser(expected *dataprovider.User, actual *dataprovider.User) error {
 
 func compareUserVirtualFolders(expected *dataprovider.User, actual *dataprovider.User) error {
 	if len(actual.VirtualFolders) != len(expected.VirtualFolders) {
-		return errors.New("virtual folders len mismatch")
+		return errors.New("Virtual folders mismatch")
 	}
 	for _, v := range actual.VirtualFolders {
 		found := false
 		for _, v1 := range expected.VirtualFolders {
-			if path.Clean(v.VirtualPath) == path.Clean(v1.VirtualPath) {
-				if err := checkFolder(&v1.BaseVirtualFolder, &v.BaseVirtualFolder); err != nil {
-					return err
-				}
-				if v.QuotaSize != v1.QuotaSize {
-					return errors.New("vfolder quota size mismatch")
-				}
-				if (v.QuotaFiles) != (v1.QuotaFiles) {
-					return errors.New("vfolder quota files mismatch")
-				}
+			if path.Clean(v.VirtualPath) == path.Clean(v1.VirtualPath) &&
+				filepath.Clean(v.MappedPath) == filepath.Clean(v1.MappedPath) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			return errors.New("virtual folders mismatch")
+			return errors.New("Virtual folders mismatch")
 		}
 	}
 	return nil
 }
 
-func compareFsConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error {
-	if expected.Provider != actual.Provider {
-		return errors.New("fs provider mismatch")
+func compareUserFsConfig(expected *dataprovider.User, actual *dataprovider.User) error {
+	if expected.FsConfig.Provider != actual.FsConfig.Provider {
+		return errors.New("Fs provider mismatch")
 	}
 	if err := compareS3Config(expected, actual); err != nil {
 		return err
@@ -978,7 +973,7 @@ func compareFsConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error {
 	if err := compareAzBlobConfig(expected, actual); err != nil {
 		return err
 	}
-	if err := checkEncryptedSecret(expected.CryptConfig.Passphrase, actual.CryptConfig.Passphrase); err != nil {
+	if err := checkEncryptedSecret(expected.FsConfig.CryptConfig.Passphrase, actual.FsConfig.CryptConfig.Passphrase); err != nil {
 		return err
 	}
 	if err := compareSFTPFsConfig(expected, actual); err != nil {
@@ -987,121 +982,115 @@ func compareFsConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error {
 	return nil
 }
 
-func compareS3Config(expected *vfs.Filesystem, actual *vfs.Filesystem) error {
-	if expected.S3Config.Bucket != actual.S3Config.Bucket {
-		return errors.New("fs S3 bucket mismatch")
+func compareS3Config(expected *dataprovider.User, actual *dataprovider.User) error {
+	if expected.FsConfig.S3Config.Bucket != actual.FsConfig.S3Config.Bucket {
+		return errors.New("S3 bucket mismatch")
 	}
-	if expected.S3Config.Region != actual.S3Config.Region {
-		return errors.New("fs S3 region mismatch")
+	if expected.FsConfig.S3Config.Region != actual.FsConfig.S3Config.Region {
+		return errors.New("S3 region mismatch")
 	}
-	if expected.S3Config.AccessKey != actual.S3Config.AccessKey {
-		return errors.New("fs S3 access key mismatch")
+	if expected.FsConfig.S3Config.AccessKey != actual.FsConfig.S3Config.AccessKey {
+		return errors.New("S3 access key mismatch")
 	}
-	if err := checkEncryptedSecret(expected.S3Config.AccessSecret, actual.S3Config.AccessSecret); err != nil {
-		return fmt.Errorf("fs S3 access secret mismatch: %v", err)
+	if err := checkEncryptedSecret(expected.FsConfig.S3Config.AccessSecret, actual.FsConfig.S3Config.AccessSecret); err != nil {
+		return fmt.Errorf("S3 access secret mismatch: %v", err)
 	}
-	if expected.S3Config.Endpoint != actual.S3Config.Endpoint {
-		return errors.New("fs S3 endpoint mismatch")
+	if expected.FsConfig.S3Config.Endpoint != actual.FsConfig.S3Config.Endpoint {
+		return errors.New("S3 endpoint mismatch")
 	}
-	if expected.S3Config.StorageClass != actual.S3Config.StorageClass {
-		return errors.New("fs S3 storage class mismatch")
+	if expected.FsConfig.S3Config.StorageClass != actual.FsConfig.S3Config.StorageClass {
+		return errors.New("S3 storage class mismatch")
 	}
-	if expected.S3Config.UploadPartSize != actual.S3Config.UploadPartSize {
-		return errors.New("fs S3 upload part size mismatch")
+	if expected.FsConfig.S3Config.UploadPartSize != actual.FsConfig.S3Config.UploadPartSize {
+		return errors.New("S3 upload part size mismatch")
 	}
-	if expected.S3Config.UploadConcurrency != actual.S3Config.UploadConcurrency {
-		return errors.New("fs S3 upload concurrency mismatch")
+	if expected.FsConfig.S3Config.UploadConcurrency != actual.FsConfig.S3Config.UploadConcurrency {
+		return errors.New("S3 upload concurrency mismatch")
 	}
-	if expected.S3Config.KeyPrefix != actual.S3Config.KeyPrefix &&
-		expected.S3Config.KeyPrefix+"/" != actual.S3Config.KeyPrefix {
-		return errors.New("fs S3 key prefix mismatch")
+	if expected.FsConfig.S3Config.KeyPrefix != actual.FsConfig.S3Config.KeyPrefix &&
+		expected.FsConfig.S3Config.KeyPrefix+"/" != actual.FsConfig.S3Config.KeyPrefix {
+		return errors.New("S3 key prefix mismatch")
 	}
 	return nil
 }
 
-func compareGCSConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error {
-	if expected.GCSConfig.Bucket != actual.GCSConfig.Bucket {
+func compareGCSConfig(expected *dataprovider.User, actual *dataprovider.User) error {
+	if expected.FsConfig.GCSConfig.Bucket != actual.FsConfig.GCSConfig.Bucket {
 		return errors.New("GCS bucket mismatch")
 	}
-	if expected.GCSConfig.StorageClass != actual.GCSConfig.StorageClass {
+	if expected.FsConfig.GCSConfig.StorageClass != actual.FsConfig.GCSConfig.StorageClass {
 		return errors.New("GCS storage class mismatch")
 	}
-	if expected.GCSConfig.KeyPrefix != actual.GCSConfig.KeyPrefix &&
-		expected.GCSConfig.KeyPrefix+"/" != actual.GCSConfig.KeyPrefix {
+	if expected.FsConfig.GCSConfig.KeyPrefix != actual.FsConfig.GCSConfig.KeyPrefix &&
+		expected.FsConfig.GCSConfig.KeyPrefix+"/" != actual.FsConfig.GCSConfig.KeyPrefix {
 		return errors.New("GCS key prefix mismatch")
 	}
-	if expected.GCSConfig.AutomaticCredentials != actual.GCSConfig.AutomaticCredentials {
+	if expected.FsConfig.GCSConfig.AutomaticCredentials != actual.FsConfig.GCSConfig.AutomaticCredentials {
 		return errors.New("GCS automatic credentials mismatch")
 	}
 	return nil
 }
 
-func compareSFTPFsConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error {
-	if expected.SFTPConfig.Endpoint != actual.SFTPConfig.Endpoint {
+func compareSFTPFsConfig(expected *dataprovider.User, actual *dataprovider.User) error {
+	if expected.FsConfig.SFTPConfig.Endpoint != actual.FsConfig.SFTPConfig.Endpoint {
 		return errors.New("SFTPFs endpoint mismatch")
 	}
-	if expected.SFTPConfig.Username != actual.SFTPConfig.Username {
+	if expected.FsConfig.SFTPConfig.Username != actual.FsConfig.SFTPConfig.Username {
 		return errors.New("SFTPFs username mismatch")
 	}
-	if expected.SFTPConfig.DisableCouncurrentReads != actual.SFTPConfig.DisableCouncurrentReads {
-		return errors.New("SFTPFs disable_concurrent_reads mismatch")
-	}
-	if expected.SFTPConfig.BufferSize != actual.SFTPConfig.BufferSize {
-		return errors.New("SFTPFs buffer_size mismatch")
-	}
-	if err := checkEncryptedSecret(expected.SFTPConfig.Password, actual.SFTPConfig.Password); err != nil {
+	if err := checkEncryptedSecret(expected.FsConfig.SFTPConfig.Password, actual.FsConfig.SFTPConfig.Password); err != nil {
 		return fmt.Errorf("SFTPFs password mismatch: %v", err)
 	}
-	if err := checkEncryptedSecret(expected.SFTPConfig.PrivateKey, actual.SFTPConfig.PrivateKey); err != nil {
+	if err := checkEncryptedSecret(expected.FsConfig.SFTPConfig.PrivateKey, actual.FsConfig.SFTPConfig.PrivateKey); err != nil {
 		return fmt.Errorf("SFTPFs private key mismatch: %v", err)
 	}
-	if expected.SFTPConfig.Prefix != actual.SFTPConfig.Prefix {
-		if expected.SFTPConfig.Prefix != "" && actual.SFTPConfig.Prefix != "/" {
+	if expected.FsConfig.SFTPConfig.Prefix != actual.FsConfig.SFTPConfig.Prefix {
+		if expected.FsConfig.SFTPConfig.Prefix != "" && actual.FsConfig.SFTPConfig.Prefix != "/" {
 			return errors.New("SFTPFs prefix mismatch")
 		}
 	}
-	if len(expected.SFTPConfig.Fingerprints) != len(actual.SFTPConfig.Fingerprints) {
+	if len(expected.FsConfig.SFTPConfig.Fingerprints) != len(actual.FsConfig.SFTPConfig.Fingerprints) {
 		return errors.New("SFTPFs fingerprints mismatch")
 	}
-	for _, value := range actual.SFTPConfig.Fingerprints {
-		if !utils.IsStringInSlice(value, expected.SFTPConfig.Fingerprints) {
+	for _, value := range actual.FsConfig.SFTPConfig.Fingerprints {
+		if !utils.IsStringInSlice(value, expected.FsConfig.SFTPConfig.Fingerprints) {
 			return errors.New("SFTPFs fingerprints mismatch")
 		}
 	}
 	return nil
 }
 
-func compareAzBlobConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error {
-	if expected.AzBlobConfig.Container != actual.AzBlobConfig.Container {
-		return errors.New("azure Blob container mismatch")
+func compareAzBlobConfig(expected *dataprovider.User, actual *dataprovider.User) error {
+	if expected.FsConfig.AzBlobConfig.Container != actual.FsConfig.AzBlobConfig.Container {
+		return errors.New("Azure Blob container mismatch")
 	}
-	if expected.AzBlobConfig.AccountName != actual.AzBlobConfig.AccountName {
-		return errors.New("azure Blob account name mismatch")
+	if expected.FsConfig.AzBlobConfig.AccountName != actual.FsConfig.AzBlobConfig.AccountName {
+		return errors.New("Azure Blob account name mismatch")
 	}
-	if err := checkEncryptedSecret(expected.AzBlobConfig.AccountKey, actual.AzBlobConfig.AccountKey); err != nil {
-		return fmt.Errorf("azure Blob account key mismatch: %v", err)
+	if err := checkEncryptedSecret(expected.FsConfig.AzBlobConfig.AccountKey, actual.FsConfig.AzBlobConfig.AccountKey); err != nil {
+		return fmt.Errorf("Azure Blob account key mismatch: %v", err)
 	}
-	if expected.AzBlobConfig.Endpoint != actual.AzBlobConfig.Endpoint {
-		return errors.New("azure Blob endpoint mismatch")
+	if expected.FsConfig.AzBlobConfig.Endpoint != actual.FsConfig.AzBlobConfig.Endpoint {
+		return errors.New("Azure Blob endpoint mismatch")
 	}
-	if expected.AzBlobConfig.SASURL != actual.AzBlobConfig.SASURL {
-		return errors.New("azure Blob SASL URL mismatch")
+	if expected.FsConfig.AzBlobConfig.SASURL != actual.FsConfig.AzBlobConfig.SASURL {
+		return errors.New("Azure Blob SASL URL mismatch")
 	}
-	if expected.AzBlobConfig.UploadPartSize != actual.AzBlobConfig.UploadPartSize {
-		return errors.New("azure Blob upload part size mismatch")
+	if expected.FsConfig.AzBlobConfig.UploadPartSize != actual.FsConfig.AzBlobConfig.UploadPartSize {
+		return errors.New("Azure Blob upload part size mismatch")
 	}
-	if expected.AzBlobConfig.UploadConcurrency != actual.AzBlobConfig.UploadConcurrency {
-		return errors.New("azure Blob upload concurrency mismatch")
+	if expected.FsConfig.AzBlobConfig.UploadConcurrency != actual.FsConfig.AzBlobConfig.UploadConcurrency {
+		return errors.New("Azure Blob upload concurrency mismatch")
 	}
-	if expected.AzBlobConfig.KeyPrefix != actual.AzBlobConfig.KeyPrefix &&
-		expected.AzBlobConfig.KeyPrefix+"/" != actual.AzBlobConfig.KeyPrefix {
-		return errors.New("azure Blob key prefix mismatch")
+	if expected.FsConfig.AzBlobConfig.KeyPrefix != actual.FsConfig.AzBlobConfig.KeyPrefix &&
+		expected.FsConfig.AzBlobConfig.KeyPrefix+"/" != actual.FsConfig.AzBlobConfig.KeyPrefix {
+		return errors.New("Azure Blob key prefix mismatch")
 	}
-	if expected.AzBlobConfig.UseEmulator != actual.AzBlobConfig.UseEmulator {
-		return errors.New("azure Blob use emulator mismatch")
+	if expected.FsConfig.AzBlobConfig.UseEmulator != actual.FsConfig.AzBlobConfig.UseEmulator {
+		return errors.New("Azure Blob use emulator mismatch")
 	}
-	if expected.AzBlobConfig.AccessTier != actual.AzBlobConfig.AccessTier {
-		return errors.New("azure Blob access tier mismatch")
+	if expected.FsConfig.AzBlobConfig.AccessTier != actual.FsConfig.AzBlobConfig.AccessTier {
+		return errors.New("Azure Blob access tier mismatch")
 	}
 	return nil
 }
@@ -1147,63 +1136,41 @@ func checkEncryptedSecret(expected, actual *kms.Secret) error {
 	return nil
 }
 
-func compareUserFilterSubStructs(expected *dataprovider.User, actual *dataprovider.User) error {
+func compareUserFilters(expected *dataprovider.User, actual *dataprovider.User) error {
+	if len(expected.Filters.AllowedIP) != len(actual.Filters.AllowedIP) {
+		return errors.New("AllowedIP mismatch")
+	}
+	if len(expected.Filters.DeniedIP) != len(actual.Filters.DeniedIP) {
+		return errors.New("DeniedIP mismatch")
+	}
+	if len(expected.Filters.DeniedLoginMethods) != len(actual.Filters.DeniedLoginMethods) {
+		return errors.New("Denied login methods mismatch")
+	}
+	if len(expected.Filters.DeniedProtocols) != len(actual.Filters.DeniedProtocols) {
+		return errors.New("Denied protocols mismatch")
+	}
+	if expected.Filters.MaxUploadFileSize != actual.Filters.MaxUploadFileSize {
+		return errors.New("Max upload file size mismatch")
+	}
 	for _, IPMask := range expected.Filters.AllowedIP {
 		if !utils.IsStringInSlice(IPMask, actual.Filters.AllowedIP) {
-			return errors.New("allowed IP contents mismatch")
+			return errors.New("AllowedIP contents mismatch")
 		}
 	}
 	for _, IPMask := range expected.Filters.DeniedIP {
 		if !utils.IsStringInSlice(IPMask, actual.Filters.DeniedIP) {
-			return errors.New("denied IP contents mismatch")
+			return errors.New("DeniedIP contents mismatch")
 		}
 	}
 	for _, method := range expected.Filters.DeniedLoginMethods {
 		if !utils.IsStringInSlice(method, actual.Filters.DeniedLoginMethods) {
-			return errors.New("denied login methods contents mismatch")
+			return errors.New("Denied login methods contents mismatch")
 		}
 	}
 	for _, protocol := range expected.Filters.DeniedProtocols {
 		if !utils.IsStringInSlice(protocol, actual.Filters.DeniedProtocols) {
-			return errors.New("denied protocols contents mismatch")
+			return errors.New("Denied protocols contents mismatch")
 		}
-	}
-	if expected.Filters.Hooks.ExternalAuthDisabled != actual.Filters.Hooks.ExternalAuthDisabled {
-		return errors.New("external_auth_disabled hook mismatch")
-	}
-	if expected.Filters.Hooks.PreLoginDisabled != actual.Filters.Hooks.PreLoginDisabled {
-		return errors.New("pre_login_disabled hook mismatch")
-	}
-	if expected.Filters.Hooks.CheckPasswordDisabled != actual.Filters.Hooks.CheckPasswordDisabled {
-		return errors.New("check_password_disabled hook mismatch")
-	}
-	if expected.Filters.DisableFsChecks != actual.Filters.DisableFsChecks {
-		return errors.New("disable_fs_checks mismatch")
-	}
-	return nil
-}
-
-func compareUserFilters(expected *dataprovider.User, actual *dataprovider.User) error {
-	if len(expected.Filters.AllowedIP) != len(actual.Filters.AllowedIP) {
-		return errors.New("allowed IP mismatch")
-	}
-	if len(expected.Filters.DeniedIP) != len(actual.Filters.DeniedIP) {
-		return errors.New("denied IP mismatch")
-	}
-	if len(expected.Filters.DeniedLoginMethods) != len(actual.Filters.DeniedLoginMethods) {
-		return errors.New("denied login methods mismatch")
-	}
-	if len(expected.Filters.DeniedProtocols) != len(actual.Filters.DeniedProtocols) {
-		return errors.New("denied protocols mismatch")
-	}
-	if expected.Filters.MaxUploadFileSize != actual.Filters.MaxUploadFileSize {
-		return errors.New("max upload file size mismatch")
-	}
-	if expected.Filters.TLSUsername != actual.Filters.TLSUsername {
-		return errors.New("TLSUsername mismatch")
-	}
-	if err := compareUserFilterSubStructs(expected, actual); err != nil {
-		return err
 	}
 	if err := compareUserFileExtensionsFilters(expected, actual); err != nil {
 		return err
@@ -1269,10 +1236,10 @@ func compareUserFileExtensionsFilters(expected *dataprovider.User, actual *datap
 
 func compareEqualsUserFields(expected *dataprovider.User, actual *dataprovider.User) error {
 	if expected.Username != actual.Username {
-		return errors.New("username mismatch")
+		return errors.New("Username mismatch")
 	}
 	if expected.HomeDir != actual.HomeDir {
-		return errors.New("home dir mismatch")
+		return errors.New("HomeDir mismatch")
 	}
 	if expected.UID != actual.UID {
 		return errors.New("UID mismatch")
@@ -1290,7 +1257,7 @@ func compareEqualsUserFields(expected *dataprovider.User, actual *dataprovider.U
 		return errors.New("QuotaFiles mismatch")
 	}
 	if len(expected.Permissions) != len(actual.Permissions) {
-		return errors.New("permissions mismatch")
+		return errors.New("Permissions mismatch")
 	}
 	if expected.UploadBandwidth != actual.UploadBandwidth {
 		return errors.New("UploadBandwidth mismatch")
@@ -1299,16 +1266,13 @@ func compareEqualsUserFields(expected *dataprovider.User, actual *dataprovider.U
 		return errors.New("DownloadBandwidth mismatch")
 	}
 	if expected.Status != actual.Status {
-		return errors.New("status mismatch")
+		return errors.New("Status mismatch")
 	}
 	if expected.ExpirationDate != actual.ExpirationDate {
 		return errors.New("ExpirationDate mismatch")
 	}
 	if expected.AdditionalInfo != actual.AdditionalInfo {
 		return errors.New("AdditionalInfo mismatch")
-	}
-	if expected.Description != actual.Description {
-		return errors.New("description mismatch")
 	}
 	return nil
 }

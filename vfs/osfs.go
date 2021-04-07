@@ -15,6 +15,7 @@ import (
 	"github.com/rs/xid"
 
 	"github.com/drakkan/sftpgo/logger"
+	"github.com/drakkan/sftpgo/utils"
 )
 
 const (
@@ -24,20 +25,19 @@ const (
 
 // OsFs is a Fs implementation that uses functions provided by the os package.
 type OsFs struct {
-	name         string
-	connectionID string
-	rootDir      string
-	// if not empty this fs is mouted as virtual folder in the specified path
-	mountPath string
+	name           string
+	connectionID   string
+	rootDir        string
+	virtualFolders []VirtualFolder
 }
 
 // NewOsFs returns an OsFs object that allows to interact with local Os filesystem
-func NewOsFs(connectionID, rootDir, mountPath string) Fs {
+func NewOsFs(connectionID, rootDir string, virtualFolders []VirtualFolder) Fs {
 	return &OsFs{
-		name:         osFsName,
-		connectionID: connectionID,
-		rootDir:      rootDir,
-		mountPath:    mountPath,
+		name:           osFsName,
+		connectionID:   connectionID,
+		rootDir:        rootDir,
+		virtualFolders: virtualFolders,
 	}
 }
 
@@ -53,12 +53,32 @@ func (fs *OsFs) ConnectionID() string {
 
 // Stat returns a FileInfo describing the named file
 func (fs *OsFs) Stat(name string) (os.FileInfo, error) {
-	return os.Stat(name)
+	fi, err := os.Stat(name)
+	if err != nil {
+		return fi, err
+	}
+	for _, v := range fs.virtualFolders {
+		if v.MappedPath == name {
+			info := NewFileInfo(v.VirtualPath, true, fi.Size(), fi.ModTime(), false)
+			return info, nil
+		}
+	}
+	return fi, err
 }
 
 // Lstat returns a FileInfo describing the named file
 func (fs *OsFs) Lstat(name string) (os.FileInfo, error) {
-	return os.Lstat(name)
+	fi, err := os.Lstat(name)
+	if err != nil {
+		return fi, err
+	}
+	for _, v := range fs.virtualFolders {
+		if v.MappedPath == name {
+			info := NewFileInfo(v.VirtualPath, true, fi.Size(), fi.ModTime(), false)
+			return info, nil
+		}
+	}
+	return fi, err
 }
 
 // Open opens the named file for reading
@@ -92,13 +112,6 @@ func (*OsFs) Remove(name string, isDir bool) error {
 // Mkdir creates a new directory with the specified name and default permissions
 func (*OsFs) Mkdir(name string) error {
 	return os.Mkdir(name, os.ModePerm)
-}
-
-// MkdirAll creates a directory named path, along with any necessary parents,
-// and returns nil, or else returns an error.
-// If path is already a directory, MkdirAll does nothing and returns nil.
-func (fs *OsFs) MkdirAll(name string, uid int, gid int) error {
-	return fs.createMissingDirs(name, uid, gid)
 }
 
 // Symlink creates source as a symbolic link to target.
@@ -151,7 +164,7 @@ func (*OsFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 	return list, nil
 }
 
-// IsUploadResumeSupported returns true if resuming uploads is supported
+// IsUploadResumeSupported returns true if upload resume is supported
 func (*OsFs) IsUploadResumeSupported() bool {
 	return true
 }
@@ -192,13 +205,45 @@ func (fs *OsFs) CheckRootPath(username string, uid int, gid int) bool {
 			SetPathPermissions(fs, fs.rootDir, uid, gid)
 		}
 	}
-	return err == nil
+	// create any missing dirs to the defined virtual dirs
+	for _, v := range fs.virtualFolders {
+		p := filepath.Clean(filepath.Join(fs.rootDir, v.VirtualPath))
+		err = fs.createMissingDirs(p, uid, gid)
+		if err != nil {
+			return false
+		}
+		if _, err = fs.Stat(v.MappedPath); fs.IsNotExist(err) {
+			err = os.MkdirAll(v.MappedPath, os.ModePerm)
+			fsLog(fs, logger.LevelDebug, "virtual directory %#v for user %#v does not exist, try to create, mkdir error: %v",
+				v.MappedPath, username, err)
+			if err == nil {
+				SetPathPermissions(fs, fs.rootDir, uid, gid)
+			}
+		}
+	}
+	return (err == nil)
 }
 
 // ScanRootDirContents returns the number of files contained in the root
 // directory and their size
 func (fs *OsFs) ScanRootDirContents() (int, int64, error) {
-	return fs.GetDirSize(fs.rootDir)
+	numFiles, size, err := fs.GetDirSize(fs.rootDir)
+	for _, v := range fs.virtualFolders {
+		if !v.IsIncludedInUserQuota() {
+			continue
+		}
+		num, s, err := fs.GetDirSize(v.MappedPath)
+		if err != nil {
+			if fs.IsNotExist(err) {
+				fsLog(fs, logger.LevelWarn, "unable to scan contents for non-existent mapped path: %#v", v.MappedPath)
+				continue
+			}
+			return numFiles, size, err
+		}
+		numFiles += num
+		size += s
+	}
+	return numFiles, size, err
 }
 
 // GetAtomicUploadPath returns the path to use for an atomic upload
@@ -209,13 +254,18 @@ func (*OsFs) GetAtomicUploadPath(name string) string {
 }
 
 // GetRelativePath returns the path for a file relative to the user's home dir.
-// This is the path as seen by SFTPGo users
+// This is the path as seen by SFTP users
 func (fs *OsFs) GetRelativePath(name string) string {
+	basePath := fs.rootDir
 	virtualPath := "/"
-	if fs.mountPath != "" {
-		virtualPath = fs.mountPath
+	for _, v := range fs.virtualFolders {
+		if strings.HasPrefix(name, v.MappedPath+string(os.PathSeparator)) ||
+			filepath.Clean(name) == v.MappedPath {
+			basePath = v.MappedPath
+			virtualPath = v.VirtualPath
+		}
 	}
-	rel, err := filepath.Rel(fs.rootDir, filepath.Clean(name))
+	rel, err := filepath.Rel(basePath, filepath.Clean(name))
 	if err != nil {
 		return ""
 	}
@@ -237,31 +287,28 @@ func (*OsFs) Join(elem ...string) string {
 }
 
 // ResolvePath returns the matching filesystem path for the specified sftp path
-func (fs *OsFs) ResolvePath(virtualPath string) (string, error) {
+func (fs *OsFs) ResolvePath(sftpPath string) (string, error) {
 	if !filepath.IsAbs(fs.rootDir) {
-		return "", fmt.Errorf("invalid root path: %v", fs.rootDir)
+		return "", fmt.Errorf("Invalid root path: %v", fs.rootDir)
 	}
-	if fs.mountPath != "" {
-		virtualPath = strings.TrimPrefix(virtualPath, fs.mountPath)
-	}
-	r := filepath.Clean(filepath.Join(fs.rootDir, virtualPath))
+	basePath, r := fs.GetFsPaths(sftpPath)
 	p, err := filepath.EvalSymlinks(r)
 	if err != nil && !os.IsNotExist(err) {
 		return "", err
 	} else if os.IsNotExist(err) {
 		// The requested path doesn't exist, so at this point we need to iterate up the
 		// path chain until we hit a directory that _does_ exist and can be validated.
-		_, err = fs.findFirstExistingDir(r)
+		_, err = fs.findFirstExistingDir(r, basePath)
 		if err != nil {
 			fsLog(fs, logger.LevelWarn, "error resolving non-existent path %#v", err)
 		}
 		return r, err
 	}
 
-	err = fs.isSubDir(p)
+	err = fs.isSubDir(p, basePath)
 	if err != nil {
 		fsLog(fs, logger.LevelWarn, "Invalid path resolution, dir %#v original path %#v resolved %#v err: %v",
-			p, virtualPath, r, err)
+			p, sftpPath, r, err)
 	}
 	return r, err
 }
@@ -292,9 +339,43 @@ func (*OsFs) HasVirtualFolders() bool {
 	return false
 }
 
-func (fs *OsFs) findNonexistentDirs(filePath string) ([]string, error) {
+// GetFsPaths returns the base path and filesystem path for the given sftpPath.
+// base path is the root dir or matching the virtual folder dir for the sftpPath.
+// file path is the filesystem path matching the sftpPath
+func (fs *OsFs) GetFsPaths(sftpPath string) (string, string) {
+	basePath := fs.rootDir
+	virtualPath, mappedPath := fs.getMappedFolderForPath(sftpPath)
+	if len(mappedPath) > 0 {
+		basePath = mappedPath
+		sftpPath = strings.TrimPrefix(utils.CleanPath(sftpPath), virtualPath)
+	}
+	r := filepath.Clean(filepath.Join(basePath, sftpPath))
+	return basePath, r
+}
+
+// returns the path for the mapped folders or an empty string
+func (fs *OsFs) getMappedFolderForPath(p string) (virtualPath, mappedPath string) {
+	if len(fs.virtualFolders) == 0 {
+		return
+	}
+	dirsForPath := utils.GetDirsForSFTPPath(p)
+	// dirsForPath contains all the dirs for a given path in reverse order
+	// for example if the path is: /1/2/3/4 it contains:
+	// [ "/1/2/3/4", "/1/2/3", "/1/2", "/1", "/" ]
+	// so the first match is the one we are interested to
+	for _, val := range dirsForPath {
+		for _, v := range fs.virtualFolders {
+			if val == v.VirtualPath {
+				return v.VirtualPath, v.MappedPath
+			}
+		}
+	}
+	return
+}
+
+func (fs *OsFs) findNonexistentDirs(path, rootPath string) ([]string, error) {
 	results := []string{}
-	cleanPath := filepath.Clean(filePath)
+	cleanPath := filepath.Clean(path)
 	parent := filepath.Dir(cleanPath)
 	_, err := os.Stat(parent)
 
@@ -310,15 +391,15 @@ func (fs *OsFs) findNonexistentDirs(filePath string) ([]string, error) {
 	if err != nil {
 		return results, err
 	}
-	err = fs.isSubDir(p)
+	err = fs.isSubDir(p, rootPath)
 	if err != nil {
 		fsLog(fs, logger.LevelWarn, "error finding non existing dir: %v", err)
 	}
 	return results, err
 }
 
-func (fs *OsFs) findFirstExistingDir(path string) (string, error) {
-	results, err := fs.findNonexistentDirs(path)
+func (fs *OsFs) findFirstExistingDir(path, rootPath string) (string, error) {
+	results, err := fs.findNonexistentDirs(path, rootPath)
 	if err != nil {
 		fsLog(fs, logger.LevelWarn, "unable to find non existent dirs: %v", err)
 		return "", err
@@ -328,7 +409,7 @@ func (fs *OsFs) findFirstExistingDir(path string) (string, error) {
 		lastMissingDir := results[len(results)-1]
 		parent = filepath.Dir(lastMissingDir)
 	} else {
-		parent = fs.rootDir
+		parent = rootPath
 	}
 	p, err := filepath.EvalSymlinks(parent)
 	if err != nil {
@@ -341,15 +422,15 @@ func (fs *OsFs) findFirstExistingDir(path string) (string, error) {
 	if !fileInfo.IsDir() {
 		return "", fmt.Errorf("resolved path is not a dir: %#v", p)
 	}
-	err = fs.isSubDir(p)
+	err = fs.isSubDir(p, rootPath)
 	return p, err
 }
 
-func (fs *OsFs) isSubDir(sub string) error {
-	// fs.rootDir must exist and it is already a validated absolute path
-	parent, err := filepath.EvalSymlinks(fs.rootDir)
+func (fs *OsFs) isSubDir(sub, rootPath string) error {
+	// rootPath must exist and it is already a validated absolute path
+	parent, err := filepath.EvalSymlinks(rootPath)
 	if err != nil {
-		fsLog(fs, logger.LevelWarn, "invalid root path %#v: %v", fs.rootDir, err)
+		fsLog(fs, logger.LevelWarn, "invalid root path %#v: %v", rootPath, err)
 		return err
 	}
 	if parent == sub {
@@ -367,7 +448,7 @@ func (fs *OsFs) isSubDir(sub string) error {
 }
 
 func (fs *OsFs) createMissingDirs(filePath string, uid, gid int) error {
-	dirsToCreate, err := fs.findNonexistentDirs(filePath)
+	dirsToCreate, err := fs.findNonexistentDirs(filePath, fs.rootDir)
 	if err != nil {
 		return err
 	}

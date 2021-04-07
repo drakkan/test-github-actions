@@ -159,7 +159,7 @@ func TestEmptyFile(t *testing.T) {
 }
 
 func TestUploadResumeCryptFs(t *testing.T) {
-	// resuming uploads is not supported
+	// upload resume is not supported
 	usePubKey := true
 	u := getTestUserWithCryptFs(usePubKey)
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
@@ -478,7 +478,7 @@ func getEncryptedFileSize(size int64) (int64, error) {
 
 func getTestUserWithCryptFs(usePubKey bool) dataprovider.User {
 	u := getTestUser(usePubKey)
-	u.FsConfig.Provider = vfs.CryptedFilesystemProvider
+	u.FsConfig.Provider = dataprovider.CryptedFilesystemProvider
 	u.FsConfig.CryptConfig.Passphrase = kms.NewPlainSecret(testPassphrase)
 	return u
 }

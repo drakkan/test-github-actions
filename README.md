@@ -13,7 +13,7 @@ Several storage backends are supported: local filesystem, encrypted local filesy
 ## Features
 
 - SFTPGo uses virtual accounts stored inside a "data provider".
-- SQLite, MySQL, PostgreSQL, Bolt (key/value store in pure Go), CockroachDB and in-memory data providers are supported.
+- SQLite, MySQL, PostgreSQL, bbolt (key/value store in pure Go) and in-memory data providers are supported.
 - Each local account is chrooted in its home directory, for cloud-based accounts you can restrict access to a certain base path.
 - Public key and password authentication. Multiple public keys per user are supported.
 - SSH user [certificate authentication](https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?rev=1.8).
@@ -30,7 +30,7 @@ Several storage backends are supported: local filesystem, encrypted local filesy
 - Per user files/folders ownership mapping: you can map all the users to the system account that runs SFTPGo (all platforms are supported) or you can run SFTPGo as root user and map each user or group of users to a different system account (\*NIX only).
 - Per user IP filters are supported: login can be restricted to specific ranges of IP addresses or to a specific IP address.
 - Per user and per directory shell like patterns filters are supported: files can be allowed or denied based on shell like patterns.
-- Virtual folders are supported: directories outside the user home directory or based on a different storage provider can be exposed as virtual folders.
+- Virtual folders are supported: directories outside the user home directory can be exposed as virtual folders.
 - Configurable custom commands and/or HTTP notifications on file upload, download, pre-delete, delete, rename, on SSH commands and on user add, update and delete.
 - Automatically terminating idle connections.
 - Automatic blocklist management is supported using the built-in [defender](./docs/defender.md).
@@ -59,8 +59,8 @@ SFTPGo is developed and tested on Linux. After each commit, the code is automati
 
 ## Requirements
 
-- Go as build only dependency. We support the Go version(s) used in [continuous integration workflows](./tree/main/.github/workflows).
-- A suitable SQL server to use as data provider: PostgreSQL 9.4+ or MySQL 5.6+ or SQLite 3.x or CockroachDB stable.
+- Go 1.15 or higher as build only dependency.
+- A suitable SQL server to use as data provider: PostgreSQL 9.4+ or MySQL 5.6+ or SQLite 3.x.
 - The SQL server is optional: you can choose to use an embedded bolt database as key/value store or an in memory data provider.
 
 ## Installation
@@ -100,7 +100,7 @@ Check out [this documentation](./docs/service.md) if you want to run SFTPGo as a
 
 Before starting the SFTPGo server please ensure that the configured data provider is properly initialized/updated.
 
-For PostgreSQL, MySQL and CockroachDB providers, you need to create the configured database. For SQLite, the configured database will be automatically created at startup. Memory and bolt data providers do not require an initialization but they could require an update to the existing data after upgrading SFTPGo.
+For PostgreSQL and MySQL providers, you need to create the configured database. For SQLite, the configured database will be automatically created at startup. Memory and bolt data providers do not require an initialization but they could require an update to the existing data after upgrading SFTPGo.
 
 SFTPGo will attempt to automatically detect if the data provider is initialized/updated and if not, will attempt to initialize/ update it on startup as needed.
 
@@ -120,41 +120,26 @@ sftpgo initprovider --help
 
 You can disable automatic data provider checks/updates at startup by setting the `update_mode` configuration key to `1`.
 
-## Upgrading
-
-SFTPGo supports upgrading from the previous release branch to the current one.
-Some examples for supported upgrade paths are:
-
-- from 1.2.x to 2.0.x
-- from 2.0.x to 2.1.x and so on.
-
-For supported upgrade paths, the data and schema are migrated automatically, alternately you can use the `initprovider` command.
-
-So if, for example, you want to upgrade from a version before 1.2.x to 2.0.x, you must first install version 1.2.x, update the data provider and finally install the version 2.0.x. It is recommended to always install the latest available minor version, ie do not install 1.2.0 if 1.2.2 is available.
-
-Loading data from a provider independent JSON dump is supported from the previous release branch to the current one too. After updating SFTPGo it is advisable to load the old dump and regenerate it from the new version.
-
-## Downgrading
-
 If for some reason you want to downgrade SFTPGo, you may need to downgrade your data provider schema and data as well. You can use the `revertprovider` command for this task.
 
-As for upgrading, SFTPGo supports downgrading from the previous release branch to the current one.
+We support the follwing schema versions:
 
-So, if you plan to downgrade from 2.0.x to 1.2.x, before uninstalling 2.0.x version, you can prepare your data provider executing the following command from the configuration directory:
+- `8`, this is the latest version
+- `4`, this is the schema for v1.0.0-v1.2.x
+
+So, if you plan to downgrade from 2.0.x to 1.2.x, you can prepare your data provider executing the following command from the configuration directory:
 
 ```shell
 sftpgo revertprovider --to-version 4
 ```
 
-Take a look at the CLI usage to see the supported parameter for the `--to-version` argument and to learn how to specify a different configuration file:
+Take a look at the CLI usage to learn how to specify a different configuration file:
 
-```shell
+```bash
 sftpgo revertprovider --help
 ```
 
 The `revertprovider` command is not supported for the memory provider.
-
-Please note that we only support the current release branch and the current main branch, if you find a bug it is better to report it rather than downgrading to an older unsupported version.
 
 ## Users and folders management
 
@@ -164,8 +149,6 @@ After starting SFTPGo you can manage users and folders using:
 - the [REST API](./docs/rest-api.md)
 
 To support embedded data providers like `bolt` and `SQLite` we can't have a CLI that directly write users and folders to the data provider, we always have to use the REST API.
-
-Full details for users, folders, admins and other resources are documented in the [OpenAPI](/httpd/schema/openapi.yaml) schema. If you want to render the schema without importing it manually, you can explore it on [Stoplight](https://sftpgo.stoplight.io/docs/sftpgo/openapi.yaml).
 
 ## Tutorials
 
@@ -196,7 +179,7 @@ More information about custom actions can be found [here](./docs/custom-actions.
 
 ## Virtual folders
 
-Directories outside the user home directory or based on a different storage provider can be exposed as virtual folders, more information [here](./docs/virtual-folders.md).
+Directories outside the user home directory can be exposed as virtual folders, more information [here](./docs/virtual-folders.md).
 
 ## Other hooks
 

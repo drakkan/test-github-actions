@@ -18,7 +18,6 @@ import (
 	"github.com/drakkan/sftpgo/httpclient"
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/utils"
-	"github.com/drakkan/sftpgo/vfs"
 )
 
 var (
@@ -80,12 +79,12 @@ func newActionNotification(
 	var bucket, endpoint string
 	status := 1
 
-	if user.FsConfig.Provider == vfs.S3FilesystemProvider {
+	if user.FsConfig.Provider == dataprovider.S3FilesystemProvider {
 		bucket = user.FsConfig.S3Config.Bucket
 		endpoint = user.FsConfig.S3Config.Endpoint
-	} else if user.FsConfig.Provider == vfs.GCSFilesystemProvider {
+	} else if user.FsConfig.Provider == dataprovider.GCSFilesystemProvider {
 		bucket = user.FsConfig.GCSConfig.Bucket
-	} else if user.FsConfig.Provider == vfs.AzureBlobFilesystemProvider {
+	} else if user.FsConfig.Provider == dataprovider.AzureBlobFilesystemProvider {
 		bucket = user.FsConfig.AzBlobConfig.Container
 		if user.FsConfig.AzBlobConfig.SASURL != "" {
 			endpoint = user.FsConfig.AzBlobConfig.SASURL

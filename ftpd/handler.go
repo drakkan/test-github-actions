@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	errNotImplemented   = errors.New("not implemented")
+	errNotImplemented   = errors.New("Not implemented")
 	errCOMBNotSupported = errors.New("COMB is not supported for this filesystem")
 )
 
@@ -63,7 +63,11 @@ func (c *Connection) Create(name string) (afero.File, error) {
 func (c *Connection) Mkdir(name string, perm os.FileMode) error {
 	c.UpdateLastActivity()
 
-	return c.CreateDir(name)
+	p, err := c.Fs.ResolvePath(name)
+	if err != nil {
+		return c.GetFsError(err)
+	}
+	return c.CreateDir(p, name)
 }
 
 // MkdirAll is not implemented, we don't need it
@@ -86,22 +90,22 @@ func (c *Connection) OpenFile(name string, flag int, perm os.FileMode) (afero.Fi
 func (c *Connection) Remove(name string) error {
 	c.UpdateLastActivity()
 
-	fs, p, err := c.GetFsAndResolvedPath(name)
+	p, err := c.Fs.ResolvePath(name)
 	if err != nil {
-		return err
+		return c.GetFsError(err)
 	}
 
 	var fi os.FileInfo
-	if fi, err = fs.Lstat(p); err != nil {
+	if fi, err = c.Fs.Lstat(p); err != nil {
 		c.Log(logger.LevelWarn, "failed to remove a file %#v: stat error: %+v", p, err)
-		return c.GetFsError(fs, err)
+		return c.GetFsError(err)
 	}
 
 	if fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 {
 		c.Log(logger.LevelDebug, "cannot remove %#v is not a file/symlink", p)
 		return c.GetGenericError(nil)
 	}
-	return c.RemoveFile(fs, p, name, fi)
+	return c.RemoveFile(p, name, fi)
 }
 
 // RemoveAll is not implemented, we don't need it
@@ -113,10 +117,20 @@ func (c *Connection) RemoveAll(path string) error {
 func (c *Connection) Rename(oldname, newname string) error {
 	c.UpdateLastActivity()
 
-	if err := c.BaseConnection.Rename(oldname, newname); err != nil {
+	p, err := c.Fs.ResolvePath(oldname)
+	if err != nil {
+		return c.GetFsError(err)
+	}
+	t, err := c.Fs.ResolvePath(newname)
+	if err != nil {
+		return c.GetFsError(err)
+	}
+
+	if err = c.BaseConnection.Rename(p, t, oldname, newname); err != nil {
 		return err
 	}
 
+	vfs.SetPathPermissions(c.Fs, t, c.User.GetUID(), c.User.GetGID())
 	return nil
 }
 
@@ -129,10 +143,14 @@ func (c *Connection) Stat(name string) (os.FileInfo, error) {
 		return nil, c.GetPermissionDeniedError()
 	}
 
-	fi, err := c.DoStat(name, 0)
+	p, err := c.Fs.ResolvePath(name)
 	if err != nil {
-		c.Log(logger.LevelDebug, "error running stat on path %#v: %+v", name, err)
-		return nil, err
+		return nil, c.GetFsError(err)
+	}
+	fi, err := c.DoStat(p, 0)
+	if err != nil {
+		c.Log(logger.LevelDebug, "error running stat on path %#v: %+v", p, err)
+		return nil, c.GetFsError(err)
 	}
 	return fi, nil
 }
@@ -164,23 +182,31 @@ func (c *Connection) Chown(name string, uid, gid int) error {
 func (c *Connection) Chmod(name string, mode os.FileMode) error {
 	c.UpdateLastActivity()
 
+	p, err := c.Fs.ResolvePath(name)
+	if err != nil {
+		return c.GetFsError(err)
+	}
 	attrs := common.StatAttributes{
 		Flags: common.StatAttrPerms,
 		Mode:  mode,
 	}
-	return c.SetStat(name, &attrs)
+	return c.SetStat(p, name, &attrs)
 }
 
 // Chtimes changes the access and modification times of the named file
 func (c *Connection) Chtimes(name string, atime time.Time, mtime time.Time) error {
 	c.UpdateLastActivity()
 
+	p, err := c.Fs.ResolvePath(name)
+	if err != nil {
+		return c.GetFsError(err)
+	}
 	attrs := common.StatAttributes{
 		Flags: common.StatAttrTimes,
 		Atime: atime,
 		Mtime: mtime,
 	}
-	return c.SetStat(name, &attrs)
+	return c.SetStat(p, name, &attrs)
 }
 
 // GetAvailableSpace implements ClientDriverExtensionAvailableSpace interface
@@ -198,14 +224,14 @@ func (c *Connection) GetAvailableSpace(dirName string) (int64, error) {
 			return c.User.Filters.MaxUploadFileSize, nil
 		}
 
-		fs, p, err := c.GetFsAndResolvedPath(dirName)
+		p, err := c.Fs.ResolvePath(dirName)
 		if err != nil {
-			return 0, err
+			return 0, c.GetFsError(err)
 		}
 
-		statVFS, err := fs.GetAvailableDiskSize(p)
+		statVFS, err := c.Fs.GetAvailableDiskSize(p)
 		if err != nil {
-			return 0, c.GetFsError(fs, err)
+			return 0, c.GetFsError(err)
 		}
 		return int64(statVFS.FreeSpace()), nil
 	}
@@ -255,43 +281,61 @@ func (c *Connection) AllocateSpace(size int) error {
 func (c *Connection) RemoveDir(name string) error {
 	c.UpdateLastActivity()
 
-	return c.BaseConnection.RemoveDir(name)
+	p, err := c.Fs.ResolvePath(name)
+	if err != nil {
+		return c.GetFsError(err)
+	}
+
+	return c.BaseConnection.RemoveDir(p, name)
 }
 
 // Symlink implements ClientDriverExtensionSymlink
 func (c *Connection) Symlink(oldname, newname string) error {
 	c.UpdateLastActivity()
 
-	return c.BaseConnection.CreateSymlink(oldname, newname)
+	p, err := c.Fs.ResolvePath(oldname)
+	if err != nil {
+		return c.GetFsError(err)
+	}
+	t, err := c.Fs.ResolvePath(newname)
+	if err != nil {
+		return c.GetFsError(err)
+	}
+
+	return c.BaseConnection.CreateSymlink(p, t, oldname, newname)
 }
 
 // ReadDir implements ClientDriverExtensionFilelist
 func (c *Connection) ReadDir(name string) ([]os.FileInfo, error) {
 	c.UpdateLastActivity()
 
-	return c.ListDir(name)
+	p, err := c.Fs.ResolvePath(name)
+	if err != nil {
+		return nil, c.GetFsError(err)
+	}
+	return c.ListDir(p, name)
 }
 
 // GetHandle implements ClientDriverExtentionFileTransfer
 func (c *Connection) GetHandle(name string, flags int, offset int64) (ftpserver.FileTransfer, error) {
 	c.UpdateLastActivity()
 
-	fs, p, err := c.GetFsAndResolvedPath(name)
+	p, err := c.Fs.ResolvePath(name)
 	if err != nil {
-		return nil, err
+		return nil, c.GetFsError(err)
 	}
 
-	if c.GetCommand() == "COMB" && !vfs.IsLocalOsFs(fs) {
+	if c.GetCommand() == "COMB" && !vfs.IsLocalOsFs(c.Fs) {
 		return nil, errCOMBNotSupported
 	}
 
 	if flags&os.O_WRONLY != 0 {
-		return c.uploadFile(fs, p, name, flags)
+		return c.uploadFile(p, name, flags)
 	}
-	return c.downloadFile(fs, p, name, offset)
+	return c.downloadFile(p, name, offset)
 }
 
-func (c *Connection) downloadFile(fs vfs.Fs, fsPath, ftpPath string, offset int64) (ftpserver.FileTransfer, error) {
+func (c *Connection) downloadFile(fsPath, ftpPath string, offset int64) (ftpserver.FileTransfer, error) {
 	if !c.User.HasPerm(dataprovider.PermDownload, path.Dir(ftpPath)) {
 		return nil, c.GetPermissionDeniedError()
 	}
@@ -301,41 +345,41 @@ func (c *Connection) downloadFile(fs vfs.Fs, fsPath, ftpPath string, offset int6
 		return nil, c.GetPermissionDeniedError()
 	}
 
-	file, r, cancelFn, err := fs.Open(fsPath, offset)
+	file, r, cancelFn, err := c.Fs.Open(fsPath, offset)
 	if err != nil {
 		c.Log(logger.LevelWarn, "could not open file %#v for reading: %+v", fsPath, err)
-		return nil, c.GetFsError(fs, err)
+		return nil, c.GetFsError(err)
 	}
 
 	baseTransfer := common.NewBaseTransfer(file, c.BaseConnection, cancelFn, fsPath, ftpPath, common.TransferDownload,
-		0, 0, 0, false, fs)
+		0, 0, 0, false, c.Fs)
 	t := newTransfer(baseTransfer, nil, r, offset)
 
 	return t, nil
 }
 
-func (c *Connection) uploadFile(fs vfs.Fs, fsPath, ftpPath string, flags int) (ftpserver.FileTransfer, error) {
+func (c *Connection) uploadFile(fsPath, ftpPath string, flags int) (ftpserver.FileTransfer, error) {
 	if !c.User.IsFileAllowed(ftpPath) {
 		c.Log(logger.LevelWarn, "writing file %#v is not allowed", ftpPath)
 		return nil, c.GetPermissionDeniedError()
 	}
 
 	filePath := fsPath
-	if common.Config.IsAtomicUploadEnabled() && fs.IsAtomicUploadSupported() {
-		filePath = fs.GetAtomicUploadPath(fsPath)
+	if common.Config.IsAtomicUploadEnabled() && c.Fs.IsAtomicUploadSupported() {
+		filePath = c.Fs.GetAtomicUploadPath(fsPath)
 	}
 
-	stat, statErr := fs.Lstat(fsPath)
-	if (statErr == nil && stat.Mode()&os.ModeSymlink != 0) || fs.IsNotExist(statErr) {
+	stat, statErr := c.Fs.Lstat(fsPath)
+	if (statErr == nil && stat.Mode()&os.ModeSymlink != 0) || c.Fs.IsNotExist(statErr) {
 		if !c.User.HasPerm(dataprovider.PermUpload, path.Dir(ftpPath)) {
 			return nil, c.GetPermissionDeniedError()
 		}
-		return c.handleFTPUploadToNewFile(fs, fsPath, filePath, ftpPath)
+		return c.handleFTPUploadToNewFile(fsPath, filePath, ftpPath)
 	}
 
 	if statErr != nil {
 		c.Log(logger.LevelError, "error performing file stat %#v: %+v", fsPath, statErr)
-		return nil, c.GetFsError(fs, statErr)
+		return nil, c.GetFsError(statErr)
 	}
 
 	// This happen if we upload a file that has the same name of an existing directory
@@ -348,34 +392,34 @@ func (c *Connection) uploadFile(fs vfs.Fs, fsPath, ftpPath string, flags int) (f
 		return nil, c.GetPermissionDeniedError()
 	}
 
-	return c.handleFTPUploadToExistingFile(fs, flags, fsPath, filePath, stat.Size(), ftpPath)
+	return c.handleFTPUploadToExistingFile(flags, fsPath, filePath, stat.Size(), ftpPath)
 }
 
-func (c *Connection) handleFTPUploadToNewFile(fs vfs.Fs, resolvedPath, filePath, requestPath string) (ftpserver.FileTransfer, error) {
+func (c *Connection) handleFTPUploadToNewFile(resolvedPath, filePath, requestPath string) (ftpserver.FileTransfer, error) {
 	quotaResult := c.HasSpace(true, false, requestPath)
 	if !quotaResult.HasSpace {
 		c.Log(logger.LevelInfo, "denying file write due to quota limits")
 		return nil, common.ErrQuotaExceeded
 	}
-	file, w, cancelFn, err := fs.Create(filePath, 0)
+	file, w, cancelFn, err := c.Fs.Create(filePath, 0)
 	if err != nil {
 		c.Log(logger.LevelWarn, "error creating file %#v: %+v", resolvedPath, err)
-		return nil, c.GetFsError(fs, err)
+		return nil, c.GetFsError(err)
 	}
 
-	vfs.SetPathPermissions(fs, filePath, c.User.GetUID(), c.User.GetGID())
+	vfs.SetPathPermissions(c.Fs, filePath, c.User.GetUID(), c.User.GetGID())
 
 	// we can get an error only for resume
-	maxWriteSize, _ := c.GetMaxWriteSize(quotaResult, false, 0, fs.IsUploadResumeSupported())
+	maxWriteSize, _ := c.GetMaxWriteSize(quotaResult, false, 0)
 
 	baseTransfer := common.NewBaseTransfer(file, c.BaseConnection, cancelFn, resolvedPath, requestPath,
-		common.TransferUpload, 0, 0, maxWriteSize, true, fs)
+		common.TransferUpload, 0, 0, maxWriteSize, true, c.Fs)
 	t := newTransfer(baseTransfer, w, nil, 0)
 
 	return t, nil
 }
 
-func (c *Connection) handleFTPUploadToExistingFile(fs vfs.Fs, flags int, resolvedPath, filePath string, fileSize int64,
+func (c *Connection) handleFTPUploadToExistingFile(flags int, resolvedPath, filePath string, fileSize int64,
 	requestPath string) (ftpserver.FileTransfer, error) {
 	var err error
 	quotaResult := c.HasSpace(false, false, requestPath)
@@ -392,38 +436,38 @@ func (c *Connection) handleFTPUploadToExistingFile(fs vfs.Fs, flags int, resolve
 	isResume := flags&os.O_TRUNC == 0
 	// if there is a size limit remaining size cannot be 0 here, since quotaResult.HasSpace
 	// will return false in this case and we deny the upload before
-	maxWriteSize, err := c.GetMaxWriteSize(quotaResult, isResume, fileSize, fs.IsUploadResumeSupported())
+	maxWriteSize, err := c.GetMaxWriteSize(quotaResult, isResume, fileSize)
 	if err != nil {
 		c.Log(logger.LevelDebug, "unable to get max write size: %v", err)
 		return nil, err
 	}
 
-	if common.Config.IsAtomicUploadEnabled() && fs.IsAtomicUploadSupported() {
-		err = fs.Rename(resolvedPath, filePath)
+	if common.Config.IsAtomicUploadEnabled() && c.Fs.IsAtomicUploadSupported() {
+		err = c.Fs.Rename(resolvedPath, filePath)
 		if err != nil {
 			c.Log(logger.LevelWarn, "error renaming existing file for atomic upload, source: %#v, dest: %#v, err: %+v",
 				resolvedPath, filePath, err)
-			return nil, c.GetFsError(fs, err)
+			return nil, c.GetFsError(err)
 		}
 	}
 
-	file, w, cancelFn, err := fs.Create(filePath, flags)
+	file, w, cancelFn, err := c.Fs.Create(filePath, flags)
 	if err != nil {
 		c.Log(logger.LevelWarn, "error opening existing file, flags: %v, source: %#v, err: %+v", flags, filePath, err)
-		return nil, c.GetFsError(fs, err)
+		return nil, c.GetFsError(err)
 	}
 
 	initialSize := int64(0)
 	if isResume {
-		c.Log(logger.LevelDebug, "resuming upload requested, file path: %#v initial size: %v", filePath, fileSize)
+		c.Log(logger.LevelDebug, "upload resume requested, file path: %#v initial size: %v", filePath, fileSize)
 		minWriteOffset = fileSize
 		initialSize = fileSize
-		if vfs.IsSFTPFs(fs) && fs.IsUploadResumeSupported() {
+		if vfs.IsSFTPFs(c.Fs) {
 			// we need this since we don't allow resume with wrong offset, we should fix this in pkg/sftp
-			file.Seek(initialSize, io.SeekStart) //nolint:errcheck // for sftp seek simply set the offset
+			file.Seek(initialSize, io.SeekStart) //nolint:errcheck // for sftp seek cannot file, it simply set the offset
 		}
 	} else {
-		if vfs.IsLocalOrSFTPFs(fs) {
+		if vfs.IsLocalOrSFTPFs(c.Fs) {
 			vfolder, err := c.User.GetVirtualFolderForPath(path.Dir(requestPath))
 			if err == nil {
 				dataprovider.UpdateVirtualFolderQuota(&vfolder.BaseVirtualFolder, 0, -fileSize, false) //nolint:errcheck
@@ -438,10 +482,10 @@ func (c *Connection) handleFTPUploadToExistingFile(fs vfs.Fs, flags int, resolve
 		}
 	}
 
-	vfs.SetPathPermissions(fs, filePath, c.User.GetUID(), c.User.GetGID())
+	vfs.SetPathPermissions(c.Fs, filePath, c.User.GetUID(), c.User.GetGID())
 
 	baseTransfer := common.NewBaseTransfer(file, c.BaseConnection, cancelFn, resolvedPath, requestPath,
-		common.TransferUpload, minWriteOffset, initialSize, maxWriteSize, false, fs)
+		common.TransferUpload, minWriteOffset, initialSize, maxWriteSize, false, c.Fs)
 	t := newTransfer(baseTransfer, w, nil, 0)
 
 	return t, nil
