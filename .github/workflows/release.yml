@@ -309,7 +309,7 @@ jobs:
           shell: /bin/bash
           install: |
             apt-get update -q -y
-            apt-get install -q -y curl gcc git
+            apt-get install -q -y curl gcc git xz-utils
             curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/go${{ matrix.go }}.linux-${{ matrix.go-arch }}.tar.gz
             tar -C /usr/local -xzf go.tar.gz
           run: |
