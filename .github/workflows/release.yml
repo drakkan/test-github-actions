@@ -270,7 +270,6 @@ jobs:
         env:
           GO_VERSION: ${{ env.GO_VERSION }}
 
-
       - name: Build on amd64
         if: ${{ matrix.arch == 'amd64' }}
         run: |
@@ -377,7 +376,7 @@ jobs:
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
           asset_path: ./pkgs/dist/deb/sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-1_${{ matrix.deb-arch}}.deb
-          asset_name: sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-1_${{ matrix.deb-arch}}.rpm
+          asset_name: sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-1_${{ matrix.deb-arch}}.deb
           asset_content_type: application/vnd.debian.binary-package
 
       - name: Upload RPM Package
