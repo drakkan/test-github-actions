@@ -239,19 +239,16 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            go: ${{ env.GO_VERSION }}
             go-arch: amd64
             deb-suffix: 1_amd64.deb
             rpm-suffix: 1.x86_64.rpm
           - arch: aarch64
             distro: ubuntu18.04
-            go: ${{ env.GO_VERSION }}
             go-arch: arm64
             deb-suffix: 1_arm64.deb
             rpm-suffix: 1.aarch64.rpm
           - arch: ppc64le
             distro: ubuntu18.04
-            go: ${{ env.GO_VERSION }}
             go-arch: ppc64le
             deb-suffix: 1_ppc64el.deb
             rpm-suffix: 1.ppc64le.rpm
@@ -310,13 +307,7 @@ jobs:
           install: |
             apt-get update -q -y
             apt-get install -q -y curl gcc git
-            if [ ${{ matrix.go }} == 'latest' ]
-            then
-              GO_VERSION=$(curl https://golang.org/VERSION?m=text)
-            else
-              GO_VERSION=${{ matrix.go }}
-            fi
-            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/${GO_VERSION}.linux-${{ matrix.go-arch }}.tar.gz
+            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/${{ env.GO_VERSION }}.linux-${{ matrix.go-arch }}.tar.gz
             tar -C /usr/local -xzf go.tar.gz
           run: |
             export PATH=$PATH:/usr/local/go/bin
