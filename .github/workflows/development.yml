@@ -200,17 +200,18 @@ jobs:
     name: Build Linux packages
     strategy:
       matrix:
-        - arch: amd64
-          go: latest
-          go-arch: amd64
-        - arch: aarch64
-          distro: ubuntu18.04
-          go: latest
-          go-arch: arm64
-        - arch: ppc64le
-          distro: ubuntu18.04
-          go: latest
-          go-arch: ppc64le
+        include:
+          - arch: amd64
+            go: 1.16
+            go-arch: amd64
+          - arch: aarch64
+            distro: ubuntu18.04
+            go: latest
+            go-arch: arm64
+          - arch: ppc64le
+            distro: ubuntu18.04
+            go: latest
+            go-arch: ppc64le
     steps:
       - uses: actions/checkout@v2
       - name: Set up Go
