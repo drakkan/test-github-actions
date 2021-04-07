@@ -215,13 +215,13 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Set up Go
-        if: ${{ matrix.arch }} == amd64
+        if: ${{ matrix.arch }} == 'amd64'
         uses: actions/setup-go@v2
         with:
           go-version: ${{ matrix.go }}
 
       - name: Build on amd64
-        if: ${{ matrix.arch }} == amd64
+        if: ${{ matrix.arch }} == 'amd64'
         run: |
           go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
           mkdir -p output/{init,bash_completion,zsh_completion}
@@ -236,7 +236,7 @@ jobs:
           cp sftpgo output/
 
       - uses: uraimo/run-on-arch-action@v2.0.9
-        if: ${{ matrix.arch }} != amd64
+        if: ${{ matrix.arch }} != 'amd64'
         name: Cross build on ${{ matrix.arch }}
         id: build
         with:
