@@ -266,7 +266,6 @@ jobs:
         run: |
           echo ::set-output name=SFTPGO_VERSION::${GITHUB_REF/refs\/tags\//}
           echo ::set-output name=GO_VERSION::${GO_VERSION}
-          echo go ${GO_VERSION}
         shell: bash
         env:
           GO_VERSION: ${{ env.GO_VERSION }}
@@ -335,7 +334,7 @@ jobs:
             cp sftpgo output/
             cp sftpgo.db output/sqlite/
             cd output
-            tar cJvf sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.go-arch }}.tar.xz *
+            tar cJvf sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.go-arch }}.tar.xz *
             cd ..
 
       - name: Build Packages
@@ -347,7 +346,7 @@ jobs:
           PKG_VERSION=${SFTPGO_VERSION:1}
           echo "::set-output name=pkg-version::${PKG_VERSION}"
         env:
-          SFTPGO_VERSION: ${{ steps.get_version.outputs.VERSION }}
+          SFTPGO_VERSION: ${{ steps.get_version.outputs.SFTPGO_VERSION }}
 
       - name: Download release upload URL
         uses: actions/download-artifact@v2
@@ -367,8 +366,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
-          asset_path: ./output/sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.rpm-arch }}.tar.xz
-          asset_name: sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.rpm-arch }}.tar.xz
+          asset_path: ./output/sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.rpm-arch }}.tar.xz
+          asset_name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.rpm-arch }}.tar.xz
           asset_content_type: application/x-xz
 
       - name: Upload Deb Package
