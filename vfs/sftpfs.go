@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +30,9 @@ const (
 	sftpFsName = "sftpfs"
 )
 
+// ErrSFTPLoop defines the error to return if an SFTP loop is detected
+var ErrSFTPLoop = errors.New("SFTP loop or nested local SFTP folders detected")
+
 // SFTPFsConfig defines the configuration for SFTP based filesystem
 type SFTPFsConfig struct {
 	Endpoint     string      `json:"endpoint,omitempty"`
@@ -42,6 +46,45 @@ type SFTPFsConfig struct {
 	// Some servers automatically delete files once they are downloaded.
 	// Using concurrent reads is problematic with such servers.
 	DisableCouncurrentReads bool `json:"disable_concurrent_reads,omitempty"`
+	// The buffer size (in MB) to use for transfers.
+	// Buffering could improve performance for high latency networks.
+	// With buffering enabled upload resume is not supported and a file
+	// cannot be opened for both reading and writing at the same time
+	// 0 means disabled.
+	BufferSize             int64    `json:"buffer_size,omitempty"`
+	forbiddenSelfUsernames []string `json:"-"`
+}
+
+func (c *SFTPFsConfig) isEqual(other *SFTPFsConfig) bool {
+	if c.Endpoint != other.Endpoint {
+		return false
+	}
+	if c.Username != other.Username {
+		return false
+	}
+	if c.Prefix != other.Prefix {
+		return false
+	}
+	if c.DisableCouncurrentReads != other.DisableCouncurrentReads {
+		return false
+	}
+	if c.BufferSize != other.BufferSize {
+		return false
+	}
+	if len(c.Fingerprints) != len(other.Fingerprints) {
+		return false
+	}
+	for _, fp := range c.Fingerprints {
+		if !utils.IsStringInSlice(fp, other.Fingerprints) {
+			return false
+		}
+	}
+	c.setEmptyCredentialsIfNil()
+	other.setEmptyCredentialsIfNil()
+	if !c.Password.IsEqual(other.Password) {
+		return false
+	}
+	return c.PrivateKey.IsEqual(other.PrivateKey)
 }
 
 func (c *SFTPFsConfig) setEmptyCredentialsIfNil() {
@@ -66,6 +109,21 @@ func (c *SFTPFsConfig) Validate() error {
 	if c.Username == "" {
 		return errors.New("username cannot be empty")
 	}
+	if c.BufferSize < 0 || c.BufferSize > 16 {
+		return errors.New("invalid buffer_size, valid range is 0-16")
+	}
+	if err := c.validateCredentials(); err != nil {
+		return err
+	}
+	if c.Prefix != "" {
+		c.Prefix = utils.CleanPath(c.Prefix)
+	} else {
+		c.Prefix = "/"
+	}
+	return nil
+}
+
+func (c *SFTPFsConfig) validateCredentials() error {
 	if c.Password.IsEmpty() && c.PrivateKey.IsEmpty() {
 		return errors.New("credentials cannot be empty")
 	}
@@ -80,11 +138,6 @@ func (c *SFTPFsConfig) Validate() error {
 	}
 	if !c.PrivateKey.IsEmpty() && !c.PrivateKey.IsValidInput() {
 		return errors.New("invalid private key")
-	}
-	if c.Prefix != "" {
-		c.Prefix = utils.CleanPath(c.Prefix)
-	} else {
-		c.Prefix = "/"
 	}
 	return nil
 }
@@ -111,31 +164,37 @@ type SFTPFs struct {
 	sync.Mutex
 	connectionID string
 	// if not empty this fs is mouted as virtual folder in the specified path
-	mountPath  string
-	config     *SFTPFsConfig
-	sshClient  *ssh.Client
-	sftpClient *sftp.Client
-	err        chan error
+	mountPath    string
+	localTempDir string
+	config       *SFTPFsConfig
+	sshClient    *ssh.Client
+	sftpClient   *sftp.Client
+	err          chan error
 }
 
 // NewSFTPFs returns an SFTPFa object that allows to interact with an SFTP server
-func NewSFTPFs(connectionID, mountPath string, config SFTPFsConfig) (Fs, error) {
+func NewSFTPFs(connectionID, mountPath, localTempDir string, forbiddenSelfUsernames []string, config SFTPFsConfig) (Fs, error) {
+	if localTempDir == "" {
+		localTempDir = filepath.Clean(os.TempDir())
+	}
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	if !config.Password.IsEmpty() && config.Password.IsEncrypted() {
-		if err := config.Password.Decrypt(); err != nil {
+	if !config.Password.IsEmpty() {
+		if err := config.Password.TryDecrypt(); err != nil {
 			return nil, err
 		}
 	}
-	if !config.PrivateKey.IsEmpty() && config.PrivateKey.IsEncrypted() {
-		if err := config.PrivateKey.Decrypt(); err != nil {
+	if !config.PrivateKey.IsEmpty() {
+		if err := config.PrivateKey.TryDecrypt(); err != nil {
 			return nil, err
 		}
 	}
+	config.forbiddenSelfUsernames = forbiddenSelfUsernames
 	sftpFs := &SFTPFs{
 		connectionID: connectionID,
 		mountPath:    mountPath,
+		localTempDir: localTempDir,
 		config:       &config,
 		err:          make(chan error, 1),
 	}
@@ -187,7 +246,29 @@ func (fs *SFTPFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, f
 		return nil, nil, nil, err
 	}
 	f, err := fs.sftpClient.Open(name)
-	return f, nil, nil, err
+	if fs.config.BufferSize == 0 {
+		return f, nil, nil, err
+	}
+	if offset > 0 {
+		_, err = f.Seek(offset, io.SeekStart)
+		if err != nil {
+			f.Close()
+			return nil, nil, nil, err
+		}
+	}
+	r, w, err := pipeat.PipeInDir(fs.localTempDir)
+	if err != nil {
+		f.Close()
+		return nil, nil, nil, err
+	}
+	go func() {
+		n, err := io.Copy(w, f)
+		w.CloseWithError(err) //nolint:errcheck
+		f.Close()
+		fsLog(fs, logger.LevelDebug, "download completed, path: %#v size: %v, err: %v", name, n, err)
+	}()
+
+	return nil, r, nil, nil
 }
 
 // Create creates or opens the named file for writing
@@ -196,13 +277,51 @@ func (fs *SFTPFs) Create(name string, flag int) (File, *PipeWriter, func(), erro
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	var f File
-	if flag == 0 {
-		f, err = fs.sftpClient.Create(name)
-	} else {
-		f, err = fs.sftpClient.OpenFile(name, flag)
+	if fs.config.BufferSize == 0 {
+		var f File
+		if flag == 0 {
+			f, err = fs.sftpClient.Create(name)
+		} else {
+			f, err = fs.sftpClient.OpenFile(name, flag)
+		}
+		return f, nil, nil, err
 	}
-	return f, nil, nil, err
+	// buffering is enabled
+	f, err := fs.sftpClient.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	r, w, err := pipeat.PipeInDir(fs.localTempDir)
+	if err != nil {
+		f.Close()
+		return nil, nil, nil, err
+	}
+	p := NewPipeWriter(w)
+
+	go func() {
+		bw := bufio.NewWriterSize(f, int(fs.config.BufferSize)*1024*1024)
+		// we don't use io.Copy since bufio.Writer implements io.WriterTo and
+		// so it calls the sftp.File WriteTo method without buffering
+		n, err := fs.copy(bw, r)
+		errFlush := bw.Flush()
+		if err == nil && errFlush != nil {
+			err = errFlush
+		}
+		var errTruncate error
+		if err != nil {
+			errTruncate = f.Truncate(n)
+		}
+		errClose := f.Close()
+		if err == nil && errClose != nil {
+			err = errClose
+		}
+		r.CloseWithError(err) //nolint:errcheck
+		p.Done(err)
+		fsLog(fs, logger.LevelDebug, "upload completed, path: %#v, readed bytes: %v, err: %v err truncate: %v",
+			name, n, err, errTruncate)
+	}()
+
+	return nil, p, nil, nil
 }
 
 // Rename renames (moves) source to target.
@@ -307,14 +426,14 @@ func (fs *SFTPFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 	return result, nil
 }
 
-// IsUploadResumeSupported returns true if upload resume is supported.
-func (*SFTPFs) IsUploadResumeSupported() bool {
-	return true
+// IsUploadResumeSupported returns true if resuming uploads is supported.
+func (fs *SFTPFs) IsUploadResumeSupported() bool {
+	return fs.config.BufferSize == 0
 }
 
 // IsAtomicUploadSupported returns true if atomic upload is supported.
-func (*SFTPFs) IsAtomicUploadSupported() bool {
-	return true
+func (fs *SFTPFs) IsAtomicUploadSupported() bool {
+	return fs.config.BufferSize == 0
 }
 
 // IsNotExist returns a boolean indicating whether the error is known to
@@ -339,6 +458,18 @@ func (*SFTPFs) IsNotSupported(err error) bool {
 
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *SFTPFs) CheckRootPath(username string, uid int, gid int) bool {
+	if fs.config.BufferSize > 0 {
+		// we need a local directory for temporary files
+		osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
+		osFs.CheckRootPath(username, uid, gid)
+	}
+	if fs.config.Prefix == "/" {
+		return true
+	}
+	if err := fs.MkdirAll(fs.config.Prefix, uid, gid); err != nil {
+		fsLog(fs, logger.LevelDebug, "error creating root directory %#v for user %#v: %v", fs.config.Prefix, username, err)
+		return false
+	}
 	return true
 }
 
@@ -555,6 +686,38 @@ func (fs *SFTPFs) Close() error {
 	return sshErr
 }
 
+func (fs *SFTPFs) copy(dst io.Writer, src io.Reader) (written int64, err error) {
+	buf := make([]byte, 32768)
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			if nw < 0 || nr < nw {
+				nw = 0
+				if ew == nil {
+					ew = errors.New("invalid write")
+				}
+			}
+			written += int64(nw)
+			if ew != nil {
+				err = ew
+				break
+			}
+			if nr != nw {
+				err = io.ErrShortWrite
+				break
+			}
+		}
+		if er != nil {
+			if er != io.EOF {
+				err = er
+			}
+			break
+		}
+	}
+	return written, err
+}
+
 func (fs *SFTPFs) checkConnection() error {
 	err := fs.closed()
 	if err == nil {
@@ -571,8 +734,15 @@ func (fs *SFTPFs) createConnection() error {
 	clientConfig := &ssh.ClientConfig{
 		User: fs.config.Username,
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			fp := ssh.FingerprintSHA256(key)
+			if utils.IsStringInSlice(fp, sftpFingerprints) {
+				if utils.IsStringInSlice(fs.config.Username, fs.config.forbiddenSelfUsernames) {
+					fsLog(fs, logger.LevelWarn, "SFTP loop or nested local SFTP folders detected, mount path %#v, username %#v, forbidden usernames: %+v",
+						fs.mountPath, fs.config.Username, fs.config.forbiddenSelfUsernames)
+					return ErrSFTPLoop
+				}
+			}
 			if len(fs.config.Fingerprints) > 0 {
-				fp := ssh.FingerprintSHA256(key)
 				for _, provided := range fs.config.Fingerprints {
 					if provided == fp {
 						return nil
@@ -610,6 +780,11 @@ func (fs *SFTPFs) createConnection() error {
 	if fs.config.DisableCouncurrentReads {
 		fsLog(fs, logger.LevelDebug, "disabling concurrent reads")
 		opt := sftp.UseConcurrentReads(false)
+		opt(fs.sftpClient) //nolint:errcheck
+	}
+	if fs.config.BufferSize > 0 {
+		fsLog(fs, logger.LevelDebug, "enabling concurrent writes")
+		opt := sftp.UseConcurrentWrites(true)
 		opt(fs.sftpClient) //nolint:errcheck
 	}
 	go fs.wait()

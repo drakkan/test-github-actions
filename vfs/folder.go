@@ -69,9 +69,29 @@ func (v *BaseVirtualFolder) GetQuotaSummary() string {
 	}
 	if v.LastQuotaUpdate > 0 {
 		t := utils.GetTimeFromMsecSinceEpoch(v.LastQuotaUpdate)
-		result += fmt.Sprintf(". Last update: %v ", t.Format("2006-01-02 15:04:05")) // YYYY-MM-DD HH:MM:SS
+		result += fmt.Sprintf(". Last update: %v ", t.Format("2006-01-02 15:04")) // YYYY-MM-DD HH:MM
 	}
 	return result
+}
+
+// GetStorageDescrition returns the storage description
+func (v *BaseVirtualFolder) GetStorageDescrition() string {
+	switch v.FsConfig.Provider {
+	case LocalFilesystemProvider:
+		return fmt.Sprintf("Local: %v", v.MappedPath)
+	case S3FilesystemProvider:
+		return fmt.Sprintf("S3: %v", v.FsConfig.S3Config.Bucket)
+	case GCSFilesystemProvider:
+		return fmt.Sprintf("GCS: %v", v.FsConfig.GCSConfig.Bucket)
+	case AzureBlobFilesystemProvider:
+		return fmt.Sprintf("AzBlob: %v", v.FsConfig.AzBlobConfig.Container)
+	case CryptedFilesystemProvider:
+		return fmt.Sprintf("Encrypted: %v", v.MappedPath)
+	case SFTPFilesystemProvider:
+		return fmt.Sprintf("SFTP: %v", v.FsConfig.SFTPConfig.Endpoint)
+	default:
+		return ""
+	}
 }
 
 // IsLocalOrLocalCrypted returns true if the folder provider is local or local encrypted
@@ -150,7 +170,7 @@ type VirtualFolder struct {
 }
 
 // GetFilesystem returns the filesystem for this folder
-func (v *VirtualFolder) GetFilesystem(connectionID string) (Fs, error) {
+func (v *VirtualFolder) GetFilesystem(connectionID string, forbiddenSelfUsers []string) (Fs, error) {
 	switch v.FsConfig.Provider {
 	case S3FilesystemProvider:
 		return NewS3Fs(connectionID, v.MappedPath, v.VirtualPath, v.FsConfig.S3Config)
@@ -163,7 +183,7 @@ func (v *VirtualFolder) GetFilesystem(connectionID string) (Fs, error) {
 	case CryptedFilesystemProvider:
 		return NewCryptFs(connectionID, v.MappedPath, v.VirtualPath, v.FsConfig.CryptConfig)
 	case SFTPFilesystemProvider:
-		return NewSFTPFs(connectionID, v.VirtualPath, v.FsConfig.SFTPConfig)
+		return NewSFTPFs(connectionID, v.VirtualPath, v.MappedPath, forbiddenSelfUsers, v.FsConfig.SFTPConfig)
 	default:
 		return NewOsFs(connectionID, v.MappedPath, v.VirtualPath), nil
 	}
@@ -171,7 +191,7 @@ func (v *VirtualFolder) GetFilesystem(connectionID string) (Fs, error) {
 
 // ScanQuota scans the folder and returns the number of files and their size
 func (v *VirtualFolder) ScanQuota() (int, int64, error) {
-	fs, err := v.GetFilesystem("")
+	fs, err := v.GetFilesystem("", nil)
 	if err != nil {
 		return 0, 0, err
 	}

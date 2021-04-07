@@ -71,11 +71,9 @@ func NewGCSFs(connectionID, localTempDir, mountPath string, config GCSFsConfig) 
 	if fs.config.AutomaticCredentials > 0 {
 		fs.svc, err = storage.NewClient(ctx)
 	} else if !fs.config.Credentials.IsEmpty() {
-		if fs.config.Credentials.IsEncrypted() {
-			err = fs.config.Credentials.Decrypt()
-			if err != nil {
-				return fs, err
-			}
+		err = fs.config.Credentials.TryDecrypt()
+		if err != nil {
+			return fs, err
 		}
 		fs.svc, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(fs.config.Credentials.GetPayload())))
 	} else {
@@ -398,8 +396,8 @@ func (fs *GCSFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 	return result, nil
 }
 
-// IsUploadResumeSupported returns true if upload resume is supported.
-// SFTP Resume is not supported on S3
+// IsUploadResumeSupported returns true if resuming uploads is supported.
+// Resuming uploads is not supported on GCS
 func (*GCSFs) IsUploadResumeSupported() bool {
 	return false
 }

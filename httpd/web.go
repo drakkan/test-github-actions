@@ -662,6 +662,17 @@ func getFiltersFromUserPostFields(r *http.Request) dataprovider.UserFilters {
 	filters.FileExtensions = getFileExtensionsFromPostField(r.Form.Get("allowed_extensions"), r.Form.Get("denied_extensions"))
 	filters.FilePatterns = getFilePatternsFromPostField(r.Form.Get("allowed_patterns"), r.Form.Get("denied_patterns"))
 	filters.TLSUsername = dataprovider.TLSUsername(r.Form.Get("tls_username"))
+	hooks := r.Form["hooks"]
+	if utils.IsStringInSlice("external_auth_disabled", hooks) {
+		filters.Hooks.ExternalAuthDisabled = true
+	}
+	if utils.IsStringInSlice("pre_login_disabled", hooks) {
+		filters.Hooks.PreLoginDisabled = true
+	}
+	if utils.IsStringInSlice("check_password_disabled", hooks) {
+		filters.Hooks.CheckPasswordDisabled = true
+	}
+	filters.DisableFsChecks = len(r.Form.Get("disable_fs_checks")) > 0
 	return filters
 }
 
@@ -727,7 +738,8 @@ func getGCSConfig(r *http.Request) (vfs.GCSFsConfig, error) {
 	return config, err
 }
 
-func getSFTPConfig(r *http.Request) vfs.SFTPFsConfig {
+func getSFTPConfig(r *http.Request) (vfs.SFTPFsConfig, error) {
+	var err error
 	config := vfs.SFTPFsConfig{}
 	config.Endpoint = r.Form.Get("sftp_endpoint")
 	config.Username = r.Form.Get("sftp_username")
@@ -737,7 +749,8 @@ func getSFTPConfig(r *http.Request) vfs.SFTPFsConfig {
 	config.Fingerprints = getSliceFromDelimitedValues(fingerprintsFormValue, "\n")
 	config.Prefix = r.Form.Get("sftp_prefix")
 	config.DisableCouncurrentReads = len(r.Form.Get("sftp_disable_concurrent_reads")) > 0
-	return config
+	config.BufferSize, err = strconv.ParseInt(r.Form.Get("sftp_buffer_size"), 10, 64)
+	return config, err
 }
 
 func getAzureConfig(r *http.Request) (vfs.AzBlobFsConfig, error) {
@@ -788,7 +801,11 @@ func getFsConfigFromPostFields(r *http.Request) (vfs.Filesystem, error) {
 	case vfs.CryptedFilesystemProvider:
 		fs.CryptConfig.Passphrase = getSecretFromFormField(r, "crypt_passphrase")
 	case vfs.SFTPFilesystemProvider:
-		fs.SFTPConfig = getSFTPConfig(r)
+		config, err := getSFTPConfig(r)
+		if err != nil {
+			return fs, err
+		}
+		fs.SFTPConfig = config
 	}
 	return fs, nil
 }
@@ -1478,7 +1495,7 @@ func handleWebAddFolderGet(w http.ResponseWriter, r *http.Request) {
 func handleWebAddFolderPost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	folder := vfs.BaseVirtualFolder{}
-	err := r.ParseForm()
+	err := r.ParseMultipartForm(maxRequestSize)
 	if err != nil {
 		renderFolderPage(w, r, folder, folderPageModeAdd, err.Error())
 		return
@@ -1529,7 +1546,7 @@ func handleWebUpdateFolderPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = r.ParseForm()
+	err = r.ParseMultipartForm(maxRequestSize)
 	if err != nil {
 		renderFolderPage(w, r, folder, folderPageModeUpdate, err.Error())
 		return

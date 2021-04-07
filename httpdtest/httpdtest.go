@@ -1046,6 +1046,9 @@ func compareSFTPFsConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error
 	if expected.SFTPConfig.DisableCouncurrentReads != actual.SFTPConfig.DisableCouncurrentReads {
 		return errors.New("SFTPFs disable_concurrent_reads mismatch")
 	}
+	if expected.SFTPConfig.BufferSize != actual.SFTPConfig.BufferSize {
+		return errors.New("SFTPFs buffer_size mismatch")
+	}
 	if err := checkEncryptedSecret(expected.SFTPConfig.Password, actual.SFTPConfig.Password); err != nil {
 		return fmt.Errorf("SFTPFs password mismatch: %v", err)
 	}
@@ -1164,6 +1167,18 @@ func compareUserFilterSubStructs(expected *dataprovider.User, actual *dataprovid
 		if !utils.IsStringInSlice(protocol, actual.Filters.DeniedProtocols) {
 			return errors.New("denied protocols contents mismatch")
 		}
+	}
+	if expected.Filters.Hooks.ExternalAuthDisabled != actual.Filters.Hooks.ExternalAuthDisabled {
+		return errors.New("external_auth_disabled hook mismatch")
+	}
+	if expected.Filters.Hooks.PreLoginDisabled != actual.Filters.Hooks.PreLoginDisabled {
+		return errors.New("pre_login_disabled hook mismatch")
+	}
+	if expected.Filters.Hooks.CheckPasswordDisabled != actual.Filters.Hooks.CheckPasswordDisabled {
+		return errors.New("check_password_disabled hook mismatch")
+	}
+	if expected.Filters.DisableFsChecks != actual.Filters.DisableFsChecks {
+		return errors.New("disable_fs_checks mismatch")
 	}
 	return nil
 }

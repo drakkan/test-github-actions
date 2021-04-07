@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -419,6 +420,19 @@ func TestUserStatus(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestUidGidLimits(t *testing.T) {
+	u := getTestUser()
+	u.UID = math.MaxInt32
+	u.GID = math.MaxInt32
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	assert.Equal(t, math.MaxInt32, user.GetUID())
+	assert.Equal(t, math.MaxInt32, user.GetGID())
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+}
+
 func TestAddUserNoCredentials(t *testing.T) {
 	u := getTestUser()
 	u.Password = ""
@@ -676,6 +690,19 @@ func TestAddUserInvalidFsConfig(t *testing.T) {
 	u.FsConfig.SFTPConfig.PrivateKey = kms.NewSecret(kms.SecretStatusRedacted, "keyforpkey", "", "")
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
+	u.FsConfig.SFTPConfig.PrivateKey = kms.NewPlainSecret("pk")
+	u.FsConfig.SFTPConfig.Endpoint = "127.1.1.1:22"
+	u.FsConfig.SFTPConfig.Username = defaultUsername
+	u.FsConfig.SFTPConfig.BufferSize = -1
+	_, resp, err := httpdtest.AddUser(u, http.StatusBadRequest)
+	if assert.NoError(t, err) {
+		assert.Contains(t, string(resp), "invalid buffer_size")
+	}
+	u.FsConfig.SFTPConfig.BufferSize = 1000
+	_, resp, err = httpdtest.AddUser(u, http.StatusBadRequest)
+	if assert.NoError(t, err) {
+		assert.Contains(t, string(resp), "invalid buffer_size")
+	}
 }
 
 func TestUserRedactedPassword(t *testing.T) {
@@ -810,74 +837,6 @@ func TestAddUserInvalidVirtualFolders(t *testing.T) {
 	})
 	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
 	assert.NoError(t, err)
-	/*u.VirtualFolders = nil
-	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
-		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			MappedPath: filepath.Join(os.TempDir(), "mapped_dir", "subdir"),
-			Name:       folderName + "2",
-		},
-		VirtualPath: "/vdir1",
-	})
-	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
-		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			MappedPath: filepath.Join(os.TempDir(), "mapped_dir"), // invalid, contains mapped_dir/subdir
-			Name:       folderName,
-		},
-		VirtualPath: "/vdir2",
-	})
-	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
-	assert.NoError(t, err)
-	u.VirtualFolders = nil
-	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
-		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			MappedPath: filepath.Join(os.TempDir(), "mapped_dir"),
-			Name:       folderName,
-		},
-		VirtualPath: "/vdir1",
-	})
-	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
-		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			MappedPath: filepath.Join(os.TempDir(), "mapped_dir", "subdir"), // invalid, contained in mapped_dir
-			Name:       folderName + "3",
-		},
-		VirtualPath: "/vdir2",
-	})
-	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
-	assert.NoError(t, err)
-	u.VirtualFolders = nil
-	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
-		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			MappedPath: filepath.Join(os.TempDir(), "mapped_dir1"),
-			Name:       folderName + "1",
-		},
-		VirtualPath: "/vdir1/subdir",
-	})
-	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
-		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			MappedPath: filepath.Join(os.TempDir(), "mapped_dir2"),
-			Name:       folderName + "2",
-		},
-		VirtualPath: "/vdir1/../vdir1", // invalid, overlaps with /vdir1/subdir
-	})
-	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
-	assert.NoError(t, err)
-	u.VirtualFolders = nil
-	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
-		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			MappedPath: filepath.Join(os.TempDir(), "mapped_dir1"),
-			Name:       folderName + "1",
-		},
-		VirtualPath: "/vdir1/",
-	})
-	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
-		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			MappedPath: filepath.Join(os.TempDir(), "mapped_dir2"),
-			Name:       folderName + "2",
-		},
-		VirtualPath: "/vdir1/subdir", // invalid, contained inside /vdir1
-	})
-	_, _, err = httpdtest.AddUser(u, http.StatusBadRequest)
-	assert.NoError(t, err)*/
 	u.VirtualFolders = nil
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
@@ -948,32 +907,6 @@ func TestAddUserInvalidVirtualFolders(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestSFTPVirtualFolderSelf(t *testing.T) {
-	// an sftp virtual folder cannot use the same sftp account, it will generate an infinite loop
-	// at login
-	u := getTestUser()
-	mappedPathSFTP := filepath.Join(os.TempDir(), "sftp")
-	folderNameSFTP := filepath.Base(mappedPathSFTP)
-	vdirSFTPPath := "/vdir/sftp"
-	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
-		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name: folderNameSFTP,
-			FsConfig: vfs.Filesystem{
-				Provider: vfs.SFTPFilesystemProvider,
-				SFTPConfig: vfs.SFTPFsConfig{
-					Endpoint: "127.0.0.1:2022",
-					Username: defaultUsername,
-					Password: kms.NewPlainSecret(defaultPassword),
-				},
-			},
-		},
-		VirtualPath: vdirSFTPPath,
-	})
-	_, resp, err := httpdtest.AddUser(u, http.StatusBadRequest)
-	assert.NoError(t, err, string(resp))
-	assert.Contains(t, string(resp), "could point to the same SFTPGo account")
-}
-
 func TestUserPublicKey(t *testing.T) {
 	u := getTestUser()
 	u.Password = ""
@@ -1041,6 +974,7 @@ func TestUpdateUser(t *testing.T) {
 	u.UsedQuotaFiles = 1
 	u.UsedQuotaSize = 2
 	u.Filters.TLSUsername = dataprovider.TLSUsernameCN
+	u.Filters.Hooks.CheckPasswordDisabled = true
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, user.UsedQuotaFiles)
@@ -1058,6 +992,10 @@ func TestUpdateUser(t *testing.T) {
 	user.Filters.DeniedLoginMethods = []string{dataprovider.LoginMethodPassword}
 	user.Filters.DeniedProtocols = []string{common.ProtocolWebDAV}
 	user.Filters.TLSUsername = dataprovider.TLSUsernameNone
+	user.Filters.Hooks.ExternalAuthDisabled = true
+	user.Filters.Hooks.PreLoginDisabled = true
+	user.Filters.Hooks.CheckPasswordDisabled = false
+	user.Filters.DisableFsChecks = true
 	user.Filters.FileExtensions = append(user.Filters.FileExtensions, dataprovider.ExtensionsFilter{
 		Path:              "/subdir",
 		AllowedExtensions: []string{".zip", ".rar"},
@@ -1094,6 +1032,7 @@ func TestUpdateUser(t *testing.T) {
 	})
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
+
 	_, _, err = httpdtest.UpdateUser(user, http.StatusBadRequest, "invalid")
 	assert.NoError(t, err)
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "0")
@@ -1625,6 +1564,7 @@ func TestUserSFTPFs(t *testing.T) {
 	user.FsConfig.SFTPConfig.Password = kms.NewPlainSecret("sftp_pwd")
 	user.FsConfig.SFTPConfig.PrivateKey = kms.NewPlainSecret(sftpPrivateKey)
 	user.FsConfig.SFTPConfig.Fingerprints = []string{sftpPkeyFingerprint}
+	user.FsConfig.SFTPConfig.BufferSize = 2
 	_, resp, err := httpdtest.UpdateUser(user, http.StatusBadRequest, "")
 	assert.NoError(t, err)
 	assert.Contains(t, string(resp), "invalid endpoint")
@@ -1635,6 +1575,7 @@ func TestUserSFTPFs(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "/", user.FsConfig.SFTPConfig.Prefix)
 	assert.True(t, user.FsConfig.SFTPConfig.DisableCouncurrentReads)
+	assert.Equal(t, int64(2), user.FsConfig.SFTPConfig.BufferSize)
 	initialPwdPayload := user.FsConfig.SFTPConfig.Password.GetPayload()
 	initialPkeyPayload := user.FsConfig.SFTPConfig.PrivateKey.GetPayload()
 	assert.Equal(t, kms.SecretStatusSecretBox, user.FsConfig.SFTPConfig.Password.GetStatus())
@@ -4917,6 +4858,8 @@ func TestWebUserAddMock(t *testing.T) {
 	form.Set("denied_patterns", "/dir1::*.zip\n/dir3::*.rar\n/dir2::*.mkv")
 	form.Set("additional_info", user.AdditionalInfo)
 	form.Set("description", user.Description)
+	form.Add("hooks", "external_auth_disabled")
+	form.Set("disable_fs_checks", "checked")
 	b, contentType, _ := getMultipartFormData(form, "", "")
 	// test invalid url escape
 	req, _ = http.NewRequest(http.MethodPost, webUserPath+"?a=%2", &b)
@@ -5076,6 +5019,10 @@ func TestWebUserAddMock(t *testing.T) {
 	assert.Equal(t, int64(1000), newUser.Filters.MaxUploadFileSize)
 	assert.Equal(t, user.AdditionalInfo, newUser.AdditionalInfo)
 	assert.Equal(t, user.Description, newUser.Description)
+	assert.True(t, newUser.Filters.Hooks.ExternalAuthDisabled)
+	assert.False(t, newUser.Filters.Hooks.PreLoginDisabled)
+	assert.False(t, newUser.Filters.Hooks.CheckPasswordDisabled)
+	assert.True(t, newUser.Filters.DisableFsChecks)
 	assert.True(t, utils.IsStringInSlice(testPubKey, newUser.PublicKeys))
 	if val, ok := newUser.Permissions["/subdir"]; ok {
 		assert.True(t, utils.IsStringInSlice(dataprovider.PermListItems, val))
@@ -5481,6 +5428,9 @@ func TestUserTemplateMock(t *testing.T) {
 	form.Set("allowed_extensions", "/dir1::.jpg,.png")
 	form.Set("denied_extensions", "/dir2::.zip")
 	form.Set("max_upload_file_size", "0")
+	form.Add("hooks", "external_auth_disabled")
+	form.Add("hooks", "check_password_disabled")
+	form.Set("disable_fs_checks", "checked")
 	// test invalid s3_upload_part_size
 	form.Set("s3_upload_part_size", "a")
 	b, contentType, _ := getMultipartFormData(form, "", "")
@@ -5552,6 +5502,14 @@ func TestUserTemplateMock(t *testing.T) {
 	err = user2.FsConfig.S3Config.AccessSecret.Decrypt()
 	require.NoError(t, err)
 	require.Equal(t, "password2", user2.FsConfig.S3Config.AccessSecret.GetPayload())
+	require.True(t, user1.Filters.Hooks.ExternalAuthDisabled)
+	require.True(t, user1.Filters.Hooks.CheckPasswordDisabled)
+	require.False(t, user1.Filters.Hooks.PreLoginDisabled)
+	require.True(t, user2.Filters.Hooks.ExternalAuthDisabled)
+	require.True(t, user2.Filters.Hooks.CheckPasswordDisabled)
+	require.False(t, user2.Filters.Hooks.PreLoginDisabled)
+	require.True(t, user1.Filters.DisableFsChecks)
+	require.True(t, user2.Filters.DisableFsChecks)
 }
 
 func TestFolderTemplateMock(t *testing.T) {
@@ -5728,6 +5686,7 @@ func TestWebUserS3Mock(t *testing.T) {
 	form.Set("denied_extensions", "/dir2::.zip")
 	form.Set("max_upload_file_size", "0")
 	form.Set("description", user.Description)
+	form.Add("hooks", "pre_login_disabled")
 	// test invalid s3_upload_part_size
 	form.Set("s3_upload_part_size", "a")
 	b, contentType, _ := getMultipartFormData(form, "", "")
@@ -5775,6 +5734,10 @@ func TestWebUserS3Mock(t *testing.T) {
 	assert.Empty(t, updateUser.FsConfig.S3Config.AccessSecret.GetKey())
 	assert.Empty(t, updateUser.FsConfig.S3Config.AccessSecret.GetAdditionalData())
 	assert.Equal(t, user.Description, updateUser.Description)
+	assert.True(t, updateUser.Filters.Hooks.PreLoginDisabled)
+	assert.False(t, updateUser.Filters.Hooks.ExternalAuthDisabled)
+	assert.False(t, updateUser.Filters.Hooks.CheckPasswordDisabled)
+	assert.False(t, updateUser.Filters.DisableFsChecks)
 	// now check that a redacted password is not saved
 	form.Set("s3_access_secret", redactedSecret)
 	b, contentType, _ = getMultipartFormData(form, "", "")
@@ -6159,6 +6122,7 @@ func TestWebUserSFTPFsMock(t *testing.T) {
 	user.FsConfig.SFTPConfig.Fingerprints = []string{sftpPkeyFingerprint}
 	user.FsConfig.SFTPConfig.Prefix = "/home/sftpuser"
 	user.FsConfig.SFTPConfig.DisableCouncurrentReads = true
+	user.FsConfig.SFTPConfig.BufferSize = 5
 	form := make(url.Values)
 	form.Set(csrfFormToken, csrfToken)
 	form.Set("username", user.Username)
@@ -6196,6 +6160,7 @@ func TestWebUserSFTPFsMock(t *testing.T) {
 	form.Set("sftp_fingerprints", user.FsConfig.SFTPConfig.Fingerprints[0])
 	form.Set("sftp_prefix", user.FsConfig.SFTPConfig.Prefix)
 	form.Set("sftp_disable_concurrent_reads", "true")
+	form.Set("sftp_buffer_size", strconv.FormatInt(user.FsConfig.SFTPConfig.BufferSize, 10))
 	b, contentType, _ = getMultipartFormData(form, "", "")
 	req, _ = http.NewRequest(http.MethodPost, path.Join(webUserPath, user.Username), &b)
 	setJWTCookieForReq(req, webToken)
@@ -6224,6 +6189,7 @@ func TestWebUserSFTPFsMock(t *testing.T) {
 	assert.Equal(t, updateUser.FsConfig.SFTPConfig.Endpoint, user.FsConfig.SFTPConfig.Endpoint)
 	assert.True(t, updateUser.FsConfig.SFTPConfig.DisableCouncurrentReads)
 	assert.Len(t, updateUser.FsConfig.SFTPConfig.Fingerprints, 1)
+	assert.Equal(t, user.FsConfig.SFTPConfig.BufferSize, updateUser.FsConfig.SFTPConfig.BufferSize)
 	assert.Contains(t, updateUser.FsConfig.SFTPConfig.Fingerprints, sftpPkeyFingerprint)
 	// now check that a redacted credentials are not saved
 	form.Set("sftp_password", redactedSecret+" ")
@@ -6269,26 +6235,32 @@ func TestAddWebFoldersMock(t *testing.T) {
 	form.Set("mapped_path", mappedPath)
 	form.Set("name", folderName)
 	form.Set("description", folderDesc)
-	req, err := http.NewRequest(http.MethodPost, webFolderPath, strings.NewReader(form.Encode()))
+	b, contentType, err := getMultipartFormData(form, "", "")
 	assert.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, webFolderPath, &b)
+	assert.NoError(t, err)
+	req.Header.Set("Content-Type", contentType)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
 	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
-	req, err = http.NewRequest(http.MethodPost, webFolderPath, strings.NewReader(form.Encode()))
+	b, contentType, err = getMultipartFormData(form, "", "")
 	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPost, webFolderPath, &b)
+	assert.NoError(t, err)
+	req.Header.Set("Content-Type", contentType)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusSeeOther, rr)
 	// adding the same folder will fail since the name must be unique
-	req, err = http.NewRequest(http.MethodPost, webFolderPath, strings.NewReader(form.Encode()))
+	b, contentType, err = getMultipartFormData(form, "", "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPost, webFolderPath, &b)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 	// invalid form
@@ -6357,18 +6329,22 @@ func TestS3WebFolderMock(t *testing.T) {
 	form.Set("s3_upload_part_size", strconv.Itoa(S3UploadPartSize))
 	form.Set("s3_upload_concurrency", "a")
 	form.Set(csrfFormToken, csrfToken)
-	req, err := http.NewRequest(http.MethodPost, webFolderPath, strings.NewReader(form.Encode()))
+	b, contentType, err := getMultipartFormData(form, "", "")
+	assert.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, webFolderPath, &b)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 
 	form.Set("s3_upload_concurrency", strconv.Itoa(S3UploadConcurrency))
-	req, err = http.NewRequest(http.MethodPost, webFolderPath, strings.NewReader(form.Encode()))
+	b, contentType, err = getMultipartFormData(form, "", "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPost, webFolderPath, &b)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusSeeOther, rr)
 
@@ -6395,18 +6371,22 @@ func TestS3WebFolderMock(t *testing.T) {
 	// update
 	S3UploadConcurrency = 10
 	form.Set("s3_upload_concurrency", "b")
-	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), strings.NewReader(form.Encode()))
+	b, contentType, err = getMultipartFormData(form, "", "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), &b)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 
 	form.Set("s3_upload_concurrency", strconv.Itoa(S3UploadConcurrency))
-	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), strings.NewReader(form.Encode()))
+	b, contentType, err = getMultipartFormData(form, "", "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), &b)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusSeeOther, rr)
 
@@ -6460,19 +6440,23 @@ func TestUpdateWebFolderMock(t *testing.T) {
 	form.Set("name", folderName)
 	form.Set("description", folderDesc)
 	form.Set(csrfFormToken, "")
-	req, err := http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), strings.NewReader(form.Encode()))
+	b, contentType, err := getMultipartFormData(form, "", "")
+	assert.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), &b)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
 	assert.Contains(t, rr.Body.String(), "unable to verify form token")
 
 	form.Set(csrfFormToken, csrfToken)
-	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), strings.NewReader(form.Encode()))
+	b, contentType, err = getMultipartFormData(form, "", "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), &b)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusSeeOther, rr)
 
@@ -6487,26 +6471,32 @@ func TestUpdateWebFolderMock(t *testing.T) {
 	assert.Equal(t, folderDesc, folder.Description)
 
 	// parse form error
-	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName)+"??a=a%B3%A2%G3", strings.NewReader(form.Encode()))
+	b, contentType, err = getMultipartFormData(form, "", "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName)+"??a=a%B3%A2%G3", &b)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 	assert.Contains(t, rr.Body.String(), "invalid URL escape")
 
-	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName+"1"), strings.NewReader(form.Encode()))
+	b, contentType, err = getMultipartFormData(form, "", "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName+"1"), &b)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusNotFound, rr)
 
 	form.Set("mapped_path", "arelative/path")
-	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), strings.NewReader(form.Encode()))
+	b, contentType, err = getMultipartFormData(form, "", "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPost, path.Join(webFolderPath, folderName), &b)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 

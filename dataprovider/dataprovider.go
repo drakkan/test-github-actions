@@ -62,7 +62,7 @@ const (
 	// MemoryDataProviderName defines the name for memory provider
 	MemoryDataProviderName = "memory"
 	// CockroachDataProviderName defines the for CockroachDB provider
-	CockroachDataProviderName = "cockroach"
+	CockroachDataProviderName = "cockroachdb"
 	// DumpVersion defines the version for the dump.
 	// For restore/load we support the current version and the previous one
 	DumpVersion = 7
@@ -111,7 +111,6 @@ var (
 	// ErrInvalidCredentials defines the error to return if the supplied credentials are invalid
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	validTLSUsernames     = []string{string(TLSUsernameNone), string(TLSUsernameCN)}
-	webDAVUsersCache      sync.Map
 	config                Config
 	provider              Provider
 	sqlPlaceholders       []string
@@ -750,7 +749,7 @@ func UpdateLastLogin(user *User) error {
 	if diff < 0 || diff > lastLoginMinDelay {
 		err := provider.updateLastLogin(user.Username)
 		if err == nil {
-			updateWebDavCachedUserLastLogin(user.Username)
+			webDAVUsersCache.updateLastLogin(user.Username)
 		}
 		return err
 	}
@@ -841,7 +840,7 @@ func AddUser(user *User) error {
 func UpdateUser(user *User) error {
 	err := provider.updateUser(user)
 	if err == nil {
-		RemoveCachedWebDAVUser(user.Username)
+		webDAVUsersCache.swap(user)
 		executeAction(operationUpdate, user)
 	}
 	return err
@@ -981,6 +980,7 @@ func createProvider(basePath string) error {
 	if err = validateSQLTablesPrefix(); err != nil {
 		return err
 	}
+	logSender = fmt.Sprintf("dataprovider_%v", config.Driver)
 
 	switch config.Driver {
 	case SQLiteDataProviderName:
@@ -1081,16 +1081,6 @@ func getVirtualFolderIfInvalid(folder *vfs.BaseVirtualFolder) *vfs.BaseVirtualFo
 	return folder
 }
 
-func hasSFTPLoopForFolder(user *User, folder *vfs.BaseVirtualFolder) bool {
-	if folder.FsConfig.Provider == vfs.SFTPFilesystemProvider {
-		// FIXME: this could be inaccurate, it is not easy to check the endpoint too
-		if folder.FsConfig.SFTPConfig.Username == user.Username {
-			return true
-		}
-	}
-	return false
-}
-
 func validateUserVirtualFolders(user *User) error {
 	if len(user.VirtualFolders) == 0 {
 		user.VirtualFolders = []vfs.VirtualFolder{}
@@ -1110,10 +1100,6 @@ func validateUserVirtualFolders(user *User) error {
 		folder := getVirtualFolderIfInvalid(&v.BaseVirtualFolder)
 		if err := ValidateFolder(folder); err != nil {
 			return err
-		}
-		if hasSFTPLoopForFolder(user, folder) {
-			return &ValidationError{err: fmt.Sprintf("SFTP folder %#v could point to the same SFTPGo account, this is not allowed",
-				folder.Name)}
 		}
 		cleanedMPath := folder.MappedPath
 		if folder.IsLocalOrLocalCrypted() {
@@ -1615,23 +1601,25 @@ func checkUserAndPass(user *User, password, ip, protocol string) (User, error) {
 	if user.Password == "" {
 		return *user, errors.New("credentials cannot be null or empty")
 	}
-	hookResponse, err := executeCheckPasswordHook(user.Username, password, ip, protocol)
-	if err != nil {
-		providerLog(logger.LevelDebug, "error executing check password hook: %v", err)
-		return *user, errors.New("unable to check credentials")
-	}
-	switch hookResponse.Status {
-	case -1:
-		// no hook configured
-	case 1:
-		providerLog(logger.LevelDebug, "password accepted by check password hook")
-		return *user, nil
-	case 2:
-		providerLog(logger.LevelDebug, "partial success from check password hook")
-		password = hookResponse.ToVerify
-	default:
-		providerLog(logger.LevelDebug, "password rejected by check password hook, status: %v", hookResponse.Status)
-		return *user, ErrInvalidCredentials
+	if !user.Filters.Hooks.CheckPasswordDisabled {
+		hookResponse, err := executeCheckPasswordHook(user.Username, password, ip, protocol)
+		if err != nil {
+			providerLog(logger.LevelDebug, "error executing check password hook: %v", err)
+			return *user, errors.New("unable to check credentials")
+		}
+		switch hookResponse.Status {
+		case -1:
+			// no hook configured
+		case 1:
+			providerLog(logger.LevelDebug, "password accepted by check password hook")
+			return *user, nil
+		case 2:
+			providerLog(logger.LevelDebug, "partial success from check password hook")
+			password = hookResponse.ToVerify
+		default:
+			providerLog(logger.LevelDebug, "password rejected by check password hook, status: %v", hookResponse.Status)
+			return *user, ErrInvalidCredentials
+		}
 	}
 
 	match, err := isPasswordOK(user, password)
@@ -2152,19 +2140,12 @@ func getPreLoginHookResponse(loginMethod, ip, protocol string, userAsJSON []byte
 }
 
 func executePreLoginHook(username, loginMethod, ip, protocol string) (User, error) {
-	u, err := provider.userExists(username)
-	if err != nil {
-		if _, ok := err.(*RecordNotFoundError); !ok {
-			return u, err
-		}
-		u = User{
-			ID:       0,
-			Username: username,
-		}
-	}
-	userAsJSON, err := json.Marshal(u)
+	u, userAsJSON, err := getUserAndJSONForHook(username)
 	if err != nil {
 		return u, err
+	}
+	if u.Filters.Hooks.PreLoginDisabled {
+		return u, nil
 	}
 	startTime := time.Now()
 	out, err := getPreLoginHookResponse(loginMethod, ip, protocol, userAsJSON)
@@ -2172,11 +2153,11 @@ func executePreLoginHook(username, loginMethod, ip, protocol string) (User, erro
 		return u, fmt.Errorf("pre-login hook error: %v, elapsed %v", err, time.Since(startTime))
 	}
 	providerLog(logger.LevelDebug, "pre-login hook completed, elapsed: %v", time.Since(startTime))
-	if strings.TrimSpace(string(out)) == "" {
+	if utils.IsByteArrayEmpty(out) {
 		providerLog(logger.LevelDebug, "empty response from pre-login hook, no modification requested for user %#v id: %v",
 			username, u.ID)
 		if u.ID == 0 {
-			return u, &RecordNotFoundError{err: fmt.Sprintf("username %v does not exist", username)}
+			return u, &RecordNotFoundError{err: fmt.Sprintf("username %#v does not exist", username)}
 		}
 		return u, nil
 	}
@@ -2199,6 +2180,9 @@ func executePreLoginHook(username, loginMethod, ip, protocol string) (User, erro
 		err = provider.addUser(&u)
 	} else {
 		err = provider.updateUser(&u)
+		if err == nil {
+			webDAVUsersCache.swap(&u)
+		}
 	}
 	if err != nil {
 		return u, err
@@ -2275,7 +2259,15 @@ func ExecutePostLoginHook(user *User, loginMethod, ip, protocol string, err erro
 	}()
 }
 
-func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol, tlsCert string) ([]byte, error) {
+func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol string, cert *x509.Certificate, userAsJSON []byte) ([]byte, error) {
+	var tlsCert string
+	if cert != nil {
+		var err error
+		tlsCert, err = utils.EncodeTLSCertToPem(cert)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if strings.HasPrefix(config.ExternalAuthHook, "http") {
 		var url *url.URL
 		var result []byte
@@ -2293,6 +2285,9 @@ func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, 
 		authRequest["protocol"] = protocol
 		authRequest["keyboard_interactive"] = keyboardInteractive
 		authRequest["tls_cert"] = tlsCert
+		if len(userAsJSON) > 0 {
+			authRequest["user"] = string(userAsJSON)
+		}
 		authRequestAsJSON, err := json.Marshal(authRequest)
 		if err != nil {
 			providerLog(logger.LevelWarn, "error serializing external auth request: %v", err)
@@ -2316,6 +2311,7 @@ func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, 
 	cmd := exec.CommandContext(ctx, config.ExternalAuthHook)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("SFTPGO_AUTHD_USERNAME=%v", username),
+		fmt.Sprintf("SFTPGO_AUTHD_USER=%v", string(userAsJSON)),
 		fmt.Sprintf("SFTPGO_AUTHD_IP=%v", ip),
 		fmt.Sprintf("SFTPGO_AUTHD_PASSWORD=%v", password),
 		fmt.Sprintf("SFTPGO_AUTHD_PUBLIC_KEY=%v", pkey),
@@ -2325,54 +2321,72 @@ func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, 
 	return cmd.Output()
 }
 
-func doExternalAuth(username, password string, pubKey []byte, keyboardInteractive, ip, protocol string, tlsCert *x509.Certificate) (User, error) {
-	var user User
-	var pkey, cert string
-	if len(pubKey) > 0 {
-		k, err := ssh.ParsePublicKey(pubKey)
-		if err != nil {
-			return user, err
-		}
-		pkey = string(ssh.MarshalAuthorizedKey(k))
-	}
-	if tlsCert != nil {
-		var err error
-		cert, err = utils.EncodeTLSCertToPem(tlsCert)
-		if err != nil {
-			return user, err
-		}
-	}
-	startTime := time.Now()
-	out, err := getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol, cert)
-	if err != nil {
-		return user, fmt.Errorf("external auth error: %v, elapsed: %v", err, time.Since(startTime))
-	}
-	providerLog(logger.LevelDebug, "external auth completed, elapsed: %v", time.Since(startTime))
-	err = json.Unmarshal(out, &user)
-	if err != nil {
-		return user, fmt.Errorf("invalid external auth response: %v", err)
-	}
-	if user.Username == "" {
-		return user, ErrInvalidCredentials
-	}
+func updateUserFromExtAuthResponse(user *User, password, pkey string) {
 	if password != "" {
 		user.Password = password
 	}
 	if pkey != "" && !utils.IsStringPrefixInSlice(pkey, user.PublicKeys) {
 		user.PublicKeys = append(user.PublicKeys, pkey)
 	}
+}
+
+func doExternalAuth(username, password string, pubKey []byte, keyboardInteractive, ip, protocol string, tlsCert *x509.Certificate) (User, error) {
+	var user User
+
+	u, userAsJSON, err := getUserAndJSONForHook(username)
+	if err != nil {
+		return user, err
+	}
+
+	if u.Filters.Hooks.ExternalAuthDisabled {
+		return u, nil
+	}
+
+	pkey, err := utils.GetSSHPublicKeyAsString(pubKey)
+	if err != nil {
+		return user, err
+	}
+
+	startTime := time.Now()
+	out, err := getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol, tlsCert, userAsJSON)
+	if err != nil {
+		return user, fmt.Errorf("external auth error: %v, elapsed: %v", err, time.Since(startTime))
+	}
+	providerLog(logger.LevelDebug, "external auth completed, elapsed: %v", time.Since(startTime))
+	if utils.IsByteArrayEmpty(out) {
+		providerLog(logger.LevelDebug, "empty response from external hook, no modification requested for user %#v id: %v",
+			username, u.ID)
+		if u.ID == 0 {
+			return u, &RecordNotFoundError{err: fmt.Sprintf("username %#v does not exist", username)}
+		}
+		return u, nil
+	}
+	err = json.Unmarshal(out, &user)
+	if err != nil {
+		return user, fmt.Errorf("invalid external auth response: %v", err)
+	}
+	// an empty username means authentication failure
+	if user.Username == "" {
+		return user, ErrInvalidCredentials
+	}
+	updateUserFromExtAuthResponse(&user, password, pkey)
 	// some users want to map multiple login usernames with a single SFTPGo account
 	// for example an SFTP user logins using "user1" or "user2" and the external auth
 	// returns "user" in both cases, so we use the username returned from
 	// external auth and not the one used to login
-	u, err := provider.userExists(user.Username)
-	if err == nil {
+	if user.Username != username {
+		u, err = provider.userExists(user.Username)
+	}
+	if u.ID > 0 && err == nil {
 		user.ID = u.ID
 		user.UsedQuotaSize = u.UsedQuotaSize
 		user.UsedQuotaFiles = u.UsedQuotaFiles
 		user.LastQuotaUpdate = u.LastQuotaUpdate
 		user.LastLogin = u.LastLogin
 		err = provider.updateUser(&user)
+		if err == nil {
+			webDAVUsersCache.swap(&user)
+		}
 		return user, err
 	}
 	err = provider.addUser(&user)
@@ -2380,6 +2394,25 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 		return user, err
 	}
 	return provider.userExists(user.Username)
+}
+
+func getUserAndJSONForHook(username string) (User, []byte, error) {
+	var userAsJSON []byte
+	u, err := provider.userExists(username)
+	if err != nil {
+		if _, ok := err.(*RecordNotFoundError); !ok {
+			return u, userAsJSON, err
+		}
+		u = User{
+			ID:       0,
+			Username: username,
+		}
+	}
+	userAsJSON, err = json.Marshal(u)
+	if err != nil {
+		return u, userAsJSON, err
+	}
+	return u, userAsJSON, err
 }
 
 func providerLog(level logger.LogLevel, format string, v ...interface{}) {
@@ -2456,57 +2489,4 @@ func executeAction(operation string, user *User) {
 			executeNotificationCommand(operation, user.getNotificationFieldsAsSlice(operation), userAsJSON) //nolint:errcheck // the error is used in test cases only
 		}
 	}()
-}
-
-func updateWebDavCachedUserLastLogin(username string) {
-	result, ok := webDAVUsersCache.Load(username)
-	if ok {
-		cachedUser := result.(*CachedUser)
-		cachedUser.User.LastLogin = utils.GetTimeAsMsSinceEpoch(time.Now())
-		webDAVUsersCache.Store(cachedUser.User.Username, cachedUser)
-	}
-}
-
-// CacheWebDAVUser add a user to the WebDAV cache
-func CacheWebDAVUser(cachedUser *CachedUser, maxSize int) {
-	if maxSize > 0 {
-		var cacheSize int
-		var userToRemove string
-		var expirationTime time.Time
-
-		webDAVUsersCache.Range(func(k, v interface{}) bool {
-			cacheSize++
-			if userToRemove == "" {
-				userToRemove = k.(string)
-				expirationTime = v.(*CachedUser).Expiration
-				return true
-			}
-			expireTime := v.(*CachedUser).Expiration
-			if !expireTime.IsZero() && expireTime.Before(expirationTime) {
-				userToRemove = k.(string)
-				expirationTime = expireTime
-			}
-			return true
-		})
-
-		if cacheSize >= maxSize {
-			RemoveCachedWebDAVUser(userToRemove)
-		}
-	}
-
-	if cachedUser.User.Username != "" {
-		webDAVUsersCache.Store(cachedUser.User.Username, cachedUser)
-	}
-}
-
-// GetCachedWebDAVUser returns a previously cached WebDAV user
-func GetCachedWebDAVUser(username string) (interface{}, bool) {
-	return webDAVUsersCache.Load(username)
-}
-
-// RemoveCachedWebDAVUser removes a cached WebDAV user
-func RemoveCachedWebDAVUser(username string) {
-	if username != "" {
-		webDAVUsersCache.Delete(username)
-	}
 }
