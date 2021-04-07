@@ -237,7 +237,7 @@ jobs:
     runs-on: ubuntu-18.04
     strategy:
       matrix:
-        go: 1.16.3
+        go: [1.16.3]
         include:
           - arch: amd64
             go-arch: amd64
@@ -304,8 +304,6 @@ jobs:
             mkdir -p "${PWD}/output"
           dockerRunArgs: |
             --volume "${PWD}/output:/output"
-          env: |
-            GO_VERSION: ${{ env.GO_VERSION }}
           shell: /bin/bash
           install: |
             apt-get update -q -y
