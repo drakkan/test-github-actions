@@ -26,7 +26,7 @@ fi
 
 if [ -d "${BASE_DIR}/output/man/man1" ]
 then
-  cp ${BASE_DIR}/output/man/man1 .
+  cp -r ${BASE_DIR}/output/man/man1 .
 else
   $BASE_DIR/sftpgo gen man -d man1
 fi
