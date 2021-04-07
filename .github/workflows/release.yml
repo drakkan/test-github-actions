@@ -80,7 +80,7 @@ jobs:
           asset_content_type: application/x-xz
 
   publish-window-mac:
-    name: Publish Windows and macOS binaries
+    name: Publish Windows/macOS binaries
     needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
@@ -117,7 +117,7 @@ jobs:
       - name: Get OS name
         id: get_os_name
         run: |
-          if [ $MATRIX_OS == 'macos-10.15' ]
+          if [[ $MATRIX_OS =~ ^macos.* ]]
           then
             echo ::set-output name=OS::macOS
           else
@@ -364,8 +364,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
-          asset_path: ./output/sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.arch }}.tar.xz
-          asset_name: sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.arch }}.tar.xz
+          asset_path: ./output/sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.go-arch }}.tar.xz
+          asset_name: sftpgo_${{ steps.get_version.outputs.VERSION }}_linux_${{ matrix.go-arch }}.tar.xz
           asset_content_type: application/x-xz
 
       - name: Upload Deb Package
