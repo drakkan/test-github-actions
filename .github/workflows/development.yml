@@ -251,14 +251,14 @@ jobs:
           shell: /bin/bash
           install: |
             apt-get update -q -y
-            apt-get install -q -y curl gcc make git
+            apt-get install --no-install-recommends -q -y curl gcc git
             if [ ${{ matrix.go }} == 'latest' ]
             then
               GO_VERSION=$(curl https://golang.org/VERSION?m=text)
             else
               GO_VERSION=${{ matrix.go }}
             fi
-            curl -o go.tar.gz -L https://golang.org/dl/${GO_VERSION}.linux-${{ matrix.go-arch }}.tar.gz
+            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/${GO_VERSION}.linux-${{ matrix.go-arch }}.tar.gz
             tar -C /usr/local -xzf go.tar.gz
           run: |
             export PATH=$PATH:/usr/local/go/bin
@@ -283,9 +283,6 @@ jobs:
       - name: Build Packages
         id: build_linux_pkgs
         run: |
-          cp output/sftpgo .
-          cp output/bash_completion/sftpgo pkgs/sftpgo-completion.bash
-          cp -r output/man/man1 pkgs/
           export NFPM_ARCH=${{ matrix.go-arch }}
           cd pkgs
           ./build.sh
