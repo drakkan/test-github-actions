@@ -25,8 +25,8 @@ sed -i "s|\"static\"|\"/usr/share/sftpgo/static\"|" sftpgo.json
 sed -i "s|\"backups\"|\"/srv/sftpgo/backups\"|" sftpgo.json
 sed -i "s|\"credentials\"|\"/var/lib/sftpgo/credentials\"|" sftpgo.json
 
-$BASE_DIR/sftpgo gen completion bash > sftpgo-completion.bash
-$BASE_DIR/sftpgo gen man -d man1
+#$BASE_DIR/sftpgo gen completion bash > sftpgo-completion.bash
+#$BASE_DIR/sftpgo gen man -d man1
 
 cat >nfpm.yaml <<EOF
 name: "sftpgo"

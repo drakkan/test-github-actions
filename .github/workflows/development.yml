@@ -284,6 +284,8 @@ jobs:
         id: build_linux_pkgs
         run: |
           cp output/sftpgo .
+          cp output/bash_completion/sftpgo pkgs/sftpgo-completion.bash
+          cp -r output/man/man1 pkgs/
           export NFPM_ARCH=${{ matrix.go-arch }}
           cd pkgs
           ./build.sh
