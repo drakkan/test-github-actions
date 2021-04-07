@@ -51,10 +51,10 @@ contents:
   - src: "${BASE_DIR}/sftpgo${BIN_SUFFIX}"
     dst: "/usr/bin/sftpgo"
 
-  - src: "./sftpgo-completion.bash"
+  - src: "../sftpgo-completion.bash"
     dst: "/usr/share/bash-completion/completions/sftpgo"
 
-  - src: "./man1/*"
+  - src: "../man1/*"
     dst: "/usr/share/man/man1/"
 
   - src: "${BASE_DIR}/init/sftpgo.service"
