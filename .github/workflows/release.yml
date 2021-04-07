@@ -242,16 +242,19 @@ jobs:
             go-arch: amd64
             deb-arch: amd64
             rpm-arch: x86_64
+            tar-arch: x86_64
           - arch: aarch64
             distro: ubuntu18.04
             go-arch: arm64
             deb-arch: arm64
             rpm-arch: aarch64
+            tar-arch: arm64
           - arch: ppc64le
             distro: ubuntu18.04
             go-arch: ppc64le
             deb-arch: ppc64el
             rpm-arch: ppc64le
+            tar-arch: ppc64le
 
     steps:
       - uses: actions/checkout@v2
@@ -291,7 +294,7 @@ jobs:
           cp sftpgo output/
           cp sftpgo.db output/sqlite/
           cd output
-          tar cJvf sftpgo_${SFTPGO_VERSION}_linux_${{ matrix.rpm-arch }}.tar.xz *
+          tar cJvf sftpgo_${SFTPGO_VERSION}_linux_${{ matrix.tar-arch }}.tar.xz *
           cd ..
         env:
           SFTPGO_VERSION: ${{ steps.get_version.outputs.SFTPGO_VERSION }}
@@ -333,7 +336,7 @@ jobs:
             cp sftpgo output/
             cp sftpgo.db output/sqlite/
             cd output
-            tar cJvf sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.go-arch }}.tar.xz *
+            tar cJvf sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.tar-arch }}.tar.xz *
             cd ..
 
       - name: Build Packages
@@ -365,8 +368,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
-          asset_path: ./output/sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.rpm-arch }}.tar.xz
-          asset_name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.rpm-arch }}.tar.xz
+          asset_path: ./output/sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.tar-arch }}.tar.xz
+          asset_name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.tar-arch }}.tar.xz
           asset_content_type: application/x-xz
 
       - name: Upload Deb Package
