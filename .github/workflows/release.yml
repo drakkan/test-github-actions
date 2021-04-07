@@ -236,7 +236,6 @@ jobs:
     needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
-      strategy:
       matrix:
         include:
           - arch: amd64

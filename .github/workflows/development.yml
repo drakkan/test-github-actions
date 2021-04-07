@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
 
 jobs:
@@ -225,7 +225,7 @@ jobs:
 
       - uses: uraimo/run-on-arch-action@v2.0.9
         if: ${{ matrix.arch != 'amd64' }}
-        name: Cross build on ${{ matrix.arch }}
+        name: Build on ${{ matrix.arch }}
         id: build
         with:
           arch: ${{ matrix.arch }}
@@ -263,7 +263,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v2
         with:
-          name: sftpgo-linux-go${{ matrix.go }}-${{ matrix.arch }}
+          name: sftpgo-linux-go-${{ matrix.go }}-${{ matrix.arch }}
           path: output
 
       - name: Build Packages
