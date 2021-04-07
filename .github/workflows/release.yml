@@ -294,7 +294,7 @@ jobs:
 
       - uses: uraimo/run-on-arch-action@v2.0.9
         if: ${{ matrix.arch != 'amd64' }}
-        name: Build on ${{ matrix.arch }}
+        name: Build for ${{ matrix.arch }}
         id: build
         with:
           arch: ${{ matrix.arch }}
@@ -303,11 +303,13 @@ jobs:
             mkdir -p "${PWD}/output"
           dockerRunArgs: |
             --volume "${PWD}/output:/output"
+          env: |
+            GO_VERSION: ${{ env.GO_VERSION }}
           shell: /bin/bash
           install: |
             apt-get update -q -y
             apt-get install -q -y curl gcc git
-            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/${{ env.GO_VERSION }}.linux-${{ matrix.go-arch }}.tar.gz
+            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/${GO_VERSION}.linux-${{ matrix.go-arch }}.tar.gz
             tar -C /usr/local -xzf go.tar.gz
           run: |
             export PATH=$PATH:/usr/local/go/bin
