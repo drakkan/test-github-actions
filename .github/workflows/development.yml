@@ -214,6 +214,8 @@ jobs:
             go-arch: ppc64le
     steps:
       - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
       - name: Set up Go
         if: ${{ matrix.arch == 'amd64' }}
         uses: actions/setup-go@v2
@@ -256,7 +258,7 @@ jobs:
             else
               GO_VERSION=${{ matrix.go }}
             fi
-            curl --verbose -o go.tar.gz -L https://golang.org/dl/${GO_VERSION}.linux-${{ matrix.go-arch }}.tar.gz
+            curl -o go.tar.gz -L https://golang.org/dl/${GO_VERSION}.linux-${{ matrix.go-arch }}.tar.gz
             tar -C /usr/local -xzf go.tar.gz
           run: |
             export PATH=$PATH:/usr/local/go/bin
@@ -281,6 +283,7 @@ jobs:
       - name: Build Packages
         id: build_linux_pkgs
         run: |
+          cp output/sftpgo .
           export NFPM_ARCH=${{ matrix.go-arch }}
           cd pkgs
           ./build.sh
