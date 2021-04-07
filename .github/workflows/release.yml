@@ -80,7 +80,7 @@ jobs:
           asset_content_type: application/x-xz
 
   publish-window-mac:
-    name: Publish Windows/macOS binaries
+    name: Publish binaries
     needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
@@ -239,22 +239,19 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            go: 1.16.3
             go-arch: amd64
-            deb-suffix: 1_amd64.deb
-            rpm-suffix: 1.x86_64.rpm
+            deb-arch: amd64
+            rpm-arch: x86_64
           - arch: aarch64
-            go: 1.16.3
             distro: ubuntu18.04
             go-arch: arm64
-            deb-suffix: 1_arm64.deb
-            rpm-suffix: 1.aarch64.rpm
+            deb-arch: arm64
+            rpm-arch: aarch64
           - arch: ppc64le
-            go: 1.16.3
             distro: ubuntu18.04
             go-arch: ppc64le
-            deb-suffix: 1_ppc64el.deb
-            rpm-suffix: 1.ppc64le.rpm
+            deb-arch: ppc64el
+            rpm-arch: ppc64le
 
     steps:
       - uses: actions/checkout@v2
@@ -264,10 +261,16 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Get SFTPGo version
+      - name: Get versions
         id: get_version
-        run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
+        run: |
+          echo ::set-output name=SFTPGO_VERSION::${GITHUB_REF/refs\/tags\//}
+          echo ::set-output name=GO_VERSION::${GO_VERSION}
+          echo go ${GO_VERSION}
         shell: bash
+        env:
+          GO_VERSION: ${{ env.GO_VERSION }}
+
 
       - name: Build on amd64
         if: ${{ matrix.arch == 'amd64' }}
@@ -290,10 +293,10 @@ jobs:
           cp sftpgo output/
           cp sftpgo.db output/sqlite/
           cd output
-          tar cJvf sftpgo_${SFTPGO_VERSION}_linux_${{ matrix.go-arch }}.tar.xz *
+          tar cJvf sftpgo_${SFTPGO_VERSION}_linux_${{ matrix.rpm-arch }}.tar.xz *
           cd ..
         env:
-          SFTPGO_VERSION: ${{ steps.get_version.outputs.VERSION }}
+          SFTPGO_VERSION: ${{ steps.get_version.outputs.SFTPGO_VERSION }}
 
       - uses: uraimo/run-on-arch-action@v2.0.9
         if: ${{ matrix.arch != 'amd64' }}
@@ -310,7 +313,7 @@ jobs:
           install: |
             apt-get update -q -y
             apt-get install -q -y curl gcc git xz-utils
-            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/go${{ matrix.go }}.linux-${{ matrix.go-arch }}.tar.gz
+            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/go${{ steps.get_version.outputs.GO_VERSION }}.linux-${{ matrix.go-arch }}.tar.gz
             tar -C /usr/local -xzf go.tar.gz
           run: |
             export PATH=$PATH:/usr/local/go/bin
@@ -318,7 +321,7 @@ jobs:
             mkdir -p output/{init,sqlite,bash_completion,zsh_completion}
             echo "For documentation please take a look here:" > output/README.txt
             echo "" >> output/README.txt
-            echo "https://github.com/drakkan/sftpgo/blob/${{ steps.get_version.outputs.VERSION }}/README.md" >> output/README.txt
+            echo "https://github.com/drakkan/sftpgo/blob/${{ steps.get_version.outputs.SFTPGO_VERSION }}/README.md" >> output/README.txt
             cp LICENSE output/
             cp sftpgo.json output/
             cp -r templates output/
@@ -374,8 +377,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
-          asset_path: ./pkgs/dist/deb/sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-${{ matrix.deb-suffix}}
-          asset_name: sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-${{ matrix.deb-suffix}}
+          asset_path: ./pkgs/dist/deb/sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-1_${{ matrix.deb-arch}}.deb
+          asset_name: sftpgo_${{ steps.build_linux_pkgs.outputs.pkg-version }}-1_${{ matrix.deb-arch}}.rpm
           asset_content_type: application/vnd.debian.binary-package
 
       - name: Upload RPM Package
@@ -384,6 +387,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.upload_url.outputs.url }}
-          asset_path: ./pkgs/dist/rpm/sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-${{ matrix.rpm-suffix}}
-          asset_name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-${{ matrix.rpm-suffix}}
+          asset_path: ./pkgs/dist/rpm/sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-1.${{ matrix.rpm-arch}}.rpm
+          asset_name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-1.${{ matrix.rpm-arch}}.rpm
           asset_content_type: application/x-rpm
