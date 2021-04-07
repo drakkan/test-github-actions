@@ -69,20 +69,6 @@ jobs:
           SFTPGO_DATA_PROVIDER__DRIVER: memory
           SFTPGO_DATA_PROVIDER__NAME: ''
 
-      - name: Prepare build artifact for Linux/macOS
-        if: startsWith(matrix.os, 'windows-') != true
-        run: |
-          mkdir -p output/{bash_completion,zsh_completion}
-          cp sftpgo output/
-          cp sftpgo.json output/
-          cp -r templates output/
-          cp -r static output/
-          cp -r init output/
-          ./sftpgo gen completion bash > output/bash_completion/sftpgo
-          ./sftpgo gen completion zsh > output/zsh_completion/_sftpgo
-          ./sftpgo gen man -d output/man/man1
-          gzip output/man/man1/*
-
       - name: Prepare build artifact for macOS
         if: startsWith(matrix.os, 'macos-') == true
         run: |
