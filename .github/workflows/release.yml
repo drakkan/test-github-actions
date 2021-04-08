@@ -444,6 +444,9 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
           files: |
             sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_x86_64.tar.xz
             sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_arm64.tar.xz
