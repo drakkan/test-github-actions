@@ -447,7 +447,7 @@ jobs:
           echo "Creating release ${SFTPGO_VERSION}"
           gh release create "${SFTPGO_VERSION}"
           gh release upload "${SFTPGO_VERSION}" sftpgo_*.xz --clobber
-          gh release upload "${SFTPGO_VERSION}" sftpgo_*.rpm --clobber
+          gh release upload "${SFTPGO_VERSION}" sftpgo-*.rpm --clobber
           gh release upload "${SFTPGO_VERSION}" sftpgo_*.deb --clobber
           gh release upload "${SFTPGO_VERSION}" sftpgo_*.exe --clobber
           gh release upload "${SFTPGO_VERSION}" sftpgo_*.zip --clobber
