@@ -444,6 +444,13 @@ jobs:
 
       - name: Create release
         run: |
-          gh release create "${GITHUB_REF/refs\/tags\//}" sftpgo_*xz sftpgo_*exe sftpgo_*zip sftpgo_*rpm sftpgo_*deb
+          echo "Creating release ${SFTPGO_VERSION}"
+          gh release create "${SFTPGO_VERSION}" sftpgo_*xz
+          gh release upload "${SFTPGO_VERSION}" sftpgo_*rpm
+          gh release upload "${SFTPGO_VERSION}" sftpgo_*deb
+          gh release upload "${SFTPGO_VERSION}" sftpgo_*exe
+          gh release upload "${SFTPGO_VERSION}" sftpgo_*zip
+          gh release view "${SFTPGO_VERSION}"
         env:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+          SFTPGO_VERSION: ${{ steps.get_version.outputs.SFTPGO_VERSION }}
