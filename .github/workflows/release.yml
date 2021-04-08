@@ -445,11 +445,12 @@ jobs:
       - name: Create release
         run: |
           echo "Creating release ${SFTPGO_VERSION}"
-          gh release create "${SFTPGO_VERSION}" sftpgo_*xz
-          gh release upload "${SFTPGO_VERSION}" sftpgo_*rpm
-          gh release upload "${SFTPGO_VERSION}" sftpgo_*deb
-          gh release upload "${SFTPGO_VERSION}" sftpgo_*exe
-          gh release upload "${SFTPGO_VERSION}" sftpgo_*zip
+          gh release create "${SFTPGO_VERSION}"
+          gh release upload "${SFTPGO_VERSION}" sftpgo_*.xz --clobber
+          gh release upload "${SFTPGO_VERSION}" sftpgo_*.rpm --clobber
+          gh release upload "${SFTPGO_VERSION}" sftpgo_*.deb --clobber
+          gh release upload "${SFTPGO_VERSION}" sftpgo_*.exe --clobber
+          gh release upload "${SFTPGO_VERSION}" sftpgo_*.zip --clobber
           gh release view "${SFTPGO_VERSION}"
         env:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
