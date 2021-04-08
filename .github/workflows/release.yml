@@ -32,6 +32,7 @@ jobs:
         with:
           name: upload_url
           path: ./upload_url.txt
+          retention-days: 1
 
   release-sources-with-deps:
     name: Publish sources
@@ -344,6 +345,7 @@ jobs:
         with:
           name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.tar-arch }}.tar.xz
           path: ./output/sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_${{ matrix.tar-arch }}.tar.xz
+          retention-days: 1
 
       - name: Build Packages
         id: build_linux_pkgs
@@ -439,7 +441,7 @@ jobs:
           tar cJvf sftpgo_${SFTPGO_VERSION}_linux_bundle.tar.xz *
           cd ..
         env:
-          SFTPGO_VERSION: ${{ steps.get_version.outputs.VERSION }}
+          SFTPGO_VERSION: ${{ steps.get_version.outputs.SFTPGO_VERSION }}
 
       - name: Download release upload URL
         uses: actions/download-artifact@v2
