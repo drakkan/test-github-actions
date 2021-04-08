@@ -138,7 +138,7 @@ jobs:
           xcopy .\templates .\win-portable\templates\ /E
           mkdir win-portable\static
           xcopy .\static .\win-portable\static\ /E
-          Compress-Archive .\win-portable\* sftpgo_${SFTPGO_VERSION}_${OS}_portable_x86_64.zip
+          Compress-Archive .\win-portable\* sftpgo_portable_x86_64.zip
         env:
           SFTPGO_VERSION: ${{ steps.get_version.outputs.VERSION }}
           OS: ${{ steps.get_os_name.outputs.OS }}
@@ -445,6 +445,7 @@ jobs:
       - name: Create release
         run: |
           mv sftpgo_windows_x86_64.exe sftpgo_${SFTPGO_VERSION}_windows_x86_64.exe
+          mv sftpgo_portable_x86_64.zip sftpgo_${SFTPGO_VERSION}_windows_portable_x86_64.zip
           gh release create "${SFTPGO_VERSION}"
           gh release upload "${SFTPGO_VERSION}" sftpgo_*.xz --clobber
           gh release upload "${SFTPGO_VERSION}" sftpgo-*.rpm --clobber
