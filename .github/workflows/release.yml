@@ -362,6 +362,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v2
       - name: Get versions
         id: get_version
         run: |
@@ -443,7 +444,6 @@ jobs:
 
       - name: Create release
         run: |
-          tagname="${GITHUB_REF#refs/tags/}"
-          gh release create "$tagname" sftpgo_*
+          gh release create "${GITHUB_REF/refs\/tags\//}" sftpgo_*xz sftpgo_*exe sftpgo_*zip sftpgo_*rpm sftpgo_*deb
         env:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
