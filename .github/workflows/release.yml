@@ -444,23 +444,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
-          fail_on_unmatched_files: true
           draft: false
           prerelease: false
-          files: |
-            sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_x86_64.tar.xz
-            sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_arm64.tar.xz
-            sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_ppc64le.tar.xz
-            sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_bundle.tar.xz
-            sftpgo_${{ steps.get_version.outputs.PKG_VERSION }}-1_amd64.deb
-            sftpgo_${{ steps.get_version.outputs.PKG_VERSION }}-1_arm64.deb
-            sftpgo_${{ steps.get_version.outputs.PKG_VERSION }}-1_ppc64el.deb
-            sftpgo-${{ steps.get_version.outputs.PKG_VERSION }}-1.x86_64.rpm
-            sftpgo-${{ steps.get_version.outputs.PKG_VERSION }}-1.aarch64.rpm
-            sftpgo-${{ steps.get_version.outputs.PKG_VERSION }}-1.ppc64le.rpm
-            sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_macOS_x86_64.tar.xz
-            sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_windows_x86_64.exe
-            sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_windows_portable_x86_64.zip
-            sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_src_with_deps.tar.xz
+          files: sftpgo_*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
