@@ -164,7 +164,7 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_portable_x86_64.zip
-          path: ./sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_portable_x86_64.zip
+          path: ./sftpgo_portable_x86_64.zip
           retention-days: 1
 
   prepare-linux:
