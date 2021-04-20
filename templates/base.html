@@ -12,16 +12,36 @@
 
     <title>SFTPGo - {{template "title" .}}</title>
 
-    <link rel="shortcut icon" href="/static/favicon.ico" />
+    <link rel="shortcut icon" href="{{.StaticURL}}/favicon.ico" />
 
     <!-- Custom fonts for this template-->
-    <link href="/static/vendor/fontawesome-free/css/fontawesome.min.css" rel="stylesheet" type="text/css">
-    <link href="/static/vendor/fontawesome-free/css/solid.min.css" rel="stylesheet" type="text/css">
-    <link href="/static/css/fonts.css" rel="stylesheet">
+    <link href="{{.StaticURL}}/vendor/fontawesome-free/css/fontawesome.min.css" rel="stylesheet" type="text/css">
+    <link href="{{.StaticURL}}/vendor/fontawesome-free/css/solid.min.css" rel="stylesheet" type="text/css">
 
     <!-- Custom styles for this template-->
-    <link href="/static/css/sb-admin-2.min.css" rel="stylesheet">
+    <link href="{{.StaticURL}}/css/sb-admin-2.min.css" rel="stylesheet">
     <style>
+        @font-face {
+            font-family: 'Roboto';
+            src: url('{{.StaticURL}}/vendor/fonts/Roboto-Bold-webfont.woff');
+            font-weight: 700;
+            font-style: normal;
+        }
+
+        @font-face {
+            font-family: 'Roboto';
+            src: url('{{.StaticURL}}/vendor/fonts/Roboto-Regular-webfont.woff');
+            font-weight: 400;
+            font-style: normal;
+        }
+
+        @font-face {
+            font-family: 'Roboto';
+            src: url('{{.StaticURL}}/vendor/fonts/Roboto-Light-webfont.woff');
+            font-weight: 300;
+            font-style: normal;
+        }
+
         div.dt-buttons {
             margin-bottom: 1em;
         }
@@ -134,7 +154,7 @@
                             <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-toggle="dropdown"
                                 aria-haspopup="true" aria-expanded="false">
                                 <span class="mr-2 d-none d-lg-inline text-gray-600 small">{{.LoggedAdmin.Username}}</span>
-                                <img class="img-profile rounded-circle" src="/static/img/undraw_profile.svg">
+                                <i class="fas fa-user fa-fw"></i>
                             </a>
                             <!-- Dropdown - User Information -->
                             <div class="dropdown-menu dropdown-menu-right shadow animated--grow-in" aria-labelledby="userDropdown">
@@ -212,14 +232,14 @@
     {{block "dialog" .}}{{end}}
 
     <!-- Bootstrap core JavaScript-->
-    <script src="/static/vendor/jquery/jquery.min.js"></script>
-    <script src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+    <script src="{{.StaticURL}}/vendor/jquery/jquery.min.js"></script>
+    <script src="{{.StaticURL}}/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
 
     <!-- Core plugin JavaScript-->
-    <script src="/static/vendor/jquery-easing/jquery.easing.min.js"></script>
+    <script src="{{.StaticURL}}/vendor/jquery-easing/jquery.easing.min.js"></script>
 
     <!-- Custom scripts for all pages-->
-    <script src="/static/js/sb-admin-2.min.js"></script>
+    <script src="{{.StaticURL}}/js/sb-admin-2.min.js"></script>
 
     <script type="text/javascript">
         function fixedEncodeURIComponent(str) {

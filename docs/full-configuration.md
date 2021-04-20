@@ -62,6 +62,7 @@ The configuration file contains the following sections:
   - `proxy_allowed`, List of IP addresses and IP ranges allowed to send the proxy header:
     - If `proxy_protocol` is set to 1 and we receive a proxy header from an IP that is not in the list then the connection will be accepted and the header will be ignored
     - If `proxy_protocol` is set to 2 and we receive a proxy header from an IP that is not in the list then the connection will be rejected
+  - `startup_hook`, string. Absolute path to an external program or an HTTP URL to invoke as soon as SFTPGo starts. If you define an HTTP URL it will be invoked using a `GET` request. Please note that SFTPGo services may not yet be available when this hook is run. Leave empty do disable
   - `post_connect_hook`, string. Absolute path to the command to execute or HTTP URL to notify. See [Post connect hook](./post-connect-hook.md) for more details. Leave empty to disable
   - `max_total_connections`, integer. Maximum number of concurrent client connections. 0 means unlimited
   - `defender`, struct containing the defender configuration. See [Defender](./defender.md) for more details.
@@ -71,11 +72,21 @@ The configuration file contains the following sections:
     - `threshold`, integer. Threshold value for banning a client.
     - `score_invalid`, integer. Score for invalid login attempts, eg. non-existent user accounts or client disconnected for inactivity without authentication attempts.
     - `score_valid`, integer. Score for valid login attempts, eg. user accounts that exist.
+    - `score_rate_exceeded`, integer. Score for hosts that exceeded the configured rate limits.
     - `observation_time`, integer. Defines the time window, in minutes, for tracking client errors. A host is banned if it has exceeded the defined threshold during the last observation time minutes.
     - `entries_soft_limit`, integer.
     - `entries_hard_limit`, integer. The number of banned IPs and host scores kept in memory will vary between the soft and hard limit.
     - `safelist_file`, string. Path to a file containing a list of ip addresses and/or networks to never ban.
     - `blocklist_file`, string. Path to a file containing a list of ip addresses and/or networks to always ban. The lists can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows. An host that is already banned will not be automatically unbanned if you put it inside the safe list, you have to unban it using the REST API.
+  - `rate_limiters`, list of structs containing the rate limiters configuration. Take a look [here](./rate-limiting.md) for more details. Each struct has the following fields:
+    - `average`, integer. Average defines the maximum rate allowed. 0 means disabled. Default: 0
+    - `period`, integer. Period defines the period as milliseconds. The rate is actually defined by dividing average by period Default: 1000 (1 second).
+    - `burst`, integer. Burst defines the maximum number of requests allowed to go through in the same arbitrarily small period of time. Default: 1
+    - `type`, integer. 1 means a global rate limiter, independent from the source host. 2 means a per-ip rate limiter. Default: 2
+    - `protocols`, list of strings. Available protocols are `SSH`, `FTP`, `DAV`, `HTTP`. By default all supported protocols are enabled
+    - `generate_defender_events`, boolean. If `true`, the defender is enabled, and this is not a global rate limiter, a new defender event will be generated each time the configured limit is exceeded. Default `false`
+    - `entries_soft_limit`, integer.
+    - `entries_hard_limit`, integer. The number of per-ip rate limiters kept in memory will vary between the soft and hard limit
 - **"sftpd"**, the configuration for the SFTP server
   - `bindings`, list of structs. Each struct has the following fields:
     - `port`, integer. The port used for serving SFTP requests. 0 means disabled. Default: 2022
@@ -108,8 +119,8 @@ The configuration file contains the following sections:
     - `address`, string. Leave blank to listen on all available network interfaces. Default: "".
     - `apply_proxy_config`, boolean. If enabled the common proxy configuration, if any, will be applied. Default `true`.
     - `tls_mode`, integer. 0 means accept both cleartext and encrypted sessions. 1 means TLS is required for both control and data connection. 2 means implicit TLS. Do not enable this blindly, please check that a proper TLS config is in place if you set `tls_mode` is different from 0.
-    - `force_passive_ip`, ip address. External IP address to expose for passive connections. Leavy empty to autodetect. Defaut: "".
-    - `client_auth_type`, integer. Set to `1` to require client certificate authentication in addition to FTP authentication. You need to define at least a certificate authority for this to work. Default: 0.
+    - `force_passive_ip`, ip address. External IP address to expose for passive connections. Leavy empty to autodetect. If not empty, it must be a valid IPv4 address. Defaut: "".
+    - `client_auth_type`, integer. Set to `1` to require a client certificate and verify it. Set to `2` to request a client certificate during the TLS handshake and verify it if given, in this mode the client is allowed not to send a certificate. At least one certification authority must be defined in order to verify client certificates. If no certification authority is defined, this setting is ignored. Default: 0.
     - `tls_cipher_suites`, list of strings. List of supported cipher suites for TLS version 1.2. If empty, a default list of secure cipher suites is used, with a preference order based on hardware performance. Note that TLS 1.3 ciphersuites are not configurable. The supported ciphersuites names are defined [here](https://github.com/golang/go/blob/master/src/crypto/tls/cipher_suites.go#L52). Any invalid name will be silently ignored. The order matters, the ciphers listed first will be the preferred ones. Default: empty.
   - `bind_port`, integer. Deprecated, please use `bindings`
   - `bind_address`, string. Deprecated, please use `bindings`
@@ -132,8 +143,9 @@ The configuration file contains the following sections:
     - `port`, integer. The port used for serving WebDAV requests. 0 means disabled. Default: 0.
     - `address`, string. Leave blank to listen on all available network interfaces. Default: "".
     - `enable_https`, boolean. Set to `true` and provide both a certificate and a key file to enable HTTPS connection for this binding. Default `false`.
-    - `client_auth_type`, integer. Set to `1` to require client certificate authentication in addition to basic authentication. You need to define at least a certificate authority for this to work. Default: 0.
+    - `client_auth_type`, integer. Set to `1` to require a client certificate and verify it. Set to `2` to request a client certificate during the TLS handshake and verify it if given, in this mode the client is allowed not to send a certificate. At least one certification authority must be defined in order to verify client certificates. If no certification authority is defined, this setting is ignored. Default: 0.
     - `tls_cipher_suites`, list of strings. List of supported cipher suites for TLS version 1.2. If empty, a default list of secure cipher suites is used, with a preference order based on hardware performance. Note that TLS 1.3 ciphersuites are not configurable. The supported ciphersuites names are defined [here](https://github.com/golang/go/blob/master/src/crypto/tls/cipher_suites.go#L52). Any invalid name will be silently ignored. The order matters, the ciphers listed first will be the preferred ones. Default: empty.
+    - `prefix`, string. Prefix for WebDAV resources, if empty WebDAV resources will be available at the `/` URI. If defined it must be an absolute URI, for example `/dav`. Default: "".
   - `bind_port`, integer. Deprecated, please use `bindings`.
   - `bind_address`, string. Deprecated, please use `bindings`.
   - `certificate_file`, string. Certificate for WebDAV over HTTPS. This can be an absolute path or a path relative to the config dir.
@@ -153,7 +165,7 @@ The configuration file contains the following sections:
     - `expiration_time`, integer. Expiration time, in minutes, for the cached users. 0 means unlimited. Default: 0.
     - `max_size`, integer. Maximum number of users to cache. 0 means unlimited. Default: 50.
 - **"data_provider"**, the configuration for the data provider
-  - `driver`, string. Supported drivers are `sqlite`, `mysql`, `postgresql`, `bolt`, `memory`
+  - `driver`, string. Supported drivers are `sqlite`, `mysql`, `postgresql`, `cockroachdb`, `bolt`, `memory`
   - `name`, string. Database name. For driver `sqlite` this can be the database name relative to the config dir or the absolute path to the SQLite database. For driver `memory` this is the (optional) path relative to the config dir or the absolute path to the provider dump, obtained using the `dumpdata` REST API, to load. This dump will be loaded at startup and can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows. The `memory` provider will not modify the provided file so quota usage and last login will not be persisted. If you plan to use a SQLite database over a `cifs` network share (this is not recommended in general) you must use the `nobrl` mount option otherwise you will get the `database is locked` error. Some users reported that the `bolt` provider works fine over `cifs` shares.
   - `host`, string. Database host. Leave empty for drivers `sqlite`, `bolt` and `memory`
   - `port`, integer. Database port. Leave empty for drivers `sqlite`, `bolt` and `memory`
@@ -173,7 +185,7 @@ The configuration file contains the following sections:
     - `hook`, string. Absolute path to the command to execute or HTTP URL to notify.
   - `external_auth_program`, string. Deprecated, please use `external_auth_hook`.
   - `external_auth_hook`, string. Absolute path to an external program or an HTTP URL to invoke for users authentication. See [External Authentication](./external-auth.md) for more details. Leave empty to disable.
-  - `external_auth_scope`, integer. 0 means all supported authentication scopes (passwords, public keys and keyboard interactive). 1 means passwords only. 2 means public keys only. 4 means key keyboard interactive only. The flags can be combined, for example 6 means public keys and keyboard interactive
+  - `external_auth_scope`, integer. 0 means all supported authentication scopes (passwords, public keys and keyboard interactive). 1 means passwords only. 2 means public keys only. 4 means key keyboard interactive only. 8 means TLS certificate. The flags can be combined, for example 6 means public keys and keyboard interactive
   - `credentials_path`, string. It defines the directory for storing user provided credential files such as Google Cloud Storage credentials. This can be an absolute path or a path relative to the config dir
   - `prefer_database_credentials`, boolean. When true, users' Google Cloud Storage credentials will be written to the data provider instead of disk, though pre-existing credentials on disk will be used as a fallback. When false, they will be written to the directory specified by `credentials_path`.
   - `pre_login_program`, string. Deprecated, please use `pre_login_hook`.
@@ -182,13 +194,18 @@ The configuration file contains the following sections:
   - `post_login_scope`, defines the scope for the post-login hook. 0 means notify both failed and successful logins. 1 means notify failed logins. 2 means notify successful logins.
   - `check_password_hook`, string.  Absolute path to an external program or an HTTP URL to invoke to check the user provided password. See [Check password hook](./check-password-hook.md) for more details. Leave empty to disable.
   - `check_password_scope`, defines the scope for the check password hook. 0 means all protocols, 1 means SSH, 2 means FTP, 4 means WebDAV. You can combine the scopes, for example 6 means FTP and WebDAV.
-  - `password_hashing`, struct. It contains the configuration parameters to be used to generate the password hash. SFTPGo can verify passwords in several formats and uses the `argon2id` algorithm to hash passwords in plain-text before storing them inside the data provider. These options allow you to customize how the hash is generated.
-    - `argon2_options` struct containing the options for argon2id hashing algorithm. The `memory` and `iterations` parameters control the computational cost of hashing the password. The higher these figures are, the greater the cost of generating the hash and the longer the runtime. It also follows that the greater the cost will be for any attacker trying to guess the password. If the code is running on a machine with multiple cores, then you can decrease the runtime without reducing the cost by increasing the `parallelism` parameter. This controls the number of threads that the work is spread across.
+  - `password_hashing`, struct. It contains the configuration parameters to be used to generate the password hash. SFTPGo can verify passwords in several formats and uses, by default, the `argon2id` algorithm to hash passwords in plain-text before storing them inside the data provider. These options allow you to customize how the hash is generated.
+    - `argon2_options`, struct containing the options for argon2id hashing algorithm. The `memory` and `iterations` parameters control the computational cost of hashing the password. The higher these figures are, the greater the cost of generating the hash and the longer the runtime. It also follows that the greater the cost will be for any attacker trying to guess the password. If the code is running on a machine with multiple cores, then you can decrease the runtime without reducing the cost by increasing the `parallelism` parameter. This controls the number of threads that the work is spread across.
       - `memory`, unsigned integer. The amount of memory used by the algorithm (in kibibytes). Default: 65536.
       - `iterations`, unsigned integer. The number of iterations over the memory. Default: 1.
       - `parallelism`. unsigned 8 bit integer. The number of threads (or lanes) used by the algorithm. Default: 2.
+    - `bcrypt_options`, struct containing the options for bcrypt hashing algorithm
+      - `cost`, integer between 4 and 31. Default: 10
+  - `password_hashing_algo`, string. Algorithm to use for hashing passwords. Available algorithms: `argon2id`, `bcrypt`. Default: `argon2id`
+  - `password_caching`, boolean. Verifying argon2id passwords has a high memory and computational cost, verifying bcrypt passwords has a high CPU cost, by enabling, in memory, password caching you reduce these costs. Default: `true`
   - `update_mode`, integer. Defines how the database will be initialized/updated. 0 means automatically. 1 means manually using the initprovider sub-command.
   - `skip_natural_keys_validation`, boolean. If `true` you can use any UTF-8 character for natural keys as username, admin name, folder name. These keys are used in URIs for REST API and Web admin. If `false` only unreserved URI characters are allowed: ALPHA / DIGIT / "-" / "." / "_" / "~". Default: `false`.
+  - `delayed_quota_update`, integer. This configuration parameter defines the number of seconds to accumulate quota updates. If there are a lot of close uploads, accumulating quota updates can save you many queries to the data provider. If you want to track quotas, a scheduled quota update is recommended in any case, the stored quota size may be incorrect for several reasons, such as an unexpected shutdown, temporary provider failures, file copied outside of SFTPGo, and so on. 0 means immediate quota update.
 - **"httpd"**, the configuration for the HTTP server used to serve REST API and to expose the built-in web interface
   - `bindings`, list of structs. Each struct has the following fields:
     - `port`, integer. The port used for serving HTTP requests. Default: 8080.
@@ -202,6 +219,7 @@ The configuration file contains the following sections:
   - `templates_path`, string. Path to the HTML web templates. This can be an absolute path or a path relative to the config dir
   - `static_files_path`, string. Path to the static files for the web interface. This can be an absolute path or a path relative to the config dir. If both `templates_path` and `static_files_path` are empty the built-in web interface will be disabled
   - `backups_path`, string. Path to the backup directory. This can be an absolute path or a path relative to the config dir. We don't allow backups in arbitrary paths for security reasons
+  - `web_admin_root`, string.  Defines a base URL for the web admin. If empty web admin resources will be available at the root ("/") URI. If defined it must be an absolute URI or it will be ignored
   - `certificate_file`, string. Certificate for HTTPS. This can be an absolute path or a path relative to the config dir.
   - `certificate_key_file`, string. Private key matching the above certificate. This can be an absolute path or a path relative to the config dir. If both the certificate and the private key are provided, the server will expect HTTPS connections. Certificate and key files can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
   - `ca_certificates`, list of strings. Set of root certificate authorities to be used to verify client certificates.
@@ -265,6 +283,15 @@ Let's see some examples:
 
 - To set the `port` for the first sftpd binding, you need to define the env var `SFTPGO_SFTPD__BINDINGS__0__PORT`
 - To set the `execute_on` actions, you need to define the env var `SFTPGO_COMMON__ACTIONS__EXECUTE_ON`. For example `SFTPGO_COMMON__ACTIONS__EXECUTE_ON=upload,download`
+
+On some hardware you can get faster SFTP performance by replacing the Go `crypto/sha256` implementation with [sha256-simd](https://github.com/minio/sha256-simd).
+
+The performances of SHA256 is relevant for clients using AES CTR ciphers and `hmac-sha2-256` as Message Authentication Code (MAC).
+
+Up to 2.0.x versions SFTPGo automatically used `sha256-simd` but over the time the standard Go implementation improved a lot and now is faster than `sha256-simd` on some CPUs.
+You can select `sha256-simd` setting the environment variable `SFTPGO_MINIO_SHA256_SIMD` to `1`.
+
+ `sha256-simd` is particularly useful if you have an Intel CPU with SHA extensions or an ARM CPU with Cryptography Extensions.
 
 ## Telemetry Server
 

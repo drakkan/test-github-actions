@@ -69,17 +69,24 @@ func (s *webDavServer) listenAndServe(compressor *middleware.Compressor) error {
 		}
 		logger.Debug(logSender, "", "configured TLS cipher suites for binding %#v: %v", s.binding.GetAddress(),
 			httpServer.TLSConfig.CipherSuites)
-		if s.binding.ClientAuthType == 1 {
+		if s.binding.isMutualTLSEnabled() {
 			httpServer.TLSConfig.ClientCAs = certMgr.GetRootCAs()
-			httpServer.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
 			httpServer.TLSConfig.VerifyConnection = s.verifyTLSConnection
+			switch s.binding.ClientAuthType {
+			case 1:
+				httpServer.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			case 2:
+				httpServer.TLSConfig.ClientAuth = tls.VerifyClientCertIfGiven
+			}
 		}
 		logger.Info(logSender, "", "starting HTTPS serving, binding: %v", s.binding.GetAddress())
+		utils.CheckTCP4Port(s.binding.Port)
 		return httpServer.ListenAndServeTLS("", "")
 	}
 	s.binding.EnableHTTPS = false
 	serviceStatus.Bindings = append(serviceStatus.Bindings, s.binding)
 	logger.Info(logSender, "", "starting HTTP serving, binding: %v", s.binding.GetAddress())
+	utils.CheckTCP4Port(s.binding.Port)
 	return httpServer.ListenAndServe()
 }
 
@@ -92,6 +99,9 @@ func (s *webDavServer) verifyTLSConnection(state tls.ConnectionState) error {
 			clientCrtName = clientCrt.Subject.String()
 		}
 		if len(state.VerifiedChains) == 0 {
+			if s.binding.ClientAuthType == 2 {
+				return nil
+			}
 			logger.Warn(logSender, "", "TLS connection cannot be verified: unable to get verification chain")
 			return errors.New("TLS connection cannot be verified: unable to get verification chain")
 		}
@@ -137,6 +147,9 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, common.ErrGenericFailure.Error(), http.StatusInternalServerError)
 		}
 	}()
+	common.Connections.AddNetworkConnection()
+	defer common.Connections.RemoveNetworkConnection()
+
 	if !common.Connections.IsNewConnectionAllowed() {
 		logger.Log(logger.LevelDebug, common.ProtocolFTP, "", "connection refused, configured limit reached")
 		http.Error(w, common.ErrConnectionDenied.Error(), http.StatusServiceUnavailable)
@@ -148,38 +161,54 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, common.ErrConnectionDenied.Error(), http.StatusForbidden)
 		return
 	}
+	delay, err := common.LimitRate(common.ProtocolWebDAV, ipAddr)
+	if err != nil {
+		delay += 499999999 * time.Nanosecond
+		w.Header().Set("Retry-After", fmt.Sprintf("%.0f", delay.Seconds()))
+		w.Header().Set("X-Retry-In", delay.String())
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	}
 	if err := common.Config.ExecutePostConnectHook(ipAddr, common.ProtocolWebDAV); err != nil {
 		http.Error(w, common.ErrConnectionDenied.Error(), http.StatusForbidden)
 		return
 	}
-	user, _, lockSystem, err := s.authenticate(r, ipAddr)
+	user, isCached, lockSystem, loginMethod, err := s.authenticate(r, ipAddr)
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", "Basic realm=\"SFTPGo WebDAV\"")
-		http.Error(w, err401.Error(), http.StatusUnauthorized)
+		http.Error(w, fmt.Sprintf("Authentication error: %v", err), http.StatusUnauthorized)
 		return
 	}
 
-	connectionID, err := s.validateUser(&user, r)
+	connectionID, err := s.validateUser(&user, r, loginMethod)
 	if err != nil {
-		updateLoginMetrics(&user, ipAddr, err)
+		// remove the cached user, we have not yet validated its filesystem
+		dataprovider.RemoveCachedWebDAVUser(user.Username)
+		updateLoginMetrics(&user, ipAddr, loginMethod, err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 
-	fs, err := user.GetFilesystem(connectionID)
+	if !isCached {
+		err = user.CheckFsRoot(connectionID)
+	} else {
+		_, err = user.GetFilesystem(connectionID)
+	}
 	if err != nil {
-		updateLoginMetrics(&user, ipAddr, err)
+		errClose := user.CloseFs()
+		logger.Warn(logSender, connectionID, "unable to check fs root: %v close fs error: %v", err, errClose)
+		updateLoginMetrics(&user, ipAddr, loginMethod, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	updateLoginMetrics(&user, ipAddr, err)
+	updateLoginMetrics(&user, ipAddr, loginMethod, err)
 
 	ctx := context.WithValue(r.Context(), requestIDKey, connectionID)
 	ctx = context.WithValue(ctx, requestStartKey, time.Now())
 
 	connection := &Connection{
-		BaseConnection: common.NewBaseConnection(connectionID, common.ProtocolWebDAV, user, fs),
+		BaseConnection: common.NewBaseConnection(connectionID, common.ProtocolWebDAV, user),
 		request:        r,
 	}
 	common.Connections.Add(connection)
@@ -195,6 +224,7 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	handler := webdav.Handler{
+		Prefix:     s.binding.Prefix,
 		FileSystem: connection,
 		LockSystem: lockSystem,
 		Logger:     writeLog,
@@ -202,56 +232,71 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	handler.ServeHTTP(w, r.WithContext(ctx))
 }
 
-func (s *webDavServer) authenticate(r *http.Request, ip string) (dataprovider.User, bool, webdav.LockSystem, error) {
+func (s *webDavServer) getCredentialsAndLoginMethod(r *http.Request) (string, string, string, *x509.Certificate, bool) {
+	var tlsCert *x509.Certificate
+	loginMethod := dataprovider.LoginMethodPassword
+	username, password, ok := r.BasicAuth()
+	if s.binding.isMutualTLSEnabled() && r.TLS != nil {
+		if len(r.TLS.PeerCertificates) > 0 {
+			tlsCert = r.TLS.PeerCertificates[0]
+			if ok {
+				loginMethod = dataprovider.LoginMethodTLSCertificateAndPwd
+			} else {
+				loginMethod = dataprovider.LoginMethodTLSCertificate
+				username = tlsCert.Subject.CommonName
+				password = ""
+			}
+			ok = true
+		}
+	}
+	return username, password, loginMethod, tlsCert, ok
+}
+
+func (s *webDavServer) authenticate(r *http.Request, ip string) (dataprovider.User, bool, webdav.LockSystem, string, error) {
 	var user dataprovider.User
 	var err error
-	username, password, ok := r.BasicAuth()
+	username, password, loginMethod, tlsCert, ok := s.getCredentialsAndLoginMethod(r)
 	if !ok {
-		return user, false, nil, err401
+		return user, false, nil, loginMethod, err401
 	}
-	result, ok := dataprovider.GetCachedWebDAVUser(username)
+	cachedUser, ok := dataprovider.GetCachedWebDAVUser(username)
 	if ok {
-		cachedUser := result.(*dataprovider.CachedUser)
 		if cachedUser.IsExpired() {
 			dataprovider.RemoveCachedWebDAVUser(username)
 		} else {
-			if password != "" && cachedUser.Password == password {
-				return cachedUser.User, true, cachedUser.LockSystem, nil
+			if !cachedUser.User.IsTLSUsernameVerificationEnabled() {
+				// for backward compatibility with 2.0.x we only check the password
+				tlsCert = nil
+				loginMethod = dataprovider.LoginMethodPassword
 			}
-			updateLoginMetrics(&cachedUser.User, ip, dataprovider.ErrInvalidCredentials)
-			return user, false, nil, dataprovider.ErrInvalidCredentials
+			if err := dataprovider.CheckCachedUserCredentials(cachedUser, password, loginMethod, common.ProtocolWebDAV, tlsCert); err == nil {
+				return cachedUser.User, true, cachedUser.LockSystem, loginMethod, nil
+			}
+			updateLoginMetrics(&cachedUser.User, ip, loginMethod, dataprovider.ErrInvalidCredentials)
+			return user, false, nil, loginMethod, dataprovider.ErrInvalidCredentials
 		}
 	}
-	user, err = dataprovider.CheckUserAndPass(username, password, ip, common.ProtocolWebDAV)
+	user, loginMethod, err = dataprovider.CheckCompositeCredentials(username, password, ip, loginMethod,
+		common.ProtocolWebDAV, tlsCert)
 	if err != nil {
 		user.Username = username
-		updateLoginMetrics(&user, ip, err)
-		return user, false, nil, err
+		updateLoginMetrics(&user, ip, loginMethod, err)
+		return user, false, nil, loginMethod, err
 	}
 	lockSystem := webdav.NewMemLS()
-	if password != "" {
-		cachedUser := &dataprovider.CachedUser{
-			User:       user,
-			Password:   password,
-			LockSystem: lockSystem,
-		}
-		if s.config.Cache.Users.ExpirationTime > 0 {
-			cachedUser.Expiration = time.Now().Add(time.Duration(s.config.Cache.Users.ExpirationTime) * time.Minute)
-		}
-		dataprovider.CacheWebDAVUser(cachedUser, s.config.Cache.Users.MaxSize)
-		if user.FsConfig.Provider != dataprovider.SFTPFilesystemProvider {
-			// for sftp fs check root path does nothing so don't open a useless SFTP connection
-			tempFs, err := user.GetFilesystem("temp")
-			if err == nil {
-				tempFs.CheckRootPath(user.Username, user.UID, user.GID)
-				tempFs.Close()
-			}
-		}
+	cachedUser = &dataprovider.CachedUser{
+		User:       user,
+		Password:   password,
+		LockSystem: lockSystem,
 	}
-	return user, false, lockSystem, nil
+	if s.config.Cache.Users.ExpirationTime > 0 {
+		cachedUser.Expiration = time.Now().Add(time.Duration(s.config.Cache.Users.ExpirationTime) * time.Minute)
+	}
+	dataprovider.CacheWebDAVUser(cachedUser)
+	return user, false, lockSystem, loginMethod, nil
 }
 
-func (s *webDavServer) validateUser(user *dataprovider.User, r *http.Request) (string, error) {
+func (s *webDavServer) validateUser(user *dataprovider.User, r *http.Request, loginMethod string) (string, error) {
 	connID := xid.New().String()
 	connectionID := fmt.Sprintf("%v_%v", common.ProtocolWebDAV, connID)
 
@@ -262,11 +307,11 @@ func (s *webDavServer) validateUser(user *dataprovider.User, r *http.Request) (s
 	}
 	if utils.IsStringInSlice(common.ProtocolWebDAV, user.Filters.DeniedProtocols) {
 		logger.Debug(logSender, connectionID, "cannot login user %#v, protocol DAV is not allowed", user.Username)
-		return connID, fmt.Errorf("Protocol DAV is not allowed for user %#v", user.Username)
+		return connID, fmt.Errorf("protocol DAV is not allowed for user %#v", user.Username)
 	}
-	if !user.IsLoginMethodAllowed(dataprovider.LoginMethodPassword, nil) {
-		logger.Debug(logSender, connectionID, "cannot login user %#v, password login method is not allowed", user.Username)
-		return connID, fmt.Errorf("Password login method is not allowed for user %#v", user.Username)
+	if !user.IsLoginMethodAllowed(loginMethod, nil) {
+		logger.Debug(logSender, connectionID, "cannot login user %#v, %v login method is not allowed", user.Username, loginMethod)
+		return connID, fmt.Errorf("login method %v is not allowed for user %#v", loginMethod, user.Username)
 	}
 	if user.MaxSessions > 0 {
 		activeSessions := common.Connections.GetActiveSessions(user.Username)
@@ -276,14 +321,9 @@ func (s *webDavServer) validateUser(user *dataprovider.User, r *http.Request) (s
 			return connID, fmt.Errorf("too many open sessions: %v", activeSessions)
 		}
 	}
-	if dataprovider.GetQuotaTracking() > 0 && user.HasOverlappedMappedPaths() {
-		logger.Debug(logSender, connectionID, "cannot login user %#v, overlapping mapped folders are allowed only with quota tracking disabled",
-			user.Username)
-		return connID, errors.New("overlapping mapped folders are allowed only with quota tracking disabled")
-	}
 	if !user.IsLoginFromAddrAllowed(r.RemoteAddr) {
 		logger.Debug(logSender, connectionID, "cannot login user %#v, remote address is not allowed: %v", user.Username, r.RemoteAddr)
-		return connID, fmt.Errorf("Login for user %#v is not allowed from this address: %v", user.Username, r.RemoteAddr)
+		return connID, fmt.Errorf("login for user %#v is not allowed from this address: %v", user.Username, r.RemoteAddr)
 	}
 	return connID, nil
 }
@@ -335,16 +375,16 @@ func checkRemoteAddress(r *http.Request) {
 	}
 }
 
-func updateLoginMetrics(user *dataprovider.User, ip string, err error) {
-	metrics.AddLoginAttempt(dataprovider.LoginMethodPassword)
+func updateLoginMetrics(user *dataprovider.User, ip, loginMethod string, err error) {
+	metrics.AddLoginAttempt(loginMethod)
 	if err != nil {
-		logger.ConnectionFailedLog(user.Username, ip, dataprovider.LoginMethodPassword, common.ProtocolWebDAV, err.Error())
+		logger.ConnectionFailedLog(user.Username, ip, loginMethod, common.ProtocolWebDAV, err.Error())
 		event := common.HostEventLoginFailed
 		if _, ok := err.(*dataprovider.RecordNotFoundError); ok {
 			event = common.HostEventUserNotFound
 		}
 		common.AddDefenderEvent(ip, event)
 	}
-	metrics.AddLoginResult(dataprovider.LoginMethodPassword, err)
-	dataprovider.ExecutePostLoginHook(user, dataprovider.LoginMethodPassword, ip, common.ProtocolWebDAV, err)
+	metrics.AddLoginResult(loginMethod, err)
+	dataprovider.ExecutePostLoginHook(user, loginMethod, ip, common.ProtocolWebDAV, err)
 }

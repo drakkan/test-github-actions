@@ -10,13 +10,13 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -51,19 +51,21 @@ import (
 )
 
 const (
-	// SQLiteDataProviderName name for SQLite database provider
+	// SQLiteDataProviderName defines the name for SQLite database provider
 	SQLiteDataProviderName = "sqlite"
-	// PGSQLDataProviderName name for PostgreSQL database provider
+	// PGSQLDataProviderName defines the name for PostgreSQL database provider
 	PGSQLDataProviderName = "postgresql"
-	// MySQLDataProviderName name for MySQL database provider
+	// MySQLDataProviderName defines the name for MySQL database provider
 	MySQLDataProviderName = "mysql"
-	// BoltDataProviderName name for bbolt key/value store provider
+	// BoltDataProviderName defines the name for bbolt key/value store provider
 	BoltDataProviderName = "bolt"
-	// MemoryDataProviderName name for memory provider
+	// MemoryDataProviderName defines the name for memory provider
 	MemoryDataProviderName = "memory"
+	// CockroachDataProviderName defines the for CockroachDB provider
+	CockroachDataProviderName = "cockroachdb"
 	// DumpVersion defines the version for the dump.
 	// For restore/load we support the current version and the previous one
-	DumpVersion = 6
+	DumpVersion = 7
 
 	argonPwdPrefix            = "$argon2id$"
 	bcryptPwdPrefix           = "$2a$"
@@ -78,7 +80,14 @@ const (
 	operationAdd              = "add"
 	operationUpdate           = "update"
 	operationDelete           = "delete"
-	sqlPrefixValidChars       = "abcdefghijklmnopqrstuvwxyz_"
+	sqlPrefixValidChars       = "abcdefghijklmnopqrstuvwxyz_0123456789"
+)
+
+// Supported algorithms for hashing passwords.
+// These algorithms can be used when SFTPGo hashes a plain text password
+const (
+	HashingAlgoBcrypt   = "bcrypt"
+	HashingAlgoArgon2ID = "argon2id"
 )
 
 // ordering constants
@@ -90,13 +99,14 @@ const (
 var (
 	// SupportedProviders defines the supported data providers
 	SupportedProviders = []string{SQLiteDataProviderName, PGSQLDataProviderName, MySQLDataProviderName,
-		BoltDataProviderName, MemoryDataProviderName}
+		BoltDataProviderName, MemoryDataProviderName, CockroachDataProviderName}
 	// ValidPerms defines all the valid permissions for a user
 	ValidPerms = []string{PermAny, PermListItems, PermDownload, PermUpload, PermOverwrite, PermRename, PermDelete,
 		PermCreateDirs, PermCreateSymlinks, PermChmod, PermChown, PermChtimes}
-	// ValidSSHLoginMethods defines all the valid SSH login methods
-	ValidSSHLoginMethods = []string{SSHLoginMethodPublicKey, LoginMethodPassword, SSHLoginMethodKeyboardInteractive,
-		SSHLoginMethodKeyAndPassword, SSHLoginMethodKeyAndKeyboardInt}
+	// ValidLoginMethods defines all the valid login methods
+	ValidLoginMethods = []string{SSHLoginMethodPublicKey, LoginMethodPassword, SSHLoginMethodKeyboardInteractive,
+		SSHLoginMethodKeyAndPassword, SSHLoginMethodKeyAndKeyboardInt, LoginMethodTLSCertificate,
+		LoginMethodTLSCertificateAndPwd}
 	// SSHMultiStepsLoginMethods defines the supported Multi-Step Authentications
 	SSHMultiStepsLoginMethods = []string{SSHLoginMethodKeyAndPassword, SSHLoginMethodKeyAndKeyboardInt}
 	// ErrNoAuthTryed defines the error for connection closed before authentication
@@ -104,10 +114,10 @@ var (
 	// ValidProtocols defines all the valid protcols
 	ValidProtocols = []string{"SSH", "FTP", "DAV"}
 	// ErrNoInitRequired defines the error returned by InitProvider if no inizialization/update is required
-	ErrNoInitRequired = errors.New("The data provider is already up to date")
+	ErrNoInitRequired = errors.New("the data provider is up to date")
 	// ErrInvalidCredentials defines the error to return if the supplied credentials are invalid
 	ErrInvalidCredentials = errors.New("invalid credentials")
-	webDAVUsersCache      sync.Map
+	validTLSUsernames     = []string{string(TLSUsernameNone), string(TLSUsernameCN)}
 	config                Config
 	provider              Provider
 	sqlPlaceholders       []string
@@ -134,6 +144,11 @@ type schemaVersion struct {
 	Version int
 }
 
+// BcryptOptions defines the options for bcrypt password hashing
+type BcryptOptions struct {
+	Cost int `json:"cost" mapstructure:"cost"`
+}
+
 // Argon2Options defines the options for argon2 password hashing
 type Argon2Options struct {
 	Memory      uint32 `json:"memory" mapstructure:"memory"`
@@ -144,6 +159,7 @@ type Argon2Options struct {
 // PasswordHashing defines the configuration for password hashing
 type PasswordHashing struct {
 	Argon2Options Argon2Options `json:"argon2_options" mapstructure:"argon2_options"`
+	BcryptOptions BcryptOptions `json:"bcrypt_options" mapstructure:"bcrypt_options"`
 }
 
 // UserActions defines the action to execute on user create, update, delete.
@@ -215,10 +231,11 @@ type Config struct {
 	ExternalAuthHook string `json:"external_auth_hook" mapstructure:"external_auth_hook"`
 	// ExternalAuthScope defines the scope for the external authentication hook.
 	// - 0 means all supported authentication scopes, the external hook will be executed for password,
-	//     public key and keyboard interactive authentication
+	//     public key, keyboard interactive authentication and TLS certificates
 	// - 1 means passwords only
 	// - 2 means public keys only
 	// - 4 means keyboard interactive only
+	// - 8 means TLS certificates only
 	// you can combine the scopes, for example 3 means password and public key, 5 password and keyboard
 	// interactive and so on
 	ExternalAuthScope int `json:"external_auth_scope" mapstructure:"external_auth_scope"`
@@ -270,11 +287,23 @@ type Config struct {
 	// PreferDatabaseCredentials indicates whether credential files (currently used for Google
 	// Cloud Storage) should be stored in the database instead of in the directory specified by
 	// CredentialsPath.
-	PreferDatabaseCredentials bool `json:"prefer_database_credentials" mapstructure:"prefer_database_credentials"`
+	PasswordHashingAlgo       string `json:"password_hashing_algo" mapstructure:"password_hashing_algo"`
+	PreferDatabaseCredentials bool   `json:"prefer_database_credentials" mapstructure:"prefer_database_credentials"`
 	// SkipNaturalKeysValidation allows to use any UTF-8 character for natural keys as username, admin name,
 	// folder name. These keys are used in URIs for REST API and Web admin. By default only unreserved URI
 	// characters are allowed: ALPHA / DIGIT / "-" / "." / "_" / "~".
 	SkipNaturalKeysValidation bool `json:"skip_natural_keys_validation" mapstructure:"skip_natural_keys_validation"`
+	// Verifying argon2 passwords has a high memory and computational cost,
+	// by enabling, in memory, password caching you reduce this cost.
+	PasswordCaching bool `json:"password_caching" mapstructure:"password_caching"`
+	// DelayedQuotaUpdate defines the number of seconds to accumulate quota updates.
+	// If there are a lot of close uploads, accumulating quota updates can save you many
+	// queries to the data provider.
+	// If you want to track quotas, a scheduled quota update is recommended in any case, the stored
+	// quota size may be incorrect for several reasons, such as an unexpected shutdown, temporary provider
+	// failures, file copied outside of SFTPGo, and so on.
+	// 0 means immediate quota update.
+	DelayedQuotaUpdate int `json:"delayed_quota_update" mapstructure:"delayed_quota_update"`
 }
 
 // BackupData defines the structure for the backup/restore files
@@ -293,46 +322,6 @@ func (d *BackupData) HasFolder(name string) bool {
 		}
 	}
 	return false
-}
-
-func (d *BackupData) checkFolderNames() {
-	if len(d.Folders) == 0 {
-		return
-	}
-	if d.Folders[0].Name != "" {
-		return
-	}
-	logger.WarnToConsole("You are loading folders without a name, please update to the latest supported format. This compatibility layer will be removed soon.")
-	providerLog(logger.LevelWarn, "You are loading folders without a name, please update to the latest supported format. This compatibility layer will be removed soon.")
-	folders := make([]vfs.BaseVirtualFolder, 0, len(d.Folders))
-	for idx, folder := range d.Folders {
-		if folder.Name == "" {
-			folder.Name = fmt.Sprintf("Folder%v", idx)
-		}
-		folders = append(folders, folder)
-	}
-	d.Folders = folders
-	users := make([]User, 0, len(d.Users))
-	for _, user := range d.Users {
-		if len(user.VirtualFolders) > 0 {
-			vfolders := make([]vfs.VirtualFolder, 0, len(user.VirtualFolders))
-			for _, vfolder := range user.VirtualFolders {
-				if vfolder.Name == "" {
-					for _, f := range d.Folders {
-						if f.MappedPath == vfolder.MappedPath {
-							vfolder.Name = f.Name
-						}
-					}
-				}
-				if vfolder.Name != "" {
-					vfolders = append(vfolders, vfolder)
-				}
-			}
-			user.VirtualFolders = vfolders
-		}
-		users = append(users, user)
-	}
-	d.Users = users
 }
 
 type keyboardAuthHookRequest struct {
@@ -365,18 +354,6 @@ type checkPasswordResponse struct {
 	// for status = 2 this is the password to check against the one stored
 	// inside the SFTPGo data provider
 	ToVerify string `json:"to_verify"`
-}
-
-type virtualFoldersCompact struct {
-	VirtualPath      string `json:"virtual_path"`
-	MappedPath       string `json:"mapped_path"`
-	ExcludeFromQuota bool   `json:"exclude_from_quota"`
-}
-
-type userCompactVFolders struct {
-	ID             int64                   `json:"id"`
-	Username       string                  `json:"username"`
-	VirtualFolders []virtualFoldersCompact `json:"virtual_folders"`
 }
 
 // ValidationError raised if input data is not valid
@@ -426,6 +403,7 @@ func GetQuotaTracking() int {
 type Provider interface {
 	validateUserAndPass(username, password, ip, protocol string) (User, error)
 	validateUserAndPubKey(username string, pubKey []byte) (User, string, error)
+	validateUserAndTLSCert(username, protocol string, tlsCert *x509.Certificate) (User, error)
 	updateQuota(username string, filesAdd int, sizeAdd int64, reset bool) error
 	getUsedQuota(username string) (int, int64, error)
 	userExists(username string) (User, error)
@@ -458,6 +436,11 @@ type Provider interface {
 	revertDatabase(targetVersion int) error
 }
 
+type fsValidatorHelper interface {
+	GetGCSCredentialsFilePath() string
+	GetEncrytionAdditionalData() string
+}
+
 // Initialize the data provider.
 // An error is returned if the configured driver is invalid or if the data provider cannot be initialized
 func Initialize(cnf Config, basePath string, checkAdmins bool) error {
@@ -469,12 +452,22 @@ func Initialize(cnf Config, basePath string, checkAdmins bool) error {
 	} else {
 		credentialsDirPath = filepath.Join(basePath, config.CredentialsPath)
 	}
+	vfs.SetCredentialsDirPath(credentialsDirPath)
 	argon2Params = &argon2id.Params{
 		Memory:      cnf.PasswordHashing.Argon2Options.Memory,
 		Iterations:  cnf.PasswordHashing.Argon2Options.Iterations,
 		Parallelism: cnf.PasswordHashing.Argon2Options.Parallelism,
 		SaltLength:  16,
 		KeyLength:   32,
+	}
+
+	if config.PasswordHashingAlgo == HashingAlgoBcrypt {
+		if config.PasswordHashing.BcryptOptions.Cost > bcrypt.MaxCost {
+			err = fmt.Errorf("invalid bcrypt cost %v, max allowed %v", config.PasswordHashing.BcryptOptions.Cost, bcrypt.MaxCost)
+			logger.WarnToConsole("Unable to initialize data provider: %v", err)
+			providerLog(logger.LevelWarn, "Unable to initialize data provider: %v", err)
+			return err
+		}
 	}
 
 	if err = validateHooks(); err != nil {
@@ -510,6 +503,7 @@ func Initialize(cnf Config, basePath string, checkAdmins bool) error {
 		providerLog(logger.LevelInfo, "database initialization/migration skipped, manual mode is configured")
 	}
 	startAvailabilityTimer()
+	delayedQuotaUpdater.start()
 	return nil
 }
 
@@ -543,10 +537,10 @@ func validateHooks() error {
 }
 
 func validateSQLTablesPrefix() error {
-	if len(config.SQLTablesPrefix) > 0 {
+	if config.SQLTablesPrefix != "" {
 		for _, char := range config.SQLTablesPrefix {
 			if !strings.Contains(sqlPrefixValidChars, strings.ToLower(string(char))) {
-				return errors.New("Invalid sql_tables_prefix only chars in range 'a..z', 'A..Z' and '_' are allowed")
+				return errors.New("invalid sql_tables_prefix only chars in range 'a..z', 'A..Z', '0-9' and '_' are allowed")
 			}
 		}
 		sqlTableUsers = config.SQLTablesPrefix + sqlTableUsers
@@ -622,10 +616,115 @@ func CheckAdminAndPass(username, password, ip string) (Admin, error) {
 	return provider.validateAdminAndPass(username, password, ip)
 }
 
-// CheckUserAndPass retrieves the SFTP user with the given username and password if a match is found or an error
+// CheckCachedUserCredentials checks the credentials for a cached user
+func CheckCachedUserCredentials(user *CachedUser, password, loginMethod, protocol string, tlsCert *x509.Certificate) error {
+	if loginMethod != LoginMethodPassword {
+		_, err := checkUserAndTLSCertificate(&user.User, protocol, tlsCert)
+		if err != nil {
+			return err
+		}
+		if loginMethod == LoginMethodTLSCertificate {
+			if !user.User.IsLoginMethodAllowed(LoginMethodTLSCertificate, nil) {
+				return fmt.Errorf("certificate login method is not allowed for user %#v", user.User.Username)
+			}
+			return nil
+		}
+	}
+	if err := checkLoginConditions(&user.User); err != nil {
+		return err
+	}
+	if password == "" {
+		return ErrInvalidCredentials
+	}
+	if user.Password != "" {
+		if password == user.Password {
+			return nil
+		}
+	} else {
+		if ok, _ := isPasswordOK(&user.User, password); ok {
+			return nil
+		}
+	}
+	return ErrInvalidCredentials
+}
+
+// CheckCompositeCredentials checks multiple credentials.
+// WebDAV users can send both a password and a TLS certificate within the same request
+func CheckCompositeCredentials(username, password, ip, loginMethod, protocol string, tlsCert *x509.Certificate) (User, string, error) {
+	if loginMethod == LoginMethodPassword {
+		user, err := CheckUserAndPass(username, password, ip, protocol)
+		return user, loginMethod, err
+	}
+	user, err := CheckUserBeforeTLSAuth(username, ip, protocol, tlsCert)
+	if err != nil {
+		return user, loginMethod, err
+	}
+	if !user.IsTLSUsernameVerificationEnabled() {
+		// for backward compatibility with 2.0.x we only check the password and change the login method here
+		// in future updates we have to return an error
+		user, err := CheckUserAndPass(username, password, ip, protocol)
+		return user, LoginMethodPassword, err
+	}
+	user, err = checkUserAndTLSCertificate(&user, protocol, tlsCert)
+	if err != nil {
+		return user, loginMethod, err
+	}
+	if loginMethod == LoginMethodTLSCertificate && !user.IsLoginMethodAllowed(LoginMethodTLSCertificate, nil) {
+		return user, loginMethod, fmt.Errorf("certificate login method is not allowed for user %#v", user.Username)
+	}
+	if loginMethod == LoginMethodTLSCertificateAndPwd {
+		if config.ExternalAuthHook != "" && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&1 != 0) {
+			user, err = doExternalAuth(username, password, nil, "", ip, protocol, nil)
+			if err != nil {
+				return user, loginMethod, err
+			}
+		}
+		if config.PreLoginHook != "" {
+			user, err = executePreLoginHook(username, LoginMethodPassword, ip, protocol)
+			if err != nil {
+				return user, loginMethod, err
+			}
+		}
+		user, err = checkUserAndPass(&user, password, ip, protocol)
+	}
+	return user, loginMethod, err
+}
+
+// CheckUserBeforeTLSAuth checks if a user exits before trying mutual TLS
+func CheckUserBeforeTLSAuth(username, ip, protocol string, tlsCert *x509.Certificate) (User, error) {
+	if config.ExternalAuthHook != "" && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&8 != 0) {
+		return doExternalAuth(username, "", nil, "", ip, protocol, tlsCert)
+	}
+	if config.PreLoginHook != "" {
+		return executePreLoginHook(username, LoginMethodTLSCertificate, ip, protocol)
+	}
+	return UserExists(username)
+}
+
+// CheckUserAndTLSCert returns the SFTPGo user with the given username and check if the
+// given TLS certificate allow authentication without password
+func CheckUserAndTLSCert(username, ip, protocol string, tlsCert *x509.Certificate) (User, error) {
+	if config.ExternalAuthHook != "" && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&8 != 0) {
+		user, err := doExternalAuth(username, "", nil, "", ip, protocol, tlsCert)
+		if err != nil {
+			return user, err
+		}
+		return checkUserAndTLSCertificate(&user, protocol, tlsCert)
+	}
+	if config.PreLoginHook != "" {
+		user, err := executePreLoginHook(username, LoginMethodTLSCertificate, ip, protocol)
+		if err != nil {
+			return user, err
+		}
+		return checkUserAndTLSCertificate(&user, protocol, tlsCert)
+	}
+	return provider.validateUserAndTLSCert(username, protocol, tlsCert)
+}
+
+// CheckUserAndPass retrieves the SFTPGo user with the given username and password if a match is found or an error
 func CheckUserAndPass(username, password, ip, protocol string) (User, error) {
 	if config.ExternalAuthHook != "" && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&1 != 0) {
-		user, err := doExternalAuth(username, password, nil, "", ip, protocol)
+		user, err := doExternalAuth(username, password, nil, "", ip, protocol, nil)
 		if err != nil {
 			return user, err
 		}
@@ -644,7 +743,7 @@ func CheckUserAndPass(username, password, ip, protocol string) (User, error) {
 // CheckUserAndPubKey retrieves the SFTP user with the given username and public key if a match is found or an error
 func CheckUserAndPubKey(username string, pubKey []byte, ip, protocol string) (User, string, error) {
 	if config.ExternalAuthHook != "" && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&2 != 0) {
-		user, err := doExternalAuth(username, "", pubKey, "", ip, protocol)
+		user, err := doExternalAuth(username, "", pubKey, "", ip, protocol, nil)
 		if err != nil {
 			return user, "", err
 		}
@@ -666,7 +765,7 @@ func CheckKeyboardInteractiveAuth(username, authHook string, client ssh.Keyboard
 	var user User
 	var err error
 	if config.ExternalAuthHook != "" && (config.ExternalAuthScope == 0 || config.ExternalAuthScope&4 != 0) {
-		user, err = doExternalAuth(username, "", nil, "1", ip, protocol)
+		user, err = doExternalAuth(username, "", nil, "1", ip, protocol, nil)
 	} else if config.PreLoginHook != "" {
 		user, err = executePreLoginHook(username, SSHLoginMethodKeyboardInteractive, ip, protocol)
 	} else {
@@ -685,7 +784,7 @@ func UpdateLastLogin(user *User) error {
 	if diff < 0 || diff > lastLoginMinDelay {
 		err := provider.updateLastLogin(user.Username)
 		if err == nil {
-			updateWebDavCachedUserLastLogin(user.Username)
+			webDAVUsersCache.updateLastLogin(user.Username)
 		}
 		return err
 	}
@@ -703,7 +802,14 @@ func UpdateUserQuota(user *User, filesAdd int, sizeAdd int64, reset bool) error 
 	if filesAdd == 0 && sizeAdd == 0 && !reset {
 		return nil
 	}
-	return provider.updateQuota(user.Username, filesAdd, sizeAdd, reset)
+	if config.DelayedQuotaUpdate == 0 || reset {
+		if reset {
+			delayedQuotaUpdater.resetUserQuota(user.Username)
+		}
+		return provider.updateQuota(user.Username, filesAdd, sizeAdd, reset)
+	}
+	delayedQuotaUpdater.updateUserQuota(user.Username, filesAdd, sizeAdd)
+	return nil
 }
 
 // UpdateVirtualFolderQuota updates the quota for the given virtual folder adding filesAdd and sizeAdd.
@@ -715,7 +821,14 @@ func UpdateVirtualFolderQuota(vfolder *vfs.BaseVirtualFolder, filesAdd int, size
 	if filesAdd == 0 && sizeAdd == 0 && !reset {
 		return nil
 	}
-	return provider.updateFolderQuota(vfolder.Name, filesAdd, sizeAdd, reset)
+	if config.DelayedQuotaUpdate == 0 || reset {
+		if reset {
+			delayedQuotaUpdater.resetFolderQuota(vfolder.Name)
+		}
+		return provider.updateFolderQuota(vfolder.Name, filesAdd, sizeAdd, reset)
+	}
+	delayedQuotaUpdater.updateFolderQuota(vfolder.Name, filesAdd, sizeAdd)
+	return nil
 }
 
 // GetUsedQuota returns the used quota for the given SFTP user.
@@ -723,7 +836,12 @@ func GetUsedQuota(username string) (int, int64, error) {
 	if config.TrackQuota == 0 {
 		return 0, 0, &MethodDisabledError{err: trackQuotaDisabledError}
 	}
-	return provider.getUsedQuota(username)
+	files, size, err := provider.getUsedQuota(username)
+	if err != nil {
+		return files, size, err
+	}
+	delayedFiles, delayedSize := delayedQuotaUpdater.getUserPendingQuota(username)
+	return files + delayedFiles, size + delayedSize, err
 }
 
 // GetUsedVirtualFolderQuota returns the used quota for the given virtual folder.
@@ -731,7 +849,12 @@ func GetUsedVirtualFolderQuota(name string) (int, int64, error) {
 	if config.TrackQuota == 0 {
 		return 0, 0, &MethodDisabledError{err: trackQuotaDisabledError}
 	}
-	return provider.getUsedFolderQuota(name)
+	files, size, err := provider.getUsedFolderQuota(name)
+	if err != nil {
+		return files, size, err
+	}
+	delayedFiles, delayedSize := delayedQuotaUpdater.getFolderPendingQuota(name)
+	return files + delayedFiles, size + delayedSize, err
 }
 
 // AddAdmin adds a new SFTPGo admin
@@ -776,7 +899,8 @@ func AddUser(user *User) error {
 func UpdateUser(user *User) error {
 	err := provider.updateUser(user)
 	if err == nil {
-		RemoveCachedWebDAVUser(user.Username)
+		webDAVUsersCache.swap(user)
+		cachedPasswords.Remove(user.Username)
 		executeAction(operationUpdate, user)
 	}
 	return err
@@ -791,6 +915,8 @@ func DeleteUser(username string) error {
 	err = provider.deleteUser(&user)
 	if err == nil {
 		RemoveCachedWebDAVUser(user.Username)
+		delayedQuotaUpdater.resetUserQuota(username)
+		cachedPasswords.Remove(username)
 		executeAction(operationDelete, &user)
 	}
 	return err
@@ -819,8 +945,14 @@ func AddFolder(folder *vfs.BaseVirtualFolder) error {
 }
 
 // UpdateFolder updates the specified virtual folder
-func UpdateFolder(folder *vfs.BaseVirtualFolder) error {
-	return provider.updateFolder(folder)
+func UpdateFolder(folder *vfs.BaseVirtualFolder, users []string) error {
+	err := provider.updateFolder(folder)
+	if err == nil {
+		for _, user := range users {
+			RemoveCachedWebDAVUser(user)
+		}
+	}
+	return err
 }
 
 // DeleteFolder deletes an existing folder.
@@ -829,7 +961,14 @@ func DeleteFolder(folderName string) error {
 	if err != nil {
 		return err
 	}
-	return provider.deleteFolder(&folder)
+	err = provider.deleteFolder(&folder)
+	if err == nil {
+		for _, user := range folder.Users {
+			RemoveCachedWebDAVUser(user)
+		}
+		delayedQuotaUpdater.resetFolderQuota(folderName)
+	}
+	return err
 }
 
 // GetFolderByName returns the folder with the specified name if any
@@ -868,28 +1007,6 @@ func DumpData() (BackupData, error) {
 func ParseDumpData(data []byte) (BackupData, error) {
 	var dump BackupData
 	err := json.Unmarshal(data, &dump)
-	if err == nil {
-		dump.checkFolderNames()
-		return dump, err
-	}
-	dump = BackupData{}
-	// try to parse as version 4
-	var dumpCompat backupDataV4Compat
-	err = json.Unmarshal(data, &dumpCompat)
-	if err != nil {
-		return dump, err
-	}
-	logger.WarnToConsole("You are loading data from an old format, please update to the latest supported one. We only support the current and the previous format.")
-	providerLog(logger.LevelWarn, "You are loading data from an old format, please update to the latest supported one. We only support the current and the previous format.")
-	dump.Folders = dumpCompat.Folders
-	for _, compatUser := range dumpCompat.Users {
-		fsConfig, err := convertFsConfigFromV4(compatUser.FsConfig, compatUser.Username)
-		if err != nil {
-			return dump, err
-		}
-		dump.Users = append(dump.Users, createUserFromV4(compatUser, fsConfig))
-	}
-	dump.checkFolderNames()
 	return dump, err
 }
 
@@ -926,61 +1043,68 @@ func createProvider(basePath string) error {
 	if err = validateSQLTablesPrefix(); err != nil {
 		return err
 	}
-	if config.Driver == SQLiteDataProviderName {
-		err = initializeSQLiteProvider(basePath)
-	} else if config.Driver == PGSQLDataProviderName {
-		err = initializePGSQLProvider()
-	} else if config.Driver == MySQLDataProviderName {
-		err = initializeMySQLProvider()
-	} else if config.Driver == BoltDataProviderName {
-		err = initializeBoltProvider(basePath)
-	} else if config.Driver == MemoryDataProviderName {
+	logSender = fmt.Sprintf("dataprovider_%v", config.Driver)
+
+	switch config.Driver {
+	case SQLiteDataProviderName:
+		return initializeSQLiteProvider(basePath)
+	case PGSQLDataProviderName, CockroachDataProviderName:
+		return initializePGSQLProvider()
+	case MySQLDataProviderName:
+		return initializeMySQLProvider()
+	case BoltDataProviderName:
+		return initializeBoltProvider(basePath)
+	case MemoryDataProviderName:
 		initializeMemoryProvider(basePath)
-	} else {
-		err = fmt.Errorf("unsupported data provider: %v", config.Driver)
+		return nil
+	default:
+		return fmt.Errorf("unsupported data provider: %v", config.Driver)
 	}
-	return err
 }
 
 func buildUserHomeDir(user *User) {
 	if user.HomeDir == "" {
 		if config.UsersBaseDir != "" {
 			user.HomeDir = filepath.Join(config.UsersBaseDir, user.Username)
-		} else if user.FsConfig.Provider == SFTPFilesystemProvider {
+		} else if user.FsConfig.Provider == vfs.SFTPFilesystemProvider {
 			user.HomeDir = filepath.Join(os.TempDir(), user.Username)
 		}
 	}
 }
 
-func isVirtualDirOverlapped(dir1, dir2 string) bool {
+func isVirtualDirOverlapped(dir1, dir2 string, fullCheck bool) bool {
 	if dir1 == dir2 {
 		return true
 	}
-	if len(dir1) > len(dir2) {
-		if strings.HasPrefix(dir1, dir2+"/") {
-			return true
+	if fullCheck {
+		if len(dir1) > len(dir2) {
+			if strings.HasPrefix(dir1, dir2+"/") {
+				return true
+			}
 		}
-	}
-	if len(dir2) > len(dir1) {
-		if strings.HasPrefix(dir2, dir1+"/") {
-			return true
+		if len(dir2) > len(dir1) {
+			if strings.HasPrefix(dir2, dir1+"/") {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func isMappedDirOverlapped(dir1, dir2 string) bool {
+func isMappedDirOverlapped(dir1, dir2 string, fullCheck bool) bool {
 	if dir1 == dir2 {
 		return true
 	}
-	if len(dir1) > len(dir2) {
-		if strings.HasPrefix(dir1, dir2+string(os.PathSeparator)) {
-			return true
+	if fullCheck {
+		if len(dir1) > len(dir2) {
+			if strings.HasPrefix(dir1, dir2+string(os.PathSeparator)) {
+				return true
+			}
 		}
-	}
-	if len(dir2) > len(dir1) {
-		if strings.HasPrefix(dir2, dir1+string(os.PathSeparator)) {
-			return true
+		if len(dir2) > len(dir1) {
+			if strings.HasPrefix(dir2, dir1+string(os.PathSeparator)) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1011,6 +1135,9 @@ func getVirtualFolderIfInvalid(folder *vfs.BaseVirtualFolder) *vfs.BaseVirtualFo
 	if folder.Name == "" {
 		return folder
 	}
+	if folder.FsConfig.Provider != vfs.LocalFilesystemProvider {
+		return folder
+	}
 	if f, err := GetFolderByName(folder.Name); err == nil {
 		return &f
 	}
@@ -1018,12 +1145,13 @@ func getVirtualFolderIfInvalid(folder *vfs.BaseVirtualFolder) *vfs.BaseVirtualFo
 }
 
 func validateUserVirtualFolders(user *User) error {
-	if len(user.VirtualFolders) == 0 || user.FsConfig.Provider != LocalFilesystemProvider {
+	if len(user.VirtualFolders) == 0 {
 		user.VirtualFolders = []vfs.VirtualFolder{}
 		return nil
 	}
 	var virtualFolders []vfs.VirtualFolder
-	mappedPaths := make(map[string]string)
+	mappedPaths := make(map[string]bool)
+	virtualPaths := make(map[string]bool)
 	for _, v := range user.VirtualFolders {
 		cleanedVPath := filepath.ToSlash(path.Clean(v.VirtualPath))
 		if !path.IsAbs(cleanedVPath) || cleanedVPath == "/" {
@@ -1037,33 +1165,32 @@ func validateUserVirtualFolders(user *User) error {
 			return err
 		}
 		cleanedMPath := folder.MappedPath
-		if isMappedDirOverlapped(cleanedMPath, user.GetHomeDir()) {
-			return &ValidationError{err: fmt.Sprintf("invalid mapped folder %#v cannot be inside or contain the user home dir %#v",
-				folder.MappedPath, user.GetHomeDir())}
+		if folder.IsLocalOrLocalCrypted() {
+			if isMappedDirOverlapped(cleanedMPath, user.GetHomeDir(), true) {
+				return &ValidationError{err: fmt.Sprintf("invalid mapped folder %#v cannot be inside or contain the user home dir %#v",
+					folder.MappedPath, user.GetHomeDir())}
+			}
+			for mPath := range mappedPaths {
+				if folder.IsLocalOrLocalCrypted() && isMappedDirOverlapped(mPath, cleanedMPath, false) {
+					return &ValidationError{err: fmt.Sprintf("invalid mapped folder %#v overlaps with mapped folder %#v",
+						v.MappedPath, mPath)}
+				}
+			}
+			mappedPaths[cleanedMPath] = true
 		}
+		for vPath := range virtualPaths {
+			if isVirtualDirOverlapped(vPath, cleanedVPath, false) {
+				return &ValidationError{err: fmt.Sprintf("invalid virtual folder %#v overlaps with virtual folder %#v",
+					v.VirtualPath, vPath)}
+			}
+		}
+		virtualPaths[cleanedVPath] = true
 		virtualFolders = append(virtualFolders, vfs.VirtualFolder{
 			BaseVirtualFolder: *folder,
 			VirtualPath:       cleanedVPath,
 			QuotaSize:         v.QuotaSize,
 			QuotaFiles:        v.QuotaFiles,
 		})
-		for k, virtual := range mappedPaths {
-			if GetQuotaTracking() > 0 {
-				if isMappedDirOverlapped(k, cleanedMPath) {
-					return &ValidationError{err: fmt.Sprintf("invalid mapped folder %#v overlaps with mapped folder %#v",
-						v.MappedPath, k)}
-				}
-			} else {
-				if k == cleanedMPath {
-					return &ValidationError{err: fmt.Sprintf("duplicated mapped folder %#v", v.MappedPath)}
-				}
-			}
-			if isVirtualDirOverlapped(virtual, cleanedVPath) {
-				return &ValidationError{err: fmt.Sprintf("invalid virtual folder %#v overlaps with virtual folder %#v",
-					v.VirtualPath, virtual)}
-			}
-		}
-		mappedPaths[cleanedMPath] = cleanedVPath
 	}
 	user.VirtualFolders = virtualFolders
 	return nil
@@ -1209,7 +1336,7 @@ func validateFileFilters(user *User) error {
 	return validateFiltersPatternExtensions(user)
 }
 
-func validateFilters(user *User) error {
+func checkEmptyFiltersStruct(user *User) {
 	if len(user.Filters.AllowedIP) == 0 {
 		user.Filters.AllowedIP = []string{}
 	}
@@ -1222,6 +1349,10 @@ func validateFilters(user *User) error {
 	if len(user.Filters.DeniedProtocols) == 0 {
 		user.Filters.DeniedProtocols = []string{}
 	}
+}
+
+func validateFilters(user *User) error {
+	checkEmptyFiltersStruct(user)
 	for _, IPMask := range user.Filters.DeniedIP {
 		_, _, err := net.ParseCIDR(IPMask)
 		if err != nil {
@@ -1234,11 +1365,11 @@ func validateFilters(user *User) error {
 			return &ValidationError{err: fmt.Sprintf("could not parse allowed IP/Mask %#v : %v", IPMask, err)}
 		}
 	}
-	if len(user.Filters.DeniedLoginMethods) >= len(ValidSSHLoginMethods) {
+	if len(user.Filters.DeniedLoginMethods) >= len(ValidLoginMethods) {
 		return &ValidationError{err: "invalid denied_login_methods"}
 	}
 	for _, loginMethod := range user.Filters.DeniedLoginMethods {
-		if !utils.IsStringInSlice(loginMethod, ValidSSHLoginMethods) {
+		if !utils.IsStringInSlice(loginMethod, ValidLoginMethods) {
 			return &ValidationError{err: fmt.Sprintf("invalid login method: %#v", loginMethod)}
 		}
 	}
@@ -1250,115 +1381,120 @@ func validateFilters(user *User) error {
 			return &ValidationError{err: fmt.Sprintf("invalid protocol: %#v", p)}
 		}
 	}
+	if user.Filters.TLSUsername != "" {
+		if !utils.IsStringInSlice(string(user.Filters.TLSUsername), validTLSUsernames) {
+			return &ValidationError{err: fmt.Sprintf("invalid TLS username: %#v", user.Filters.TLSUsername)}
+		}
+	}
 	return validateFileFilters(user)
 }
 
-func saveGCSCredentials(user *User) error {
-	if user.FsConfig.Provider != GCSFilesystemProvider {
+func saveGCSCredentials(fsConfig *vfs.Filesystem, helper fsValidatorHelper) error {
+	if fsConfig.Provider != vfs.GCSFilesystemProvider {
 		return nil
 	}
-	if user.FsConfig.GCSConfig.Credentials.GetPayload() == "" {
+	if fsConfig.GCSConfig.Credentials.GetPayload() == "" {
 		return nil
 	}
 	if config.PreferDatabaseCredentials {
-		if user.FsConfig.GCSConfig.Credentials.IsPlain() {
-			user.FsConfig.GCSConfig.Credentials.SetAdditionalData(user.Username)
-			err := user.FsConfig.GCSConfig.Credentials.Encrypt()
+		if fsConfig.GCSConfig.Credentials.IsPlain() {
+			fsConfig.GCSConfig.Credentials.SetAdditionalData(helper.GetEncrytionAdditionalData())
+			err := fsConfig.GCSConfig.Credentials.Encrypt()
 			if err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if user.FsConfig.GCSConfig.Credentials.IsPlain() {
-		user.FsConfig.GCSConfig.Credentials.SetAdditionalData(user.Username)
-		err := user.FsConfig.GCSConfig.Credentials.Encrypt()
+	if fsConfig.GCSConfig.Credentials.IsPlain() {
+		fsConfig.GCSConfig.Credentials.SetAdditionalData(helper.GetEncrytionAdditionalData())
+		err := fsConfig.GCSConfig.Credentials.Encrypt()
 		if err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not encrypt GCS credentials: %v", err)}
 		}
 	}
-	creds, err := json.Marshal(user.FsConfig.GCSConfig.Credentials)
+	creds, err := json.Marshal(fsConfig.GCSConfig.Credentials)
 	if err != nil {
 		return &ValidationError{err: fmt.Sprintf("could not marshal GCS credentials: %v", err)}
 	}
-	credentialsFilePath := user.getGCSCredentialsFilePath()
+	credentialsFilePath := helper.GetGCSCredentialsFilePath()
 	err = os.MkdirAll(filepath.Dir(credentialsFilePath), 0700)
 	if err != nil {
 		return &ValidationError{err: fmt.Sprintf("could not create GCS credentials dir: %v", err)}
 	}
-	err = ioutil.WriteFile(credentialsFilePath, creds, 0600)
+	err = os.WriteFile(credentialsFilePath, creds, 0600)
 	if err != nil {
 		return &ValidationError{err: fmt.Sprintf("could not save GCS credentials: %v", err)}
 	}
-	user.FsConfig.GCSConfig.Credentials = kms.NewEmptySecret()
+	fsConfig.GCSConfig.Credentials = kms.NewEmptySecret()
 	return nil
 }
 
-func validateFilesystemConfig(user *User) error {
-	if user.FsConfig.Provider == S3FilesystemProvider {
-		if err := user.FsConfig.S3Config.Validate(); err != nil {
+func validateFilesystemConfig(fsConfig *vfs.Filesystem, helper fsValidatorHelper) error {
+	if fsConfig.Provider == vfs.S3FilesystemProvider {
+		if err := fsConfig.S3Config.Validate(); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate s3config: %v", err)}
 		}
-		if err := user.FsConfig.S3Config.EncryptCredentials(user.Username); err != nil {
+		if err := fsConfig.S3Config.EncryptCredentials(helper.GetEncrytionAdditionalData()); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not encrypt s3 access secret: %v", err)}
 		}
-		user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
-		user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
-		user.FsConfig.CryptConfig = vfs.CryptFsConfig{}
-		user.FsConfig.SFTPConfig = vfs.SFTPFsConfig{}
+		fsConfig.GCSConfig = vfs.GCSFsConfig{}
+		fsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
+		fsConfig.CryptConfig = vfs.CryptFsConfig{}
+		fsConfig.SFTPConfig = vfs.SFTPFsConfig{}
 		return nil
-	} else if user.FsConfig.Provider == GCSFilesystemProvider {
-		if err := user.FsConfig.GCSConfig.Validate(user.getGCSCredentialsFilePath()); err != nil {
+	} else if fsConfig.Provider == vfs.GCSFilesystemProvider {
+		if err := fsConfig.GCSConfig.Validate(helper.GetGCSCredentialsFilePath()); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate GCS config: %v", err)}
 		}
-		user.FsConfig.S3Config = vfs.S3FsConfig{}
-		user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
-		user.FsConfig.CryptConfig = vfs.CryptFsConfig{}
-		user.FsConfig.SFTPConfig = vfs.SFTPFsConfig{}
+		fsConfig.S3Config = vfs.S3FsConfig{}
+		fsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
+		fsConfig.CryptConfig = vfs.CryptFsConfig{}
+		fsConfig.SFTPConfig = vfs.SFTPFsConfig{}
 		return nil
-	} else if user.FsConfig.Provider == AzureBlobFilesystemProvider {
-		if err := user.FsConfig.AzBlobConfig.Validate(); err != nil {
+	} else if fsConfig.Provider == vfs.AzureBlobFilesystemProvider {
+		if err := fsConfig.AzBlobConfig.Validate(); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate Azure Blob config: %v", err)}
 		}
-		if err := user.FsConfig.AzBlobConfig.EncryptCredentials(user.Username); err != nil {
+		if err := fsConfig.AzBlobConfig.EncryptCredentials(helper.GetEncrytionAdditionalData()); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not encrypt Azure blob account key: %v", err)}
 		}
-		user.FsConfig.S3Config = vfs.S3FsConfig{}
-		user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
-		user.FsConfig.CryptConfig = vfs.CryptFsConfig{}
-		user.FsConfig.SFTPConfig = vfs.SFTPFsConfig{}
+		fsConfig.S3Config = vfs.S3FsConfig{}
+		fsConfig.GCSConfig = vfs.GCSFsConfig{}
+		fsConfig.CryptConfig = vfs.CryptFsConfig{}
+		fsConfig.SFTPConfig = vfs.SFTPFsConfig{}
 		return nil
-	} else if user.FsConfig.Provider == CryptedFilesystemProvider {
-		if err := user.FsConfig.CryptConfig.Validate(); err != nil {
+	} else if fsConfig.Provider == vfs.CryptedFilesystemProvider {
+		if err := fsConfig.CryptConfig.Validate(); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate Crypt fs config: %v", err)}
 		}
-		if err := user.FsConfig.CryptConfig.EncryptCredentials(user.Username); err != nil {
+		if err := fsConfig.CryptConfig.EncryptCredentials(helper.GetEncrytionAdditionalData()); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not encrypt Crypt fs passphrase: %v", err)}
 		}
-		user.FsConfig.S3Config = vfs.S3FsConfig{}
-		user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
-		user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
-		user.FsConfig.SFTPConfig = vfs.SFTPFsConfig{}
+		fsConfig.S3Config = vfs.S3FsConfig{}
+		fsConfig.GCSConfig = vfs.GCSFsConfig{}
+		fsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
+		fsConfig.SFTPConfig = vfs.SFTPFsConfig{}
 		return nil
-	} else if user.FsConfig.Provider == SFTPFilesystemProvider {
-		if err := user.FsConfig.SFTPConfig.Validate(); err != nil {
+	} else if fsConfig.Provider == vfs.SFTPFilesystemProvider {
+		if err := fsConfig.SFTPConfig.Validate(); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not validate SFTP fs config: %v", err)}
 		}
-		if err := user.FsConfig.SFTPConfig.EncryptCredentials(user.Username); err != nil {
+		if err := fsConfig.SFTPConfig.EncryptCredentials(helper.GetEncrytionAdditionalData()); err != nil {
 			return &ValidationError{err: fmt.Sprintf("could not encrypt SFTP fs credentials: %v", err)}
 		}
-		user.FsConfig.S3Config = vfs.S3FsConfig{}
-		user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
-		user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
-		user.FsConfig.CryptConfig = vfs.CryptFsConfig{}
+		fsConfig.S3Config = vfs.S3FsConfig{}
+		fsConfig.GCSConfig = vfs.GCSFsConfig{}
+		fsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
+		fsConfig.CryptConfig = vfs.CryptFsConfig{}
 		return nil
 	}
-	user.FsConfig.Provider = LocalFilesystemProvider
-	user.FsConfig.S3Config = vfs.S3FsConfig{}
-	user.FsConfig.GCSConfig = vfs.GCSFsConfig{}
-	user.FsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
-	user.FsConfig.CryptConfig = vfs.CryptFsConfig{}
-	user.FsConfig.SFTPConfig = vfs.SFTPFsConfig{}
+	fsConfig.Provider = vfs.LocalFilesystemProvider
+	fsConfig.S3Config = vfs.S3FsConfig{}
+	fsConfig.GCSConfig = vfs.GCSFsConfig{}
+	fsConfig.AzBlobConfig = vfs.AzBlobFsConfig{}
+	fsConfig.CryptConfig = vfs.CryptFsConfig{}
+	fsConfig.SFTPConfig = vfs.SFTPFsConfig{}
 	return nil
 }
 
@@ -1384,11 +1520,19 @@ func validateBaseParams(user *User) error {
 
 func createUserPasswordHash(user *User) error {
 	if user.Password != "" && !user.IsPasswordHashed() {
-		pwd, err := argon2id.CreateHash(user.Password, argon2Params)
-		if err != nil {
-			return err
+		if config.PasswordHashingAlgo == HashingAlgoBcrypt {
+			pwd, err := bcrypt.GenerateFromPassword([]byte(user.Password), config.PasswordHashing.BcryptOptions.Cost)
+			if err != nil {
+				return err
+			}
+			user.Password = string(pwd)
+		} else {
+			pwd, err := argon2id.CreateHash(user.Password, argon2Params)
+			if err != nil {
+				return err
+			}
+			user.Password = pwd
 		}
-		user.Password = pwd
 	}
 	return nil
 }
@@ -1403,11 +1547,23 @@ func ValidateFolder(folder *vfs.BaseVirtualFolder) error {
 		return &ValidationError{err: fmt.Sprintf("folder name %#v is not valid, the following characters are allowed: a-zA-Z0-9-_.~",
 			folder.Name)}
 	}
-	cleanedMPath := filepath.Clean(folder.MappedPath)
-	if !filepath.IsAbs(cleanedMPath) {
-		return &ValidationError{err: fmt.Sprintf("invalid folder mapped path %#v", folder.MappedPath)}
+	if folder.FsConfig.Provider == vfs.LocalFilesystemProvider || folder.FsConfig.Provider == vfs.CryptedFilesystemProvider ||
+		folder.MappedPath != "" {
+		cleanedMPath := filepath.Clean(folder.MappedPath)
+		if !filepath.IsAbs(cleanedMPath) {
+			return &ValidationError{err: fmt.Sprintf("invalid folder mapped path %#v", folder.MappedPath)}
+		}
+		folder.MappedPath = cleanedMPath
 	}
-	folder.MappedPath = cleanedMPath
+	if folder.HasRedactedSecret() {
+		return errors.New("cannot save a folder with a redacted secret")
+	}
+	if err := validateFilesystemConfig(&folder.FsConfig, folder); err != nil {
+		return err
+	}
+	if err := saveGCSCredentials(&folder.FsConfig, folder); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1422,7 +1578,10 @@ func ValidateUser(user *User) error {
 	if err := validatePermissions(user); err != nil {
 		return err
 	}
-	if err := validateFilesystemConfig(user); err != nil {
+	if user.hasRedactedSecret() {
+		return errors.New("cannot save a user with a redacted secret")
+	}
+	if err := validateFilesystemConfig(&user.FsConfig, user); err != nil {
 		return err
 	}
 	if err := validateUserVirtualFolders(user); err != nil {
@@ -1440,7 +1599,7 @@ func ValidateUser(user *User) error {
 	if err := validateFilters(user); err != nil {
 		return err
 	}
-	if err := saveGCSCredentials(user); err != nil {
+	if err := saveGCSCredentials(&user.FsConfig, user); err != nil {
 		return err
 	}
 	return nil
@@ -1458,6 +1617,13 @@ func checkLoginConditions(user *User) error {
 }
 
 func isPasswordOK(user *User, password string) (bool, error) {
+	if config.PasswordCaching {
+		found, match := cachedPasswords.Check(user.Username, password)
+		if found {
+			return match, nil
+		}
+	}
+
 	match := false
 	var err error
 	if strings.HasPrefix(user.Password, argonPwdPrefix) {
@@ -1483,7 +1649,29 @@ func isPasswordOK(user *User, password string) (bool, error) {
 			return match, err
 		}
 	}
+	if err == nil && match {
+		cachedPasswords.Add(user.Username, password)
+	}
 	return match, err
+}
+
+func checkUserAndTLSCertificate(user *User, protocol string, tlsCert *x509.Certificate) (User, error) {
+	err := checkLoginConditions(user)
+	if err != nil {
+		return *user, err
+	}
+	switch protocol {
+	case "FTP", "DAV":
+		if user.Filters.TLSUsername == TLSUsernameCN {
+			if user.Username == tlsCert.Subject.CommonName {
+				return *user, nil
+			}
+			return *user, fmt.Errorf("CN %#v does not match username %#v", tlsCert.Subject.CommonName, user.Username)
+		}
+		return *user, errors.New("TLS certificate is not valid")
+	default:
+		return *user, fmt.Errorf("certificate authentication is not supported for protocol %v", protocol)
+	}
 }
 
 func checkUserAndPass(user *User, password, ip, protocol string) (User, error) {
@@ -1492,25 +1680,27 @@ func checkUserAndPass(user *User, password, ip, protocol string) (User, error) {
 		return *user, err
 	}
 	if user.Password == "" {
-		return *user, errors.New("Credentials cannot be null or empty")
+		return *user, errors.New("credentials cannot be null or empty")
 	}
-	hookResponse, err := executeCheckPasswordHook(user.Username, password, ip, protocol)
-	if err != nil {
-		providerLog(logger.LevelDebug, "error executing check password hook: %v", err)
-		return *user, errors.New("Unable to check credentials")
-	}
-	switch hookResponse.Status {
-	case -1:
-		// no hook configured
-	case 1:
-		providerLog(logger.LevelDebug, "password accepted by check password hook")
-		return *user, nil
-	case 2:
-		providerLog(logger.LevelDebug, "partial success from check password hook")
-		password = hookResponse.ToVerify
-	default:
-		providerLog(logger.LevelDebug, "password rejected by check password hook, status: %v", hookResponse.Status)
-		return *user, ErrInvalidCredentials
+	if !user.Filters.Hooks.CheckPasswordDisabled {
+		hookResponse, err := executeCheckPasswordHook(user.Username, password, ip, protocol)
+		if err != nil {
+			providerLog(logger.LevelDebug, "error executing check password hook: %v", err)
+			return *user, errors.New("unable to check credentials")
+		}
+		switch hookResponse.Status {
+		case -1:
+			// no hook configured
+		case 1:
+			providerLog(logger.LevelDebug, "password accepted by check password hook")
+			return *user, nil
+		case 2:
+			providerLog(logger.LevelDebug, "partial success from check password hook")
+			password = hookResponse.ToVerify
+		default:
+			providerLog(logger.LevelDebug, "password rejected by check password hook, status: %v", hookResponse.Status)
+			return *user, ErrInvalidCredentials
+		}
 	}
 
 	match, err := isPasswordOK(user, password)
@@ -1601,7 +1791,10 @@ func comparePbkdf2PasswordAndHash(password, hashedPassword string) (bool, error)
 }
 
 func addCredentialsToUser(user *User) error {
-	if user.FsConfig.Provider != GCSFilesystemProvider {
+	if err := addFolderCredentialsToUser(user); err != nil {
+		return err
+	}
+	if user.FsConfig.Provider != vfs.GCSFilesystemProvider {
 		return nil
 	}
 	if user.FsConfig.GCSConfig.AutomaticCredentials > 0 {
@@ -1613,15 +1806,40 @@ func addCredentialsToUser(user *User) error {
 		return nil
 	}
 
-	cred, err := ioutil.ReadFile(user.getGCSCredentialsFilePath())
+	cred, err := os.ReadFile(user.GetGCSCredentialsFilePath())
 	if err != nil {
 		return err
 	}
 	return json.Unmarshal(cred, &user.FsConfig.GCSConfig.Credentials)
 }
 
+func addFolderCredentialsToUser(user *User) error {
+	for idx := range user.VirtualFolders {
+		f := &user.VirtualFolders[idx]
+		if f.FsConfig.Provider != vfs.GCSFilesystemProvider {
+			continue
+		}
+		if f.FsConfig.GCSConfig.AutomaticCredentials > 0 {
+			continue
+		}
+		// Don't read from file if credentials have already been set
+		if f.FsConfig.GCSConfig.Credentials.IsValid() {
+			continue
+		}
+		cred, err := os.ReadFile(f.GetGCSCredentialsFilePath())
+		if err != nil {
+			return err
+		}
+		err = json.Unmarshal(cred, f.FsConfig.GCSConfig.Credentials)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func getSSLMode() string {
-	if config.Driver == PGSQLDataProviderName {
+	if config.Driver == PGSQLDataProviderName || config.Driver == CockroachDataProviderName {
 		if config.SSLMode == 0 {
 			return "disable"
 		} else if config.SSLMode == 1 {
@@ -1929,7 +2147,7 @@ func getPasswordHookResponse(username, password, ip, protocol string) ([]byte, e
 		if resp.StatusCode != http.StatusOK {
 			return result, fmt.Errorf("wrong http status code from chek password hook: %v, expected 200", resp.StatusCode)
 		}
-		return ioutil.ReadAll(resp.Body)
+		return io.ReadAll(resp.Body)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1951,7 +2169,9 @@ func executeCheckPasswordHook(username, password, ip, protocol string) (checkPas
 		return response, nil
 	}
 
+	startTime := time.Now()
 	out, err := getPasswordHookResponse(username, password, ip, protocol)
+	providerLog(logger.LevelDebug, "check password hook executed, error: %v, elapsed: %v", err, time.Since(startTime))
 	if err != nil {
 		return response, err
 	}
@@ -1986,7 +2206,7 @@ func getPreLoginHookResponse(loginMethod, ip, protocol string, userAsJSON []byte
 		if resp.StatusCode != http.StatusOK {
 			return result, fmt.Errorf("wrong pre-login hook http status code: %v, expected 200", resp.StatusCode)
 		}
-		return ioutil.ReadAll(resp.Body)
+		return io.ReadAll(resp.Body)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -2001,41 +2221,37 @@ func getPreLoginHookResponse(loginMethod, ip, protocol string, userAsJSON []byte
 }
 
 func executePreLoginHook(username, loginMethod, ip, protocol string) (User, error) {
-	u, err := provider.userExists(username)
-	if err != nil {
-		if _, ok := err.(*RecordNotFoundError); !ok {
-			return u, err
-		}
-		u = User{
-			ID:       0,
-			Username: username,
-		}
-	}
-	userAsJSON, err := json.Marshal(u)
+	u, userAsJSON, err := getUserAndJSONForHook(username)
 	if err != nil {
 		return u, err
 	}
+	if u.Filters.Hooks.PreLoginDisabled {
+		return u, nil
+	}
+	startTime := time.Now()
 	out, err := getPreLoginHookResponse(loginMethod, ip, protocol, userAsJSON)
 	if err != nil {
-		return u, fmt.Errorf("Pre-login hook error: %v", err)
+		return u, fmt.Errorf("pre-login hook error: %v, elapsed %v", err, time.Since(startTime))
 	}
-	if strings.TrimSpace(string(out)) == "" {
+	providerLog(logger.LevelDebug, "pre-login hook completed, elapsed: %v", time.Since(startTime))
+	if utils.IsByteArrayEmpty(out) {
 		providerLog(logger.LevelDebug, "empty response from pre-login hook, no modification requested for user %#v id: %v",
 			username, u.ID)
 		if u.ID == 0 {
-			return u, &RecordNotFoundError{err: fmt.Sprintf("username %v does not exist", username)}
+			return u, &RecordNotFoundError{err: fmt.Sprintf("username %#v does not exist", username)}
 		}
 		return u, nil
 	}
 
 	userID := u.ID
+	userPwd := u.Password
 	userUsedQuotaSize := u.UsedQuotaSize
 	userUsedQuotaFiles := u.UsedQuotaFiles
 	userLastQuotaUpdate := u.LastQuotaUpdate
 	userLastLogin := u.LastLogin
 	err = json.Unmarshal(out, &u)
 	if err != nil {
-		return u, fmt.Errorf("Invalid pre-login hook response %#v, error: %v", string(out), err)
+		return u, fmt.Errorf("invalid pre-login hook response %#v, error: %v", string(out), err)
 	}
 	u.ID = userID
 	u.UsedQuotaSize = userUsedQuotaSize
@@ -2046,6 +2262,12 @@ func executePreLoginHook(username, loginMethod, ip, protocol string) (User, erro
 		err = provider.addUser(&u)
 	} else {
 		err = provider.updateUser(&u)
+		if err == nil {
+			webDAVUsersCache.swap(&u)
+			if u.Password != userPwd {
+				cachedPasswords.Remove(username)
+			}
+		}
 	}
 	if err != nil {
 		return u, err
@@ -2075,7 +2297,7 @@ func ExecutePostLoginHook(user *User, loginMethod, ip, protocol string, err erro
 			status = "1"
 		}
 
-		user.HideConfidentialData()
+		user.PrepareForRendering()
 		userAsJSON, err := json.Marshal(user)
 		if err != nil {
 			providerLog(logger.LevelWarn, "error serializing user in post login hook: %v", err)
@@ -2122,7 +2344,15 @@ func ExecutePostLoginHook(user *User, loginMethod, ip, protocol string, err erro
 	}()
 }
 
-func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol string) ([]byte, error) {
+func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol string, cert *x509.Certificate, userAsJSON []byte) ([]byte, error) {
+	var tlsCert string
+	if cert != nil {
+		var err error
+		tlsCert, err = utils.EncodeTLSCertToPem(cert)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if strings.HasPrefix(config.ExternalAuthHook, "http") {
 		var url *url.URL
 		var result []byte
@@ -2139,6 +2369,10 @@ func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, 
 		authRequest["public_key"] = pkey
 		authRequest["protocol"] = protocol
 		authRequest["keyboard_interactive"] = keyboardInteractive
+		authRequest["tls_cert"] = tlsCert
+		if len(userAsJSON) > 0 {
+			authRequest["user"] = string(userAsJSON)
+		}
 		authRequestAsJSON, err := json.Marshal(authRequest)
 		if err != nil {
 			providerLog(logger.LevelWarn, "error serializing external auth request: %v", err)
@@ -2150,63 +2384,95 @@ func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, 
 			return result, err
 		}
 		defer resp.Body.Close()
+		providerLog(logger.LevelDebug, "external auth hook executed, response code: %v", resp.StatusCode)
 		if resp.StatusCode != http.StatusOK {
 			return result, fmt.Errorf("wrong external auth http status code: %v, expected 200", resp.StatusCode)
 		}
-		return ioutil.ReadAll(resp.Body)
+
+		return io.ReadAll(resp.Body)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, config.ExternalAuthHook)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("SFTPGO_AUTHD_USERNAME=%v", username),
+		fmt.Sprintf("SFTPGO_AUTHD_USER=%v", string(userAsJSON)),
 		fmt.Sprintf("SFTPGO_AUTHD_IP=%v", ip),
 		fmt.Sprintf("SFTPGO_AUTHD_PASSWORD=%v", password),
 		fmt.Sprintf("SFTPGO_AUTHD_PUBLIC_KEY=%v", pkey),
 		fmt.Sprintf("SFTPGO_AUTHD_PROTOCOL=%v", protocol),
+		fmt.Sprintf("SFTPGO_AUTHD_TLS_CERT=%v", strings.ReplaceAll(tlsCert, "\n", "\\n")),
 		fmt.Sprintf("SFTPGO_AUTHD_KEYBOARD_INTERACTIVE=%v", keyboardInteractive))
 	return cmd.Output()
 }
 
-func doExternalAuth(username, password string, pubKey []byte, keyboardInteractive, ip, protocol string) (User, error) {
-	var user User
-	pkey := ""
-	if len(pubKey) > 0 {
-		k, err := ssh.ParsePublicKey(pubKey)
-		if err != nil {
-			return user, err
-		}
-		pkey = string(ssh.MarshalAuthorizedKey(k))
-	}
-	out, err := getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol)
-	if err != nil {
-		return user, fmt.Errorf("External auth error: %v", err)
-	}
-	err = json.Unmarshal(out, &user)
-	if err != nil {
-		return user, fmt.Errorf("Invalid external auth response: %v", err)
-	}
-	if user.Username == "" {
-		return user, ErrInvalidCredentials
-	}
+func updateUserFromExtAuthResponse(user *User, password, pkey string) {
 	if password != "" {
 		user.Password = password
 	}
 	if pkey != "" && !utils.IsStringPrefixInSlice(pkey, user.PublicKeys) {
 		user.PublicKeys = append(user.PublicKeys, pkey)
 	}
+}
+
+func doExternalAuth(username, password string, pubKey []byte, keyboardInteractive, ip, protocol string, tlsCert *x509.Certificate) (User, error) {
+	var user User
+
+	u, userAsJSON, err := getUserAndJSONForHook(username)
+	if err != nil {
+		return user, err
+	}
+
+	if u.Filters.Hooks.ExternalAuthDisabled {
+		return u, nil
+	}
+
+	pkey, err := utils.GetSSHPublicKeyAsString(pubKey)
+	if err != nil {
+		return user, err
+	}
+
+	startTime := time.Now()
+	out, err := getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol, tlsCert, userAsJSON)
+	if err != nil {
+		return user, fmt.Errorf("external auth error: %v, elapsed: %v", err, time.Since(startTime))
+	}
+	providerLog(logger.LevelDebug, "external auth completed, elapsed: %v", time.Since(startTime))
+	if utils.IsByteArrayEmpty(out) {
+		providerLog(logger.LevelDebug, "empty response from external hook, no modification requested for user %#v id: %v",
+			username, u.ID)
+		if u.ID == 0 {
+			return u, &RecordNotFoundError{err: fmt.Sprintf("username %#v does not exist", username)}
+		}
+		return u, nil
+	}
+	err = json.Unmarshal(out, &user)
+	if err != nil {
+		return user, fmt.Errorf("invalid external auth response: %v", err)
+	}
+	// an empty username means authentication failure
+	if user.Username == "" {
+		return user, ErrInvalidCredentials
+	}
+	updateUserFromExtAuthResponse(&user, password, pkey)
 	// some users want to map multiple login usernames with a single SFTPGo account
 	// for example an SFTP user logins using "user1" or "user2" and the external auth
 	// returns "user" in both cases, so we use the username returned from
 	// external auth and not the one used to login
-	u, err := provider.userExists(user.Username)
-	if err == nil {
+	if user.Username != username {
+		u, err = provider.userExists(user.Username)
+	}
+	if u.ID > 0 && err == nil {
 		user.ID = u.ID
 		user.UsedQuotaSize = u.UsedQuotaSize
 		user.UsedQuotaFiles = u.UsedQuotaFiles
 		user.LastQuotaUpdate = u.LastQuotaUpdate
 		user.LastLogin = u.LastLogin
 		err = provider.updateUser(&user)
+		if err == nil {
+			webDAVUsersCache.swap(&user)
+			cachedPasswords.Add(user.Username, password)
+		}
 		return user, err
 	}
 	err = provider.addUser(&user)
@@ -2214,6 +2480,25 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 		return user, err
 	}
 	return provider.userExists(user.Username)
+}
+
+func getUserAndJSONForHook(username string) (User, []byte, error) {
+	var userAsJSON []byte
+	u, err := provider.userExists(username)
+	if err != nil {
+		if _, ok := err.(*RecordNotFoundError); !ok {
+			return u, userAsJSON, err
+		}
+		u = User{
+			ID:       0,
+			Username: username,
+		}
+	}
+	userAsJSON, err = json.Marshal(u)
+	if err != nil {
+		return u, userAsJSON, err
+	}
+	return u, userAsJSON, err
 }
 
 func providerLog(level logger.LogLevel, format string, v ...interface{}) {
@@ -2260,7 +2545,7 @@ func executeAction(operation string, user *User) {
 			}
 			user = &u
 		}
-		user.HideConfidentialData()
+		user.PrepareForRendering()
 		userAsJSON, err := json.Marshal(user)
 		if err != nil {
 			providerLog(logger.LevelWarn, "unable to serialize user as JSON for operation %#v: %v", operation, err)
@@ -2290,77 +2575,4 @@ func executeAction(operation string, user *User) {
 			executeNotificationCommand(operation, user.getNotificationFieldsAsSlice(operation), userAsJSON) //nolint:errcheck // the error is used in test cases only
 		}
 	}()
-}
-
-// after migrating database to v4 we have to update the quota for the imported folders
-/*func updateVFoldersQuotaAfterRestore(foldersToScan []string) {
-	fs := vfs.NewOsFs("", "", nil).(*vfs.OsFs)
-	for _, folder := range foldersToScan {
-		providerLog(logger.LevelDebug, "starting quota scan after migration for folder %#v", folder)
-		vfolder, err := provider.getFolderByPath(folder)
-		if err != nil {
-			providerLog(logger.LevelWarn, "error getting folder to scan %#v: %v", folder, err)
-			continue
-		}
-		numFiles, size, err := fs.GetDirSize(folder)
-		if err != nil {
-			providerLog(logger.LevelWarn, "error scanning folder %#v: %v", folder, err)
-			continue
-		}
-		err = UpdateVirtualFolderQuota(vfolder, numFiles, size, true)
-		providerLog(logger.LevelDebug, "quota updated for virtual folder %#v, error: %v", vfolder.MappedPath, err)
-	}
-}*/
-
-func updateWebDavCachedUserLastLogin(username string) {
-	result, ok := webDAVUsersCache.Load(username)
-	if ok {
-		cachedUser := result.(*CachedUser)
-		cachedUser.User.LastLogin = utils.GetTimeAsMsSinceEpoch(time.Now())
-		webDAVUsersCache.Store(cachedUser.User.Username, cachedUser)
-	}
-}
-
-// CacheWebDAVUser add a user to the WebDAV cache
-func CacheWebDAVUser(cachedUser *CachedUser, maxSize int) {
-	if maxSize > 0 {
-		var cacheSize int
-		var userToRemove string
-		var expirationTime time.Time
-
-		webDAVUsersCache.Range(func(k, v interface{}) bool {
-			cacheSize++
-			if userToRemove == "" {
-				userToRemove = k.(string)
-				expirationTime = v.(*CachedUser).Expiration
-				return true
-			}
-			expireTime := v.(*CachedUser).Expiration
-			if !expireTime.IsZero() && expireTime.Before(expirationTime) {
-				userToRemove = k.(string)
-				expirationTime = expireTime
-			}
-			return true
-		})
-
-		if cacheSize >= maxSize {
-			RemoveCachedWebDAVUser(userToRemove)
-		}
-	}
-
-	if cachedUser.User.Username != "" {
-		webDAVUsersCache.Store(cachedUser.User.Username, cachedUser)
-	}
-}
-
-// GetCachedWebDAVUser returns a previously cached WebDAV user
-func GetCachedWebDAVUser(username string) (interface{}, bool) {
-	return webDAVUsersCache.Load(username)
-}
-
-// RemoveCachedWebDAVUser removes a cached WebDAV user
-func RemoveCachedWebDAVUser(username string) {
-	if username != "" {
-		webDAVUsersCache.Delete(username)
-	}
 }

@@ -4,7 +4,6 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -22,58 +21,60 @@ import (
 )
 
 var (
-	directoryToServe             string
-	portableSFTPDPort            int
-	portableAdvertiseService     bool
-	portableAdvertiseCredentials bool
-	portableUsername             string
-	portablePassword             string
-	portableLogFile              string
-	portableLogVerbose           bool
-	portablePublicKeys           []string
-	portablePermissions          []string
-	portableSSHCommands          []string
-	portableAllowedPatterns      []string
-	portableDeniedPatterns       []string
-	portableFsProvider           int
-	portableS3Bucket             string
-	portableS3Region             string
-	portableS3AccessKey          string
-	portableS3AccessSecret       string
-	portableS3Endpoint           string
-	portableS3StorageClass       string
-	portableS3KeyPrefix          string
-	portableS3ULPartSize         int
-	portableS3ULConcurrency      int
-	portableGCSBucket            string
-	portableGCSCredentialsFile   string
-	portableGCSAutoCredentials   int
-	portableGCSStorageClass      string
-	portableGCSKeyPrefix         string
-	portableFTPDPort             int
-	portableFTPSCert             string
-	portableFTPSKey              string
-	portableWebDAVPort           int
-	portableWebDAVCert           string
-	portableWebDAVKey            string
-	portableAzContainer          string
-	portableAzAccountName        string
-	portableAzAccountKey         string
-	portableAzEndpoint           string
-	portableAzAccessTier         string
-	portableAzSASURL             string
-	portableAzKeyPrefix          string
-	portableAzULPartSize         int
-	portableAzULConcurrency      int
-	portableAzUseEmulator        bool
-	portableCryptPassphrase      string
-	portableSFTPEndpoint         string
-	portableSFTPUsername         string
-	portableSFTPPassword         string
-	portableSFTPPrivateKeyPath   string
-	portableSFTPFingerprints     []string
-	portableSFTPPrefix           string
-	portableCmd                  = &cobra.Command{
+	directoryToServe                   string
+	portableSFTPDPort                  int
+	portableAdvertiseService           bool
+	portableAdvertiseCredentials       bool
+	portableUsername                   string
+	portablePassword                   string
+	portableLogFile                    string
+	portableLogVerbose                 bool
+	portablePublicKeys                 []string
+	portablePermissions                []string
+	portableSSHCommands                []string
+	portableAllowedPatterns            []string
+	portableDeniedPatterns             []string
+	portableFsProvider                 int
+	portableS3Bucket                   string
+	portableS3Region                   string
+	portableS3AccessKey                string
+	portableS3AccessSecret             string
+	portableS3Endpoint                 string
+	portableS3StorageClass             string
+	portableS3KeyPrefix                string
+	portableS3ULPartSize               int
+	portableS3ULConcurrency            int
+	portableGCSBucket                  string
+	portableGCSCredentialsFile         string
+	portableGCSAutoCredentials         int
+	portableGCSStorageClass            string
+	portableGCSKeyPrefix               string
+	portableFTPDPort                   int
+	portableFTPSCert                   string
+	portableFTPSKey                    string
+	portableWebDAVPort                 int
+	portableWebDAVCert                 string
+	portableWebDAVKey                  string
+	portableAzContainer                string
+	portableAzAccountName              string
+	portableAzAccountKey               string
+	portableAzEndpoint                 string
+	portableAzAccessTier               string
+	portableAzSASURL                   string
+	portableAzKeyPrefix                string
+	portableAzULPartSize               int
+	portableAzULConcurrency            int
+	portableAzUseEmulator              bool
+	portableCryptPassphrase            string
+	portableSFTPEndpoint               string
+	portableSFTPUsername               string
+	portableSFTPPassword               string
+	portableSFTPPrivateKeyPath         string
+	portableSFTPFingerprints           []string
+	portableSFTPPrefix                 string
+	portableSFTPDisableConcurrentReads bool
+	portableSFTPDBufferSize            int64
+	portableCmd                        = &cobra.Command{
 		Use:   "portable",
 		Short: "Serve a single directory",
 		Long: `To serve the current working directory with auto generated credentials simply
@@ -84,9 +85,9 @@ $ sftpgo portable
 Please take a look at the usage below to customize the serving parameters`,
 		Run: func(cmd *cobra.Command, args []string) {
 			portableDir := directoryToServe
-			fsProvider := dataprovider.FilesystemProvider(portableFsProvider)
+			fsProvider := vfs.FilesystemProvider(portableFsProvider)
 			if !filepath.IsAbs(portableDir) {
-				if fsProvider == dataprovider.LocalFilesystemProvider {
+				if fsProvider == vfs.LocalFilesystemProvider {
 					portableDir, _ = filepath.Abs(portableDir)
 				} else {
 					portableDir = os.TempDir()
@@ -95,7 +96,7 @@ Please take a look at the usage below to customize the serving parameters`,
 			permissions := make(map[string][]string)
 			permissions["/"] = portablePermissions
 			portableGCSCredentials := ""
-			if fsProvider == dataprovider.GCSFilesystemProvider && portableGCSCredentialsFile != "" {
+			if fsProvider == vfs.GCSFilesystemProvider && portableGCSCredentialsFile != "" {
 				contents, err := getFileContents(portableGCSCredentialsFile)
 				if err != nil {
 					fmt.Printf("Unable to get GCS credentials: %v\n", err)
@@ -105,7 +106,7 @@ Please take a look at the usage below to customize the serving parameters`,
 				portableGCSAutoCredentials = 0
 			}
 			portableSFTPPrivateKey := ""
-			if fsProvider == dataprovider.SFTPFilesystemProvider && portableSFTPPrivateKeyPath != "" {
+			if fsProvider == vfs.SFTPFilesystemProvider && portableSFTPPrivateKeyPath != "" {
 				contents, err := getFileContents(portableSFTPPrivateKeyPath)
 				if err != nil {
 					fmt.Printf("Unable to get SFTP private key: %v\n", err)
@@ -149,8 +150,8 @@ Please take a look at the usage below to customize the serving parameters`,
 					Permissions: permissions,
 					HomeDir:     portableDir,
 					Status:      1,
-					FsConfig: dataprovider.Filesystem{
-						Provider: dataprovider.FilesystemProvider(portableFsProvider),
+					FsConfig: vfs.Filesystem{
+						Provider: vfs.FilesystemProvider(portableFsProvider),
 						S3Config: vfs.S3FsConfig{
 							Bucket:            portableS3Bucket,
 							Region:            portableS3Region,
@@ -185,12 +186,14 @@ Please take a look at the usage below to customize the serving parameters`,
 							Passphrase: kms.NewPlainSecret(portableCryptPassphrase),
 						},
 						SFTPConfig: vfs.SFTPFsConfig{
-							Endpoint:     portableSFTPEndpoint,
-							Username:     portableSFTPUsername,
-							Password:     kms.NewPlainSecret(portableSFTPPassword),
-							PrivateKey:   kms.NewPlainSecret(portableSFTPPrivateKey),
-							Fingerprints: portableSFTPFingerprints,
-							Prefix:       portableSFTPPrefix,
+							Endpoint:                portableSFTPEndpoint,
+							Username:                portableSFTPUsername,
+							Password:                kms.NewPlainSecret(portableSFTPPassword),
+							PrivateKey:              kms.NewPlainSecret(portableSFTPPrivateKey),
+							Fingerprints:            portableSFTPFingerprints,
+							Prefix:                  portableSFTPPrefix,
+							DisableCouncurrentReads: portableSFTPDisableConcurrentReads,
+							BufferSize:              portableSFTPDBufferSize,
 						},
 					},
 					Filters: dataprovider.UserFilters{
@@ -256,7 +259,7 @@ multicast DNS`)
 advertised via multicast DNS, this
 flag allows to put username/password
 inside the advertised TXT record`)
-	portableCmd.Flags().IntVarP(&portableFsProvider, "fs-provider", "f", int(dataprovider.LocalFilesystemProvider), `0 => local filesystem
+	portableCmd.Flags().IntVarP(&portableFsProvider, "fs-provider", "f", int(vfs.LocalFilesystemProvider), `0 => local filesystem
 1 => AWS S3 compatible
 2 => Google Cloud Storage
 3 => Azure Blob Storage
@@ -318,6 +321,17 @@ key for SFTP provider`)
 	portableCmd.Flags().StringVar(&portableSFTPPrefix, "sftp-prefix", "", `SFTP prefix allows restrict all
 operations to a given path within the
 remote SFTP server`)
+	portableCmd.Flags().BoolVar(&portableSFTPDisableConcurrentReads, "sftp-disable-concurrent-reads", false, `Concurrent reads are safe to use and
+disabling them will degrade performance.
+Disable for read once servers`)
+	portableCmd.Flags().Int64Var(&portableSFTPDBufferSize, "sftp-buffer-size", 0, `The size of the buffer (in MB) to use
+for transfers. By enabling buffering,
+the reads and writes, from/to the
+remote SFTP server, are split in
+multiple concurrent requests and this
+allows data to be transferred at a
+faster rate, over high latency networks,
+by overlapping round-trip times`)
 	rootCmd.AddCommand(portableCmd)
 }
 
@@ -384,7 +398,7 @@ func getFileContents(name string) (string, error) {
 	if fi.Size() > 1048576 {
 		return "", fmt.Errorf("%#v is too big %v/1048576 bytes", name, fi.Size())
 	}
-	contents, err := ioutil.ReadFile(name)
+	contents, err := os.ReadFile(name)
 	if err != nil {
 		return "", err
 	}

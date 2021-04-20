@@ -2,6 +2,7 @@
 package utils
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -17,7 +18,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -35,6 +35,7 @@ import (
 
 const (
 	logSender = "utils"
+	osWindows = "windows"
 )
 
 // IsStringInSlice searches a string in a slice and returns true if the string is found
@@ -240,7 +241,7 @@ func GenerateRSAKeys(file string) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
+	return os.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
 }
 
 // GenerateECDSAKeys generate ecdsa private and public keys and write the
@@ -278,7 +279,7 @@ func GenerateECDSAKeys(file string) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
+	return os.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
 }
 
 // GenerateEd25519Keys generate ed25519 private and public keys and write the
@@ -310,21 +311,27 @@ func GenerateEd25519Keys(file string) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
+	return os.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
 }
 
-// GetDirsForSFTPPath returns all the directory for the given path in reverse order
+// GetDirsForVirtualPath returns all the directory for the given path in reverse order
 // for example if the path is: /1/2/3/4 it returns:
 // [ "/1/2/3/4", "/1/2/3", "/1/2", "/1", "/" ]
-func GetDirsForSFTPPath(p string) []string {
-	sftpPath := CleanPath(p)
-	dirsForPath := []string{sftpPath}
+func GetDirsForVirtualPath(virtualPath string) []string {
+	if virtualPath == "." {
+		virtualPath = "/"
+	} else {
+		if !path.IsAbs(virtualPath) {
+			virtualPath = CleanPath(virtualPath)
+		}
+	}
+	dirsForPath := []string{virtualPath}
 	for {
-		if sftpPath == "/" {
+		if virtualPath == "/" {
 			break
 		}
-		sftpPath = path.Dir(sftpPath)
-		dirsForPath = append(dirsForPath, sftpPath)
+		virtualPath = path.Dir(virtualPath)
+		dirsForPath = append(dirsForPath, virtualPath)
 	}
 	return dirsForPath
 }
@@ -368,7 +375,7 @@ func IsFileInputValid(fileInput string) bool {
 // the -l flag will be ignored and the -c flag will get the value `C:\ProgramData\SFTPGO" -l sftpgo.log`
 // since the backslash after SFTPGO escape the double quote. This is definitely a bad user input
 func CleanDirInput(dirInput string) string {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		for strings.HasSuffix(dirInput, "\"") {
 			dirInput = strings.TrimSuffix(dirInput, "\"")
 		}
@@ -409,7 +416,7 @@ func HTTPListenAndServe(srv *http.Server, address string, port int, isTLS bool, 
 	var listener net.Listener
 	var err error
 
-	if filepath.IsAbs(address) && runtime.GOOS != "windows" {
+	if filepath.IsAbs(address) && runtime.GOOS != osWindows {
 		if !IsFileInputValid(address) {
 			return fmt.Errorf("invalid socket address %#v", address)
 		}
@@ -422,6 +429,7 @@ func HTTPListenAndServe(srv *http.Server, address string, port int, isTLS bool, 
 
 		listener, err = net.Listen("unix", address)
 	} else {
+		CheckTCP4Port(port)
 		listener, err = net.Listen("tcp", fmt.Sprintf("%s:%d", address, port))
 	}
 	if err != nil {
@@ -451,4 +459,61 @@ func GetTLSCiphersFromNames(cipherNames []string) []uint16 {
 	}
 
 	return ciphers
+}
+
+// EncodeTLSCertToPem returns the specified certificate PEM encoded.
+// This can be verified using openssl x509 -in cert.crt  -text -noout
+func EncodeTLSCertToPem(tlsCert *x509.Certificate) (string, error) {
+	if len(tlsCert.Raw) == 0 {
+		return "", errors.New("invalid x509 certificate, no der contents")
+	}
+	publicKeyBlock := pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: tlsCert.Raw,
+	}
+	return string(pem.EncodeToMemory(&publicKeyBlock)), nil
+}
+
+// CheckTCP4Port quits the app if bind on the given IPv4 port fails.
+// This is a ugly hack to avoid to bind on an already used port.
+// It is required on Windows only. Upstream does not consider this
+// behaviour a bug:
+// https://github.com/golang/go/issues/45150
+func CheckTCP4Port(port int) {
+	if runtime.GOOS != osWindows {
+		return
+	}
+	listener, err := net.Listen("tcp4", fmt.Sprintf(":%d", port))
+	if err != nil {
+		logger.ErrorToConsole("unable to bind on tcp4 address: %v", err)
+		logger.Error(logSender, "", "unable to bind on tcp4 address: %v", err)
+		os.Exit(1)
+	}
+	listener.Close()
+}
+
+// IsByteArrayEmpty return true if the byte array is empty or a new line
+func IsByteArrayEmpty(b []byte) bool {
+	if len(b) == 0 {
+		return true
+	}
+	if bytes.Equal(b, []byte("\n")) {
+		return true
+	}
+	if bytes.Equal(b, []byte("\r\n")) {
+		return true
+	}
+	return false
+}
+
+// GetSSHPublicKeyAsString returns an SSH public key serialized as string
+func GetSSHPublicKeyAsString(pubKey []byte) (string, error) {
+	if len(pubKey) == 0 {
+		return "", nil
+	}
+	k, err := ssh.ParsePublicKey(pubKey)
+	if err != nil {
+		return "", err
+	}
+	return string(ssh.MarshalAuthorizedKey(k)), nil
 }

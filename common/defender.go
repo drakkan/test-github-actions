@@ -3,7 +3,6 @@ package common
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"sort"
@@ -24,6 +23,7 @@ const (
 	HostEventLoginFailed HostEvent = iota
 	HostEventUserNotFound
 	HostEventNoLoginTried
+	HostEventRateExceeded
 )
 
 // Defender defines the interface that a defender must implements
@@ -51,6 +51,8 @@ type DefenderConfig struct {
 	ScoreInvalid int `json:"score_invalid" mapstructure:"score_invalid"`
 	// Score for valid login attempts, eg. user accounts that exist
 	ScoreValid int `json:"score_valid" mapstructure:"score_valid"`
+	// Score for rate exceeded events, generated from the rate limiters
+	ScoreRateExceeded int `json:"score_rate_exceeded" mapstructure:"score_rate_exceeded"`
 	// Defines the time window, in minutes, for tracking client errors.
 	// A host is banned if it has exceeded the defined threshold during
 	// the last observation time minutes
@@ -123,6 +125,9 @@ func (c *DefenderConfig) validate() error {
 	}
 	if c.ScoreValid >= c.Threshold {
 		return fmt.Errorf("score_valid %v cannot be greater than threshold %v", c.ScoreValid, c.Threshold)
+	}
+	if c.ScoreRateExceeded >= c.Threshold {
+		return fmt.Errorf("score_rate_exceeded %v cannot be greater than threshold %v", c.ScoreRateExceeded, c.Threshold)
 	}
 	if c.BanTime <= 0 {
 		return fmt.Errorf("invalid ban_time %v", c.BanTime)
@@ -249,6 +254,8 @@ func (d *memoryDefender) AddEvent(ip string, event HostEvent) {
 	switch event {
 	case HostEventLoginFailed:
 		score = d.config.ScoreValid
+	case HostEventRateExceeded:
+		score = d.config.ScoreRateExceeded
 	case HostEventUserNotFound, HostEventNoLoginTried:
 		score = d.config.ScoreInvalid
 	}
@@ -413,7 +420,7 @@ func loadHostListFromFile(name string) (*HostList, error) {
 		return nil, fmt.Errorf("host list file %#v is too big: %v bytes", name, info.Size())
 	}
 
-	content, err := ioutil.ReadFile(name)
+	content, err := os.ReadFile(name)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read input file %#v: %v", name, err)
 	}

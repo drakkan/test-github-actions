@@ -59,6 +59,7 @@ var (
 		EnableHTTPS:     false,
 		ClientAuthType:  0,
 		TLSCipherSuites: nil,
+		Prefix:          "",
 	}
 	defaultHTTPDBinding = httpd.Binding{
 		Address:         "127.0.0.1",
@@ -67,6 +68,16 @@ var (
 		EnableHTTPS:     false,
 		ClientAuthType:  0,
 		TLSCipherSuites: nil,
+	}
+	defaultRateLimiter = common.RateLimiterConfig{
+		Average:                0,
+		Period:                 1000,
+		Burst:                  1,
+		Type:                   2,
+		Protocols:              []string{common.ProtocolSSH, common.ProtocolFTP, common.ProtocolWebDAV, common.ProtocolHTTP},
+		GenerateDefenderEvents: false,
+		EntriesSoftLimit:       100,
+		EntriesHardLimit:       150,
 	}
 )
 
@@ -105,18 +116,20 @@ func Init() {
 			PostConnectHook:     "",
 			MaxTotalConnections: 0,
 			DefenderConfig: common.DefenderConfig{
-				Enabled:          false,
-				BanTime:          30,
-				BanTimeIncrement: 50,
-				Threshold:        15,
-				ScoreInvalid:     2,
-				ScoreValid:       1,
-				ObservationTime:  30,
-				EntriesSoftLimit: 100,
-				EntriesHardLimit: 150,
-				SafeListFile:     "",
-				BlockListFile:    "",
+				Enabled:           false,
+				BanTime:           30,
+				BanTimeIncrement:  50,
+				Threshold:         15,
+				ScoreInvalid:      2,
+				ScoreValid:        1,
+				ScoreRateExceeded: 3,
+				ObservationTime:   30,
+				EntriesSoftLimit:  100,
+				EntriesHardLimit:  150,
+				SafeListFile:      "",
+				BlockListFile:     "",
 			},
+			RateLimitersConfig: []common.RateLimiterConfig{defaultRateLimiter},
 		},
 		SFTPD: sftpd.Configuration{
 			Banner:                  defaultSFTPDBanner,
@@ -180,7 +193,7 @@ func Init() {
 			Driver:           "sqlite",
 			Name:             "sftpgo.db",
 			Host:             "",
-			Port:             5432,
+			Port:             0,
 			Username:         "",
 			Password:         "",
 			ConnectionString: "",
@@ -207,18 +220,27 @@ func Init() {
 					Iterations:  1,
 					Parallelism: 2,
 				},
+				BcryptOptions: dataprovider.BcryptOptions{
+					Cost: 10,
+				},
 			},
+			PasswordHashingAlgo:       dataprovider.HashingAlgoArgon2ID,
+			PasswordCaching:           true,
 			UpdateMode:                0,
 			PreferDatabaseCredentials: false,
 			SkipNaturalKeysValidation: false,
+			DelayedQuotaUpdate:        0,
 		},
 		HTTPDConfig: httpd.Conf{
 			Bindings:           []httpd.Binding{defaultHTTPDBinding},
 			TemplatesPath:      "templates",
 			StaticFilesPath:    "static",
 			BackupsPath:        "backups",
+			WebAdminRoot:       "",
 			CertificateFile:    "",
 			CertificateKeyFile: "",
+			CACertificates:     nil,
+			CARevocationLists:  nil,
 		},
 		HTTPConfig: httpclient.Config{
 			Timeout:        20,
@@ -402,7 +424,6 @@ func LoadConfig(configDir, configFile string) error {
 	}
 	// viper only supports slice of strings from env vars, so we use our custom method
 	loadBindingsFromEnv()
-	checkCommonParamsCompatibility()
 	if strings.TrimSpace(globalConf.SFTPD.Banner) == "" {
 		globalConf.SFTPD.Banner = defaultSFTPDBanner
 	}
@@ -429,7 +450,7 @@ func LoadConfig(configDir, configFile string) error {
 		logger.Warn(logSender, "", "Configuration error: %v", warn)
 		logger.WarnToConsole("Configuration error: %v", warn)
 	}
-	if globalConf.ProviderConf.ExternalAuthScope < 0 || globalConf.ProviderConf.ExternalAuthScope > 7 {
+	if globalConf.ProviderConf.ExternalAuthScope < 0 || globalConf.ProviderConf.ExternalAuthScope > 15 {
 		warn := fmt.Sprintf("invalid external_auth_scope: %v reset to 0", globalConf.ProviderConf.ExternalAuthScope)
 		globalConf.ProviderConf.ExternalAuthScope = 0
 		logger.Warn(logSender, "", "Configuration error: %v", warn)
@@ -441,51 +462,8 @@ func LoadConfig(configDir, configFile string) error {
 		logger.Warn(logSender, "", "Configuration error: %v", warn)
 		logger.WarnToConsole("Configuration error: %v", warn)
 	}
-	checkHostKeyCompatibility()
 	logger.Debug(logSender, "", "config file used: '%#v', config loaded: %+v", viper.ConfigFileUsed(), getRedactedGlobalConf())
 	return nil
-}
-
-func checkHostKeyCompatibility() {
-	// we copy deprecated fields to new ones to keep backward compatibility so lint is disabled
-	if len(globalConf.SFTPD.Keys) > 0 && len(globalConf.SFTPD.HostKeys) == 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "keys is deprecated, please use host_keys")
-		logger.WarnToConsole("keys is deprecated, please use host_keys")
-		for _, k := range globalConf.SFTPD.Keys { //nolint:staticcheck
-			globalConf.SFTPD.HostKeys = append(globalConf.SFTPD.HostKeys, k.PrivateKey)
-		}
-	}
-}
-
-func checkCommonParamsCompatibility() {
-	// we copy deprecated fields to new ones to keep backward compatibility so lint is disabled
-	if globalConf.SFTPD.IdleTimeout > 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "sftpd.idle_timeout is deprecated, please use common.idle_timeout")
-		logger.WarnToConsole("sftpd.idle_timeout is deprecated, please use common.idle_timeout")
-		globalConf.Common.IdleTimeout = globalConf.SFTPD.IdleTimeout //nolint:staticcheck
-	}
-	if globalConf.SFTPD.Actions.Hook != "" && len(globalConf.Common.Actions.Hook) == 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "sftpd.actions is deprecated, please use common.actions")
-		logger.WarnToConsole("sftpd.actions is deprecated, please use common.actions")
-		globalConf.Common.Actions.ExecuteOn = globalConf.SFTPD.Actions.ExecuteOn //nolint:staticcheck
-		globalConf.Common.Actions.Hook = globalConf.SFTPD.Actions.Hook           //nolint:staticcheck
-	}
-	if globalConf.SFTPD.SetstatMode > 0 && globalConf.Common.SetstatMode == 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "sftpd.setstat_mode is deprecated, please use common.setstat_mode")
-		logger.WarnToConsole("sftpd.setstat_mode is deprecated, please use common.setstat_mode")
-		globalConf.Common.SetstatMode = globalConf.SFTPD.SetstatMode //nolint:staticcheck
-	}
-	if globalConf.SFTPD.UploadMode > 0 && globalConf.Common.UploadMode == 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "sftpd.upload_mode is deprecated, please use common.upload_mode")
-		logger.WarnToConsole("sftpd.upload_mode is deprecated, please use common.upload_mode")
-		globalConf.Common.UploadMode = globalConf.SFTPD.UploadMode //nolint:staticcheck
-	}
-	if globalConf.SFTPD.ProxyProtocol > 0 && globalConf.Common.ProxyProtocol == 0 { //nolint:staticcheck
-		logger.Warn(logSender, "", "sftpd.proxy_protocol is deprecated, please use common.proxy_protocol")
-		logger.WarnToConsole("sftpd.proxy_protocol is deprecated, please use common.proxy_protocol")
-		globalConf.Common.ProxyProtocol = globalConf.SFTPD.ProxyProtocol //nolint:staticcheck
-		globalConf.Common.ProxyAllowed = globalConf.SFTPD.ProxyAllowed   //nolint:staticcheck
-	}
 }
 
 func checkSFTPDBindingsCompatibility() {
@@ -577,8 +555,8 @@ func loadBindingsFromEnv() {
 	checkWebDAVDBindingCompatibility()
 	checkHTTPDBindingCompatibility()
 
-	maxBindings := make([]int, 10)
-	for idx := range maxBindings {
+	for idx := 0; idx < 10; idx++ {
+		getRateLimitersFromEnv(idx)
 		getSFTPDBindindFromEnv(idx)
 		getFTPDBindingFromEnv(idx)
 		getWebDAVDBindingFromEnv(idx)
@@ -587,8 +565,75 @@ func loadBindingsFromEnv() {
 	}
 }
 
+func getRateLimitersFromEnv(idx int) {
+	rtlConfig := defaultRateLimiter
+	if len(globalConf.Common.RateLimitersConfig) > idx {
+		rtlConfig = globalConf.Common.RateLimitersConfig[idx]
+	}
+
+	isSet := false
+
+	average, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_COMMON__RATE_LIMITERS__%v__AVERAGE", idx))
+	if ok {
+		rtlConfig.Average = average
+		isSet = true
+	}
+
+	period, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_COMMON__RATE_LIMITERS__%v__PERIOD", idx))
+	if ok {
+		rtlConfig.Period = period
+		isSet = true
+	}
+
+	burst, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_COMMON__RATE_LIMITERS__%v__BURST", idx))
+	if ok {
+		rtlConfig.Burst = int(burst)
+		isSet = true
+	}
+
+	rtlType, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_COMMON__RATE_LIMITERS__%v__TYPE", idx))
+	if ok {
+		rtlConfig.Type = int(rtlType)
+		isSet = true
+	}
+
+	protocols, ok := lookupStringListFromEnv(fmt.Sprintf("SFTPGO_COMMON__RATE_LIMITERS__%v__PROTOCOLS", idx))
+	if ok {
+		rtlConfig.Protocols = protocols
+		isSet = true
+	}
+
+	generateEvents, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_COMMON__RATE_LIMITERS__%v__GENERATE_DEFENDER_EVENTS", idx))
+	if ok {
+		rtlConfig.GenerateDefenderEvents = generateEvents
+		isSet = true
+	}
+
+	softLimit, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_COMMON__RATE_LIMITERS__%v__ENTRIES_SOFT_LIMIT", idx))
+	if ok {
+		rtlConfig.EntriesSoftLimit = int(softLimit)
+		isSet = true
+	}
+
+	hardLimit, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_COMMON__RATE_LIMITERS__%v__ENTRIES_HARD_LIMIT", idx))
+	if ok {
+		rtlConfig.EntriesHardLimit = int(hardLimit)
+		isSet = true
+	}
+
+	if isSet {
+		if len(globalConf.Common.RateLimitersConfig) > idx {
+			globalConf.Common.RateLimitersConfig[idx] = rtlConfig
+		} else {
+			globalConf.Common.RateLimitersConfig = append(globalConf.Common.RateLimitersConfig, rtlConfig)
+		}
+	}
+}
+
 func getSFTPDBindindFromEnv(idx int) {
-	binding := sftpd.Binding{}
+	binding := sftpd.Binding{
+		ApplyProxyConfig: true,
+	}
 	if len(globalConf.SFTPD.Bindings) > idx {
 		binding = globalConf.SFTPD.Bindings[idx]
 	}
@@ -597,7 +642,7 @@ func getSFTPDBindindFromEnv(idx int) {
 
 	port, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_SFTPD__BINDINGS__%v__PORT", idx))
 	if ok {
-		binding.Port = port
+		binding.Port = int(port)
 		isSet = true
 	}
 
@@ -623,7 +668,9 @@ func getSFTPDBindindFromEnv(idx int) {
 }
 
 func getFTPDBindingFromEnv(idx int) {
-	binding := ftpd.Binding{}
+	binding := ftpd.Binding{
+		ApplyProxyConfig: true,
+	}
 	if len(globalConf.FTPD.Bindings) > idx {
 		binding = globalConf.FTPD.Bindings[idx]
 	}
@@ -632,7 +679,7 @@ func getFTPDBindingFromEnv(idx int) {
 
 	port, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_FTPD__BINDINGS__%v__PORT", idx))
 	if ok {
-		binding.Port = port
+		binding.Port = int(port)
 		isSet = true
 	}
 
@@ -650,7 +697,7 @@ func getFTPDBindingFromEnv(idx int) {
 
 	tlsMode, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_FTPD__BINDINGS__%v__TLS_MODE", idx))
 	if ok {
-		binding.TLSMode = tlsMode
+		binding.TLSMode = int(tlsMode)
 		isSet = true
 	}
 
@@ -662,7 +709,7 @@ func getFTPDBindingFromEnv(idx int) {
 
 	clientAuthType, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_FTPD__BINDINGS__%v__CLIENT_AUTH_TYPE", idx))
 	if ok {
-		binding.ClientAuthType = clientAuthType
+		binding.ClientAuthType = int(clientAuthType)
 		isSet = true
 	}
 
@@ -691,7 +738,7 @@ func getWebDAVDBindingFromEnv(idx int) {
 
 	port, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__PORT", idx))
 	if ok {
-		binding.Port = port
+		binding.Port = int(port)
 		isSet = true
 	}
 
@@ -709,13 +756,19 @@ func getWebDAVDBindingFromEnv(idx int) {
 
 	clientAuthType, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__CLIENT_AUTH_TYPE", idx))
 	if ok {
-		binding.ClientAuthType = clientAuthType
+		binding.ClientAuthType = int(clientAuthType)
 		isSet = true
 	}
 
 	tlsCiphers, ok := lookupStringListFromEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__TLS_CIPHER_SUITES", idx))
 	if ok {
 		binding.TLSCipherSuites = tlsCiphers
+		isSet = true
+	}
+
+	prefix, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__PREFIX", idx))
+	if ok {
+		binding.Prefix = prefix
 		isSet = true
 	}
 
@@ -738,7 +791,7 @@ func getHTTPDBindingFromEnv(idx int) {
 
 	port, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__PORT", idx))
 	if ok {
-		binding.Port = port
+		binding.Port = int(port)
 		isSet = true
 	}
 
@@ -762,7 +815,7 @@ func getHTTPDBindingFromEnv(idx int) {
 
 	clientAuthType, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__CLIENT_AUTH_TYPE", idx))
 	if ok {
-		binding.ClientAuthType = clientAuthType
+		binding.ClientAuthType = int(clientAuthType)
 		isSet = true
 	}
 
@@ -819,6 +872,7 @@ func setViperDefaults() {
 	viper.SetDefault("common.defender.threshold", globalConf.Common.DefenderConfig.Threshold)
 	viper.SetDefault("common.defender.score_invalid", globalConf.Common.DefenderConfig.ScoreInvalid)
 	viper.SetDefault("common.defender.score_valid", globalConf.Common.DefenderConfig.ScoreValid)
+	viper.SetDefault("common.defender.score_rate_exceeded", globalConf.Common.DefenderConfig.ScoreRateExceeded)
 	viper.SetDefault("common.defender.observation_time", globalConf.Common.DefenderConfig.ObservationTime)
 	viper.SetDefault("common.defender.entries_soft_limit", globalConf.Common.DefenderConfig.EntriesSoftLimit)
 	viper.SetDefault("common.defender.entries_hard_limit", globalConf.Common.DefenderConfig.EntriesHardLimit)
@@ -889,11 +943,16 @@ func setViperDefaults() {
 	viper.SetDefault("data_provider.password_hashing.argon2_options.memory", globalConf.ProviderConf.PasswordHashing.Argon2Options.Memory)
 	viper.SetDefault("data_provider.password_hashing.argon2_options.iterations", globalConf.ProviderConf.PasswordHashing.Argon2Options.Iterations)
 	viper.SetDefault("data_provider.password_hashing.argon2_options.parallelism", globalConf.ProviderConf.PasswordHashing.Argon2Options.Parallelism)
+	viper.SetDefault("data_provider.password_hashing.bcrypt_options.cost", globalConf.ProviderConf.PasswordHashing.BcryptOptions.Cost)
+	viper.SetDefault("data_provider.password_hashing_algo", globalConf.ProviderConf.PasswordHashingAlgo)
 	viper.SetDefault("data_provider.update_mode", globalConf.ProviderConf.UpdateMode)
 	viper.SetDefault("data_provider.skip_natural_keys_validation", globalConf.ProviderConf.SkipNaturalKeysValidation)
+	viper.SetDefault("data_provider.delayed_quota_update", globalConf.ProviderConf.DelayedQuotaUpdate)
+	viper.SetDefault("data_provider.password_caching", globalConf.ProviderConf.PasswordCaching)
 	viper.SetDefault("httpd.templates_path", globalConf.HTTPDConfig.TemplatesPath)
 	viper.SetDefault("httpd.static_files_path", globalConf.HTTPDConfig.StaticFilesPath)
 	viper.SetDefault("httpd.backups_path", globalConf.HTTPDConfig.BackupsPath)
+	viper.SetDefault("httpd.web_admin_root", globalConf.HTTPDConfig.WebAdminRoot)
 	viper.SetDefault("httpd.certificate_file", globalConf.HTTPDConfig.CertificateFile)
 	viper.SetDefault("httpd.certificate_key_file", globalConf.HTTPDConfig.CertificateKeyFile)
 	viper.SetDefault("httpd.ca_certificates", globalConf.HTTPDConfig.CACertificates)
@@ -927,12 +986,12 @@ func lookupBoolFromEnv(envName string) (bool, bool) {
 	return false, false
 }
 
-func lookupIntFromEnv(envName string) (int, bool) {
+func lookupIntFromEnv(envName string) (int64, bool) {
 	value, ok := os.LookupEnv(envName)
 	if ok {
-		converted, err := strconv.ParseInt(value, 10, 16)
+		converted, err := strconv.ParseInt(value, 10, 64)
 		if err == nil {
-			return int(converted), ok
+			return converted, ok
 		}
 	}
 

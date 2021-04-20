@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -32,27 +31,28 @@ func TestBasicDefender(t *testing.T) {
 	data, err := json.Marshal(bl)
 	assert.NoError(t, err)
 
-	err = ioutil.WriteFile(blFile, data, os.ModePerm)
+	err = os.WriteFile(blFile, data, os.ModePerm)
 	assert.NoError(t, err)
 
 	data, err = json.Marshal(sl)
 	assert.NoError(t, err)
 
-	err = ioutil.WriteFile(slFile, data, os.ModePerm)
+	err = os.WriteFile(slFile, data, os.ModePerm)
 	assert.NoError(t, err)
 
 	config := &DefenderConfig{
-		Enabled:          true,
-		BanTime:          10,
-		BanTimeIncrement: 2,
-		Threshold:        5,
-		ScoreInvalid:     2,
-		ScoreValid:       1,
-		ObservationTime:  15,
-		EntriesSoftLimit: 1,
-		EntriesHardLimit: 2,
-		SafeListFile:     "slFile",
-		BlockListFile:    "blFile",
+		Enabled:           true,
+		BanTime:           10,
+		BanTimeIncrement:  2,
+		Threshold:         5,
+		ScoreInvalid:      2,
+		ScoreValid:        1,
+		ScoreRateExceeded: 3,
+		ObservationTime:   15,
+		EntriesSoftLimit:  1,
+		EntriesHardLimit:  2,
+		SafeListFile:      "slFile",
+		BlockListFile:     "blFile",
 	}
 
 	_, err = newInMemoryDefender(config)
@@ -75,6 +75,7 @@ func TestBasicDefender(t *testing.T) {
 
 	defender.AddEvent("172.16.1.4", HostEventLoginFailed)
 	defender.AddEvent("192.168.8.4", HostEventUserNotFound)
+	defender.AddEvent("172.16.1.3", HostEventRateExceeded)
 	assert.Equal(t, 0, defender.countHosts())
 
 	testIP := "12.34.56.78"
@@ -83,10 +84,10 @@ func TestBasicDefender(t *testing.T) {
 	assert.Equal(t, 0, defender.countBanned())
 	assert.Equal(t, 1, defender.GetScore(testIP))
 	assert.Nil(t, defender.GetBanTime(testIP))
-	defender.AddEvent(testIP, HostEventNoLoginTried)
+	defender.AddEvent(testIP, HostEventRateExceeded)
 	assert.Equal(t, 1, defender.countHosts())
 	assert.Equal(t, 0, defender.countBanned())
-	assert.Equal(t, 3, defender.GetScore(testIP))
+	assert.Equal(t, 4, defender.GetScore(testIP))
 	defender.AddEvent(testIP, HostEventNoLoginTried)
 	assert.Equal(t, 0, defender.countHosts())
 	assert.Equal(t, 1, defender.countBanned())
@@ -160,7 +161,7 @@ func TestLoadHostListFromFile(t *testing.T) {
 	_, err = rand.Read(content)
 	assert.NoError(t, err)
 
-	err = ioutil.WriteFile(hostsFilePath, content, os.ModePerm)
+	err = os.WriteFile(hostsFilePath, content, os.ModePerm)
 	assert.NoError(t, err)
 
 	_, err = loadHostListFromFile(hostsFilePath)
@@ -173,7 +174,7 @@ func TestLoadHostListFromFile(t *testing.T) {
 
 	asJSON, err := json.Marshal(hl)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(hostsFilePath, asJSON, os.ModePerm)
+	err = os.WriteFile(hostsFilePath, asJSON, os.ModePerm)
 	assert.NoError(t, err)
 
 	hostList, err := loadHostListFromFile(hostsFilePath)
@@ -183,7 +184,7 @@ func TestLoadHostListFromFile(t *testing.T) {
 	hl.IPAddresses = append(hl.IPAddresses, "invalidip")
 	asJSON, err = json.Marshal(hl)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(hostsFilePath, asJSON, os.ModePerm)
+	err = os.WriteFile(hostsFilePath, asJSON, os.ModePerm)
 	assert.NoError(t, err)
 
 	hostList, err = loadHostListFromFile(hostsFilePath)
@@ -195,7 +196,7 @@ func TestLoadHostListFromFile(t *testing.T) {
 
 	asJSON, err = json.Marshal(hl)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(hostsFilePath, asJSON, os.ModePerm)
+	err = os.WriteFile(hostsFilePath, asJSON, os.ModePerm)
 	assert.NoError(t, err)
 
 	hostList, err = loadHostListFromFile(hostsFilePath)
@@ -215,7 +216,7 @@ func TestLoadHostListFromFile(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	err = ioutil.WriteFile(hostsFilePath, []byte("non json content"), os.ModePerm)
+	err = os.WriteFile(hostsFilePath, []byte("non json content"), os.ModePerm)
 	assert.NoError(t, err)
 	_, err = loadHostListFromFile(hostsFilePath)
 	assert.Error(t, err)
@@ -316,6 +317,11 @@ func TestDefenderConfig(t *testing.T) {
 	require.Error(t, err)
 
 	c.ScoreInvalid = 2
+	c.ScoreRateExceeded = 10
+	err = c.validate()
+	require.Error(t, err)
+
+	c.ScoreRateExceeded = 2
 	c.ScoreValid = 10
 	err = c.validate()
 	require.Error(t, err)

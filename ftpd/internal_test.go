@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/eikenb/pipeat"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/dataprovider"
@@ -307,7 +307,7 @@ func (fs MockOsFs) Name() string {
 	return "mockOsFs"
 }
 
-// IsUploadResumeSupported returns true if upload resume is supported
+// IsUploadResumeSupported returns true if resuming uploads is supported
 func (MockOsFs) IsUploadResumeSupported() bool {
 	return false
 }
@@ -351,7 +351,7 @@ func (fs MockOsFs) Rename(source, target string) error {
 
 func newMockOsFs(err, statErr error, atomicUpload bool, connectionID, rootDir string) vfs.Fs {
 	return &MockOsFs{
-		Fs:                      vfs.NewOsFs(connectionID, rootDir, nil),
+		Fs:                      vfs.NewOsFs(connectionID, rootDir, ""),
 		err:                     err,
 		statErr:                 statErr,
 		isAtomicUploadSupported: atomicUpload,
@@ -386,6 +386,27 @@ func TestInitialization(t *testing.T) {
 	server = NewServer(c, configDir, binding, 0)
 	_, err = server.GetSettings()
 	assert.Error(t, err)
+
+	binding = Binding{
+		Port:           2121,
+		ForcePassiveIP: "192.168.1",
+	}
+	server = NewServer(c, configDir, binding, 0)
+	_, err = server.GetSettings()
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "is not valid")
+	}
+
+	binding.ForcePassiveIP = "::ffff:192.168.89.9"
+	err = binding.checkPassiveIP()
+	assert.NoError(t, err)
+	assert.Equal(t, "192.168.89.9", binding.ForcePassiveIP)
+
+	binding.ForcePassiveIP = "::1"
+	err = binding.checkPassiveIP()
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "is not a valid IPv4 address")
+	}
 
 	err = ReloadCertificateMgr()
 	assert.NoError(t, err)
@@ -458,7 +479,7 @@ func TestUserInvalidParams(t *testing.T) {
 		},
 	}
 	server := NewServer(c, configDir, binding, 3)
-	_, err := server.validateUser(u, mockFTPClientContext{})
+	_, err := server.validateUser(u, mockFTPClientContext{}, dataprovider.LoginMethodPassword)
 	assert.Error(t, err)
 
 	u.Username = "a"
@@ -480,10 +501,10 @@ func TestUserInvalidParams(t *testing.T) {
 		},
 		VirtualPath: vdirPath2,
 	})
-	_, err = server.validateUser(u, mockFTPClientContext{})
+	_, err = server.validateUser(u, mockFTPClientContext{}, dataprovider.LoginMethodPassword)
 	assert.Error(t, err)
 	u.VirtualFolders = nil
-	_, err = server.validateUser(u, mockFTPClientContext{})
+	_, err = server.validateUser(u, mockFTPClientContext{}, dataprovider.LoginMethodPassword)
 	assert.Error(t, err)
 }
 
@@ -492,7 +513,7 @@ func TestClientVersion(t *testing.T) {
 	connID := fmt.Sprintf("2_%v", mockCC.ID())
 	user := dataprovider.User{}
 	connection := &Connection{
-		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user, nil),
+		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user),
 		clientContext:  mockCC,
 	}
 	common.Connections.Add(connection)
@@ -509,7 +530,7 @@ func TestDriverMethodsNotImplemented(t *testing.T) {
 	connID := fmt.Sprintf("2_%v", mockCC.ID())
 	user := dataprovider.User{}
 	connection := &Connection{
-		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user, nil),
+		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user),
 		clientContext:  mockCC,
 	}
 	_, err := connection.Create("")
@@ -533,9 +554,8 @@ func TestResolvePathErrors(t *testing.T) {
 	user.Permissions["/"] = []string{dataprovider.PermAny}
 	mockCC := mockFTPClientContext{}
 	connID := fmt.Sprintf("%v", mockCC.ID())
-	fs := vfs.NewOsFs(connID, user.HomeDir, nil)
 	connection := &Connection{
-		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user, fs),
+		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user),
 		clientContext:  mockCC,
 	}
 	err := connection.Mkdir("", os.ModePerm)
@@ -596,19 +616,19 @@ func TestUploadFileStatError(t *testing.T) {
 	user.Permissions["/"] = []string{dataprovider.PermAny}
 	mockCC := mockFTPClientContext{}
 	connID := fmt.Sprintf("%v", mockCC.ID())
-	fs := vfs.NewOsFs(connID, user.HomeDir, nil)
+	fs := vfs.NewOsFs(connID, user.HomeDir, "")
 	connection := &Connection{
-		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user, fs),
+		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user),
 		clientContext:  mockCC,
 	}
 	testFile := filepath.Join(user.HomeDir, "test", "testfile")
 	err := os.MkdirAll(filepath.Dir(testFile), os.ModePerm)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(testFile, []byte("data"), os.ModePerm)
+	err = os.WriteFile(testFile, []byte("data"), os.ModePerm)
 	assert.NoError(t, err)
 	err = os.Chmod(filepath.Dir(testFile), 0001)
 	assert.NoError(t, err)
-	_, err = connection.uploadFile(testFile, "test", 0)
+	_, err = connection.uploadFile(fs, testFile, "test", 0)
 	assert.Error(t, err)
 	err = os.Chmod(filepath.Dir(testFile), os.ModePerm)
 	assert.NoError(t, err)
@@ -625,9 +645,8 @@ func TestAVBLErrors(t *testing.T) {
 	user.Permissions["/"] = []string{dataprovider.PermAny}
 	mockCC := mockFTPClientContext{}
 	connID := fmt.Sprintf("%v", mockCC.ID())
-	fs := newMockOsFs(nil, nil, false, connID, user.GetHomeDir())
 	connection := &Connection{
-		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user, fs),
+		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user),
 		clientContext:  mockCC,
 	}
 	_, err := connection.GetAvailableSpace("/")
@@ -648,24 +667,24 @@ func TestUploadOverwriteErrors(t *testing.T) {
 	connID := fmt.Sprintf("%v", mockCC.ID())
 	fs := newMockOsFs(nil, nil, false, connID, user.GetHomeDir())
 	connection := &Connection{
-		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user, fs),
+		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user),
 		clientContext:  mockCC,
 	}
 	flags := 0
 	flags |= os.O_APPEND
-	_, err := connection.handleFTPUploadToExistingFile(flags, "", "", 0, "")
+	_, err := connection.handleFTPUploadToExistingFile(fs, flags, "", "", 0, "")
 	if assert.Error(t, err) {
 		assert.EqualError(t, err, common.ErrOpUnsupported.Error())
 	}
 
-	f, err := ioutil.TempFile("", "temp")
+	f, err := os.CreateTemp("", "temp")
 	assert.NoError(t, err)
 	err = f.Close()
 	assert.NoError(t, err)
 	flags = 0
 	flags |= os.O_CREATE
 	flags |= os.O_TRUNC
-	tr, err := connection.handleFTPUploadToExistingFile(flags, f.Name(), f.Name(), 123, f.Name())
+	tr, err := connection.handleFTPUploadToExistingFile(fs, flags, f.Name(), f.Name(), 123, f.Name())
 	if assert.NoError(t, err) {
 		transfer := tr.(*transfer)
 		transfers := connection.GetTransfers()
@@ -680,11 +699,11 @@ func TestUploadOverwriteErrors(t *testing.T) {
 	err = os.Remove(f.Name())
 	assert.NoError(t, err)
 
-	_, err = connection.handleFTPUploadToExistingFile(os.O_TRUNC, filepath.Join(os.TempDir(), "sub", "file"),
+	_, err = connection.handleFTPUploadToExistingFile(fs, os.O_TRUNC, filepath.Join(os.TempDir(), "sub", "file"),
 		filepath.Join(os.TempDir(), "sub", "file1"), 0, "/sub/file1")
 	assert.Error(t, err)
-	connection.Fs = vfs.NewOsFs(connID, user.GetHomeDir(), nil)
-	_, err = connection.handleFTPUploadToExistingFile(0, "missing1", "missing2", 0, "missing")
+	fs = vfs.NewOsFs(connID, user.GetHomeDir(), "")
+	_, err = connection.handleFTPUploadToExistingFile(fs, 0, "missing1", "missing2", 0, "missing")
 	assert.Error(t, err)
 }
 
@@ -702,7 +721,7 @@ func TestTransferErrors(t *testing.T) {
 	connID := fmt.Sprintf("%v", mockCC.ID())
 	fs := newMockOsFs(nil, nil, false, connID, user.GetHomeDir())
 	connection := &Connection{
-		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user, fs),
+		BaseConnection: common.NewBaseConnection(connID, common.ProtocolFTP, user),
 		clientContext:  mockCC,
 	}
 	baseTransfer := common.NewBaseTransfer(file, connection.BaseConnection, nil, file.Name(), testfile, common.TransferDownload,
@@ -762,11 +781,11 @@ func TestVerifyTLSConnection(t *testing.T) {
 	caCrlPath := filepath.Join(os.TempDir(), "testcrl.crt")
 	certPath := filepath.Join(os.TempDir(), "test.crt")
 	keyPath := filepath.Join(os.TempDir(), "test.key")
-	err := ioutil.WriteFile(caCrlPath, []byte(caCRL), os.ModePerm)
+	err := os.WriteFile(caCrlPath, []byte(caCRL), os.ModePerm)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(certPath, []byte(ftpsCert), os.ModePerm)
+	err = os.WriteFile(certPath, []byte(ftpsCert), os.ModePerm)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(keyPath, []byte(ftpsKey), os.ModePerm)
+	err = os.WriteFile(keyPath, []byte(ftpsKey), os.ModePerm)
 	assert.NoError(t, err)
 
 	certMgr, err = common.NewCertManager(certPath, keyPath, "", "ftp_test")
@@ -817,4 +836,16 @@ func TestVerifyTLSConnection(t *testing.T) {
 	assert.NoError(t, err)
 
 	certMgr = oldCertMgr
+}
+
+func TestCiphers(t *testing.T) {
+	b := Binding{
+		TLSCipherSuites: []string{},
+	}
+	b.setCiphers()
+	require.Nil(t, b.ciphers)
+	b.TLSCipherSuites = []string{"TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384"}
+	b.setCiphers()
+	require.Len(t, b.ciphers, 2)
+	require.Equal(t, []uint16{tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384}, b.ciphers)
 }

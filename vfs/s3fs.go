@@ -30,8 +30,10 @@ import (
 
 // S3Fs is a Fs implementation for AWS S3 compatible object storages
 type S3Fs struct {
-	connectionID   string
-	localTempDir   string
+	connectionID string
+	localTempDir string
+	// if not empty this fs is mouted as virtual folder in the specified path
+	mountPath      string
 	config         *S3FsConfig
 	svc            *s3.S3
 	ctxTimeout     time.Duration
@@ -44,10 +46,14 @@ func init() {
 
 // NewS3Fs returns an S3Fs object that allows to interact with an s3 compatible
 // object storage
-func NewS3Fs(connectionID, localTempDir string, config S3FsConfig) (Fs, error) {
+func NewS3Fs(connectionID, localTempDir, mountPath string, config S3FsConfig) (Fs, error) {
+	if localTempDir == "" {
+		localTempDir = filepath.Clean(os.TempDir())
+	}
 	fs := &S3Fs{
 		connectionID:   connectionID,
 		localTempDir:   localTempDir,
+		mountPath:      mountPath,
 		config:         &config,
 		ctxTimeout:     30 * time.Second,
 		ctxLongTimeout: 300 * time.Second,
@@ -62,11 +68,8 @@ func NewS3Fs(connectionID, localTempDir string, config S3FsConfig) (Fs, error) {
 	}
 
 	if !fs.config.AccessSecret.IsEmpty() {
-		if fs.config.AccessSecret.IsEncrypted() {
-			err := fs.config.AccessSecret.Decrypt()
-			if err != nil {
-				return fs, err
-			}
+		if err := fs.config.AccessSecret.TryDecrypt(); err != nil {
+			return fs, err
 		}
 		awsConfig.Credentials = credentials.NewStaticCredentials(fs.config.AccessKey, fs.config.AccessSecret.GetPayload(), "")
 	}
@@ -249,7 +252,7 @@ func (fs *S3Fs) Rename(source, target string) error {
 			return err
 		}
 		if hasContents {
-			return fmt.Errorf("Cannot rename non empty directory: %#v", source)
+			return fmt.Errorf("cannot rename non empty directory: %#v", source)
 		}
 		if !strings.HasSuffix(copySource, "/") {
 			copySource += "/"
@@ -288,7 +291,7 @@ func (fs *S3Fs) Remove(name string, isDir bool) error {
 			return err
 		}
 		if hasContents {
-			return fmt.Errorf("Cannot remove non empty directory: %#v", name)
+			return fmt.Errorf("cannot remove non empty directory: %#v", name)
 		}
 		if !strings.HasSuffix(name, "/") {
 			name += "/"
@@ -318,6 +321,11 @@ func (fs *S3Fs) Mkdir(name string) error {
 		return err
 	}
 	return w.Close()
+}
+
+// MkdirAll does nothing, we don't have folder
+func (*S3Fs) MkdirAll(name string, uid int, gid int) error {
+	return nil
 }
 
 // Symlink creates source as a symbolic link to target.
@@ -407,8 +415,8 @@ func (fs *S3Fs) ReadDir(dirname string) ([]os.FileInfo, error) {
 	return result, err
 }
 
-// IsUploadResumeSupported returns true if upload resume is supported.
-// SFTP Resume is not supported on S3
+// IsUploadResumeSupported returns true if resuming uploads is supported.
+// Resuming uploads is not supported on S3
 func (*S3Fs) IsUploadResumeSupported() bool {
 	return false
 }
@@ -465,7 +473,7 @@ func (*S3Fs) IsNotSupported(err error) bool {
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *S3Fs) CheckRootPath(username string, uid int, gid int) bool {
 	// we need a local directory for temporary files
-	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, nil)
+	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
 	return osFs.CheckRootPath(username, uid, gid)
 }
 
@@ -522,6 +530,9 @@ func (fs *S3Fs) GetRelativePath(name string) string {
 		}
 		rel = path.Clean("/" + strings.TrimPrefix(rel, "/"+fs.config.KeyPrefix))
 	}
+	if fs.mountPath != "" {
+		rel = path.Join(fs.mountPath, rel)
+	}
 	return rel
 }
 
@@ -574,6 +585,9 @@ func (*S3Fs) HasVirtualFolders() bool {
 
 // ResolvePath returns the matching filesystem path for the specified virtual path
 func (fs *S3Fs) ResolvePath(virtualPath string) (string, error) {
+	if fs.mountPath != "" {
+		virtualPath = strings.TrimPrefix(virtualPath, fs.mountPath)
+	}
 	if !path.IsAbs(virtualPath) {
 		virtualPath = path.Clean("/" + virtualPath)
 	}

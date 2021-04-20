@@ -2,9 +2,9 @@
 
 The `WebDAV` support can be enabled by configuring one or more `bindings` inside the `webdavd` configuration section.
 
-Each user can access their home directory using the path `http/s://<SFTPGo ip>:<WevDAVPORT>/`.
+Each user can access their home directory using the path `http/s://<SFTPGo ip>:<WevDAVPORT>/<prefix>`. By default `prefix` is empty. If you define a prefix it must be an abosulte URI, for example `/dav`.
 
-WebDAV is quite a different protocol than SCP/FTP, there is no session concept, each command is a separate HTTP request and must be authenticated, to improve performance SFTPGo caches authenticated users. This way SFTPGo don't need to do a dataprovider query and a password check for each request.
+WebDAV is quite a different protocol than SFTP/FTP, there is no session concept, each command is a separate HTTP request and must be authenticated, to improve performance SFTPGo caches authenticated users. This way SFTPGo don't need to do a dataprovider query and a password check for each request.
 
 The user caching configuration allows to set:
 
@@ -19,12 +19,14 @@ The MIME types caching configurations allows to set the maximum number of MIME t
 
 WebDAV should work as expected for most use cases but there are some minor issues and some missing features.
 
+If you use WebDAV behind a reverse proxy ensure to preserve the `Host` header or `COPY`/`MOVE` operations will fail. For example for apache you have to set `ProxyPreserveHost On`.
+
 Know issues:
 
 - removing a directory tree on Cloud Storage backends could generate a `not found` error when removing the last (virtual) directory. This happens if the client cycles the directories tree itself and removes files and directories one by one instead of issuing a single remove command
 - the used [WebDAV library](https://pkg.go.dev/golang.org/x/net/webdav?tab=doc) asks to open a file to execute a `stat` and sometimes reads some bytes to find the content type. Stat calls are executed before and after a download too, so to be able to properly list a directory you need to grant both `list` and `download` permissions and to be able to upload files you need to gran both `list` and `upload` permissions
 - the used `WebDAV library` not always returns a proper error code/message, most of the times it simply returns `Method not Allowed`. I'll try to improve the library error codes in the future
-- if an object within a directory cannot be accessed, for example due to OS permissions issues or because is a missing mapped path for a virtual folder, the directory listing will fail. In SFTP/FTP the directory listing will succeed and you'll only get an error if you try to access to the problematic file/directory
+- if a file or a directory cannot be accessed, for example due to OS permissions issues or because a mapped path for a virtual folder is a missing, it will be omitted from the directory listing. This behavior is different from SFTP/FTP where you will be able to see the problematic file/directory in the directory listing, you will only get an error if you try to access it.
 
 We plan to add [Dead Properties](https://tools.ietf.org/html/rfc4918#section-3) support in future releases. We need a design decision here, probably the best solution is to store dead properties inside the data provider but this could increase a lot its size. Alternately we could store them on disk for local filesystem and add as metadata for Cloud Storage, this means that we need to do a separate `HEAD` request to retrieve dead properties for an S3 file. For big folders will do a lot of requests to the Cloud Provider, I don't like this solution. Another option is to expose a hook and allow you to implement `dead properties` outside SFTPGo.
 

@@ -2,6 +2,7 @@ package dataprovider
 
 import (
 	"context"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -9,14 +10,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach-go/v2/crdb"
+
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/utils"
 	"github.com/drakkan/sftpgo/vfs"
 )
 
 const (
-	sqlDatabaseVersion     = 8
-	initialDBVersionSQL    = "INSERT INTO {{schema_version}} (version) VALUES (1);"
+	sqlDatabaseVersion     = 9
 	defaultSQLQueryTimeout = 10 * time.Second
 	longSQLQueryTimeout    = 60 * time.Second
 )
@@ -84,7 +86,7 @@ func sqlCommonAddAdmin(admin *Admin, dbHandle *sql.DB) error {
 	}
 
 	_, err = stmt.ExecContext(ctx, admin.Username, admin.Password, admin.Status, admin.Email, string(perms),
-		string(filters), admin.AdditionalInfo)
+		string(filters), admin.AdditionalInfo, admin.Description)
 	return err
 }
 
@@ -115,7 +117,7 @@ func sqlCommonUpdateAdmin(admin *Admin, dbHandle *sql.DB) error {
 	}
 
 	_, err = stmt.ExecContext(ctx, admin.Password, admin.Status, admin.Email, string(perms), string(filters),
-		admin.AdditionalInfo, admin.Username)
+		admin.AdditionalInfo, admin.Description, admin.Username)
 	return err
 }
 
@@ -211,13 +213,13 @@ func sqlCommonGetUserByUsername(username string, dbHandle sqlQuerier) (User, err
 	if err != nil {
 		return user, err
 	}
-	return getUserWithVirtualFolders(user, dbHandle)
+	return getUserWithVirtualFolders(ctx, user, dbHandle)
 }
 
 func sqlCommonValidateUserAndPass(username, password, ip, protocol string, dbHandle *sql.DB) (User, error) {
 	var user User
 	if password == "" {
-		return user, errors.New("Credentials cannot be null or empty")
+		return user, errors.New("credentials cannot be null or empty")
 	}
 	user, err := sqlCommonGetUserByUsername(username, dbHandle)
 	if err != nil {
@@ -227,10 +229,23 @@ func sqlCommonValidateUserAndPass(username, password, ip, protocol string, dbHan
 	return checkUserAndPass(&user, password, ip, protocol)
 }
 
+func sqlCommonValidateUserAndTLSCertificate(username, protocol string, tlsCert *x509.Certificate, dbHandle *sql.DB) (User, error) {
+	var user User
+	if tlsCert == nil {
+		return user, errors.New("TLS certificate cannot be null or empty")
+	}
+	user, err := sqlCommonGetUserByUsername(username, dbHandle)
+	if err != nil {
+		providerLog(logger.LevelWarn, "error authenticating user %#v: %v", username, err)
+		return user, err
+	}
+	return checkUserAndTLSCertificate(&user, protocol, tlsCert)
+}
+
 func sqlCommonValidateUserAndPubKey(username string, pubKey []byte, dbHandle *sql.DB) (User, string, error) {
 	var user User
 	if len(pubKey) == 0 {
-		return user, "", errors.New("Credentials cannot be null or empty")
+		return user, "", errors.New("credentials cannot be null or empty")
 	}
 	user, err := sqlCommonGetUserByUsername(username, dbHandle)
 	if err != nil {
@@ -314,44 +329,38 @@ func sqlCommonAddUser(user *User, dbHandle *sql.DB) error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
 	defer cancel()
 
-	tx, err := dbHandle.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	q := getAddUserQuery()
-	stmt, err := tx.PrepareContext(ctx, q)
-	if err != nil {
-		providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
-		return err
-	}
-	defer stmt.Close()
-	permissions, err := user.GetPermissionsAsJSON()
-	if err != nil {
-		return err
-	}
-	publicKeys, err := user.GetPublicKeysAsJSON()
-	if err != nil {
-		return err
-	}
-	filters, err := user.GetFiltersAsJSON()
-	if err != nil {
-		return err
-	}
-	fsConfig, err := user.GetFsConfigAsJSON()
-	if err != nil {
-		return err
-	}
-	_, err = stmt.ExecContext(ctx, user.Username, user.Password, string(publicKeys), user.HomeDir, user.UID, user.GID, user.MaxSessions, user.QuotaSize,
-		user.QuotaFiles, string(permissions), user.UploadBandwidth, user.DownloadBandwidth, user.Status, user.ExpirationDate, string(filters),
-		string(fsConfig), user.AdditionalInfo)
-	if err != nil {
-		return err
-	}
-	err = generateVirtualFoldersMapping(ctx, user, tx)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	return sqlCommonExecuteTx(ctx, dbHandle, func(tx *sql.Tx) error {
+		q := getAddUserQuery()
+		stmt, err := tx.PrepareContext(ctx, q)
+		if err != nil {
+			providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
+			return err
+		}
+		defer stmt.Close()
+		permissions, err := user.GetPermissionsAsJSON()
+		if err != nil {
+			return err
+		}
+		publicKeys, err := user.GetPublicKeysAsJSON()
+		if err != nil {
+			return err
+		}
+		filters, err := user.GetFiltersAsJSON()
+		if err != nil {
+			return err
+		}
+		fsConfig, err := user.GetFsConfigAsJSON()
+		if err != nil {
+			return err
+		}
+		_, err = stmt.ExecContext(ctx, user.Username, user.Password, string(publicKeys), user.HomeDir, user.UID, user.GID, user.MaxSessions, user.QuotaSize,
+			user.QuotaFiles, string(permissions), user.UploadBandwidth, user.DownloadBandwidth, user.Status, user.ExpirationDate, string(filters),
+			string(fsConfig), user.AdditionalInfo, user.Description)
+		if err != nil {
+			return err
+		}
+		return generateVirtualFoldersMapping(ctx, user, tx)
+	})
 }
 
 func sqlCommonUpdateUser(user *User, dbHandle *sql.DB) error {
@@ -362,44 +371,38 @@ func sqlCommonUpdateUser(user *User, dbHandle *sql.DB) error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
 	defer cancel()
 
-	tx, err := dbHandle.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	q := getUpdateUserQuery()
-	stmt, err := tx.PrepareContext(ctx, q)
-	if err != nil {
-		providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
-		return err
-	}
-	defer stmt.Close()
-	permissions, err := user.GetPermissionsAsJSON()
-	if err != nil {
-		return err
-	}
-	publicKeys, err := user.GetPublicKeysAsJSON()
-	if err != nil {
-		return err
-	}
-	filters, err := user.GetFiltersAsJSON()
-	if err != nil {
-		return err
-	}
-	fsConfig, err := user.GetFsConfigAsJSON()
-	if err != nil {
-		return err
-	}
-	_, err = stmt.ExecContext(ctx, user.Password, string(publicKeys), user.HomeDir, user.UID, user.GID, user.MaxSessions, user.QuotaSize,
-		user.QuotaFiles, string(permissions), user.UploadBandwidth, user.DownloadBandwidth, user.Status, user.ExpirationDate,
-		string(filters), string(fsConfig), user.AdditionalInfo, user.ID)
-	if err != nil {
-		return err
-	}
-	err = generateVirtualFoldersMapping(ctx, user, tx)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	return sqlCommonExecuteTx(ctx, dbHandle, func(tx *sql.Tx) error {
+		q := getUpdateUserQuery()
+		stmt, err := tx.PrepareContext(ctx, q)
+		if err != nil {
+			providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
+			return err
+		}
+		defer stmt.Close()
+		permissions, err := user.GetPermissionsAsJSON()
+		if err != nil {
+			return err
+		}
+		publicKeys, err := user.GetPublicKeysAsJSON()
+		if err != nil {
+			return err
+		}
+		filters, err := user.GetFiltersAsJSON()
+		if err != nil {
+			return err
+		}
+		fsConfig, err := user.GetFsConfigAsJSON()
+		if err != nil {
+			return err
+		}
+		_, err = stmt.ExecContext(ctx, user.Password, string(publicKeys), user.HomeDir, user.UID, user.GID, user.MaxSessions, user.QuotaSize,
+			user.QuotaFiles, string(permissions), user.UploadBandwidth, user.DownloadBandwidth, user.Status, user.ExpirationDate,
+			string(filters), string(fsConfig), user.AdditionalInfo, user.Description, user.ID)
+		if err != nil {
+			return err
+		}
+		return generateVirtualFoldersMapping(ctx, user, tx)
+	})
 }
 
 func sqlCommonDeleteUser(user *User, dbHandle *sql.DB) error {
@@ -448,7 +451,7 @@ func sqlCommonDumpUsers(dbHandle sqlQuerier) ([]User, error) {
 	if err != nil {
 		return users, err
 	}
-	return getUsersWithVirtualFolders(users, dbHandle)
+	return getUsersWithVirtualFolders(ctx, users, dbHandle)
 }
 
 func sqlCommonGetUsers(limit int, offset int, order string, dbHandle sqlQuerier) ([]User, error) {
@@ -471,7 +474,7 @@ func sqlCommonGetUsers(limit int, offset int, order string, dbHandle sqlQuerier)
 			if err != nil {
 				return users, err
 			}
-			u.HideConfidentialData()
+			u.PrepareForRendering()
 			users = append(users, u)
 		}
 	}
@@ -479,34 +482,15 @@ func sqlCommonGetUsers(limit int, offset int, order string, dbHandle sqlQuerier)
 	if err != nil {
 		return users, err
 	}
-	return getUsersWithVirtualFolders(users, dbHandle)
-}
-
-func updateUserPermissionsFromDb(user *User, permissions string) error {
-	var err error
-	perms := make(map[string][]string)
-	err = json.Unmarshal([]byte(permissions), &perms)
-	if err == nil {
-		user.Permissions = perms
-	} else {
-		// compatibility layer: until version 0.9.4 permissions were a string list
-		var list []string
-		err = json.Unmarshal([]byte(permissions), &list)
-		if err != nil {
-			return err
-		}
-		perms["/"] = list
-		user.Permissions = perms
-	}
-	return err
+	return getUsersWithVirtualFolders(ctx, users, dbHandle)
 }
 
 func getAdminFromDbRow(row sqlScanner) (Admin, error) {
 	var admin Admin
-	var email, filters, additionalInfo, permissions sql.NullString
+	var email, filters, additionalInfo, permissions, description sql.NullString
 
 	err := row.Scan(&admin.ID, &admin.Username, &admin.Password, &admin.Status, &email, &permissions,
-		&filters, &additionalInfo)
+		&filters, &additionalInfo, &description)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -537,6 +521,9 @@ func getAdminFromDbRow(row sqlScanner) (Admin, error) {
 	if additionalInfo.Valid {
 		admin.AdditionalInfo = additionalInfo.String
 	}
+	if description.Valid {
+		admin.Description = description.String
+	}
 
 	return admin, err
 }
@@ -548,12 +535,12 @@ func getUserFromDbRow(row sqlScanner) (User, error) {
 	var publicKey sql.NullString
 	var filters sql.NullString
 	var fsConfig sql.NullString
-	var additionalInfo sql.NullString
+	var additionalInfo, description sql.NullString
 
 	err := row.Scan(&user.ID, &user.Username, &password, &publicKey, &user.HomeDir, &user.UID, &user.GID, &user.MaxSessions,
 		&user.QuotaSize, &user.QuotaFiles, &permissions, &user.UsedQuotaSize, &user.UsedQuotaFiles, &user.LastQuotaUpdate,
 		&user.UploadBandwidth, &user.DownloadBandwidth, &user.ExpirationDate, &user.LastLogin, &user.Status, &filters, &fsConfig,
-		&additionalInfo)
+		&additionalInfo, &description)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return user, &RecordNotFoundError{err: err.Error()}
@@ -574,10 +561,13 @@ func getUserFromDbRow(row sqlScanner) (User, error) {
 		}
 	}
 	if permissions.Valid {
-		err = updateUserPermissionsFromDb(&user, permissions.String)
+		perms := make(map[string][]string)
+		err = json.Unmarshal([]byte(permissions.String), &perms)
 		if err != nil {
-			return user, err
+			providerLog(logger.LevelDebug, "unable to deserialize permissions for user %#v: %v", user.Username, err)
+			return user, fmt.Errorf("unable to deserialize permissions for user %#v: %v", user.Username, err)
 		}
+		user.Permissions = perms
 	}
 	if filters.Valid {
 		var userFilters UserFilters
@@ -587,7 +577,7 @@ func getUserFromDbRow(row sqlScanner) (User, error) {
 		}
 	}
 	if fsConfig.Valid {
-		var fs Filesystem
+		var fs vfs.Filesystem
 		err = json.Unmarshal([]byte(fsConfig.String), &fs)
 		if err == nil {
 			user.FsConfig = fs
@@ -596,11 +586,27 @@ func getUserFromDbRow(row sqlScanner) (User, error) {
 	if additionalInfo.Valid {
 		user.AdditionalInfo = additionalInfo.String
 	}
+	if description.Valid {
+		user.Description = description.String
+	}
 	user.SetEmptySecretsIfNil()
 	return user, err
 }
 
-func sqlCommonCheckFolderExists(ctx context.Context, name string, dbHandle sqlQuerier) (vfs.BaseVirtualFolder, error) {
+func sqlCommonCheckFolderExists(ctx context.Context, name string, dbHandle sqlQuerier) error {
+	var folderName string
+	q := checkFolderNameQuery()
+	stmt, err := dbHandle.PrepareContext(ctx, q)
+	if err != nil {
+		providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
+		return err
+	}
+	defer stmt.Close()
+	row := stmt.QueryRowContext(ctx, name)
+	return row.Scan(&folderName)
+}
+
+func sqlCommonGetFolder(ctx context.Context, name string, dbHandle sqlQuerier) (vfs.BaseVirtualFolder, error) {
 	var folder vfs.BaseVirtualFolder
 	q := getFolderByNameQuery()
 	stmt, err := dbHandle.PrepareContext(ctx, q)
@@ -610,20 +616,30 @@ func sqlCommonCheckFolderExists(ctx context.Context, name string, dbHandle sqlQu
 	}
 	defer stmt.Close()
 	row := stmt.QueryRowContext(ctx, name)
-	var mappedPath sql.NullString
+	var mappedPath, description, fsConfig sql.NullString
 	err = row.Scan(&folder.ID, &mappedPath, &folder.UsedQuotaSize, &folder.UsedQuotaFiles, &folder.LastQuotaUpdate,
-		&folder.Name)
+		&folder.Name, &description, &fsConfig)
 	if err == sql.ErrNoRows {
 		return folder, &RecordNotFoundError{err: err.Error()}
 	}
 	if mappedPath.Valid {
 		folder.MappedPath = mappedPath.String
 	}
+	if description.Valid {
+		folder.Description = description.String
+	}
+	if fsConfig.Valid {
+		var fs vfs.Filesystem
+		err = json.Unmarshal([]byte(fsConfig.String), &fs)
+		if err == nil {
+			folder.FsConfig = fs
+		}
+	}
 	return folder, err
 }
 
 func sqlCommonGetFolderByName(ctx context.Context, name string, dbHandle sqlQuerier) (vfs.BaseVirtualFolder, error) {
-	folder, err := sqlCommonCheckFolderExists(ctx, name, dbHandle)
+	folder, err := sqlCommonGetFolder(ctx, name, dbHandle)
 	if err != nil {
 		return folder, err
 	}
@@ -637,27 +653,38 @@ func sqlCommonGetFolderByName(ctx context.Context, name string, dbHandle sqlQuer
 	return folders[0], nil
 }
 
-func sqlCommonAddOrGetFolder(ctx context.Context, baseFolder vfs.BaseVirtualFolder, usedQuotaSize int64, usedQuotaFiles int, lastQuotaUpdate int64, dbHandle sqlQuerier) (vfs.BaseVirtualFolder, error) {
-	folder, err := sqlCommonCheckFolderExists(ctx, baseFolder.Name, dbHandle)
-	if _, ok := err.(*RecordNotFoundError); ok {
-		f := &vfs.BaseVirtualFolder{
-			Name:            baseFolder.Name,
-			MappedPath:      baseFolder.MappedPath,
-			UsedQuotaSize:   usedQuotaSize,
-			UsedQuotaFiles:  usedQuotaFiles,
-			LastQuotaUpdate: lastQuotaUpdate,
-		}
-		err = sqlCommonAddFolder(f, dbHandle)
+func sqlCommonAddOrUpdateFolder(ctx context.Context, baseFolder *vfs.BaseVirtualFolder, usedQuotaSize int64,
+	usedQuotaFiles int, lastQuotaUpdate int64, dbHandle sqlQuerier) (vfs.BaseVirtualFolder, error) {
+	var folder vfs.BaseVirtualFolder
+	// FIXME: we could use an UPSERT here, this SELECT could be racy
+	err := sqlCommonCheckFolderExists(ctx, baseFolder.Name, dbHandle)
+	switch err {
+	case nil:
+		err = sqlCommonUpdateFolder(baseFolder, dbHandle)
 		if err != nil {
 			return folder, err
 		}
-		return sqlCommonCheckFolderExists(ctx, baseFolder.Name, dbHandle)
+	case sql.ErrNoRows:
+		baseFolder.UsedQuotaFiles = usedQuotaFiles
+		baseFolder.UsedQuotaSize = usedQuotaSize
+		baseFolder.LastQuotaUpdate = lastQuotaUpdate
+		err = sqlCommonAddFolder(baseFolder, dbHandle)
+		if err != nil {
+			return folder, err
+		}
+	default:
+		return folder, err
 	}
-	return folder, err
+
+	return sqlCommonGetFolder(ctx, baseFolder.Name, dbHandle)
 }
 
 func sqlCommonAddFolder(folder *vfs.BaseVirtualFolder, dbHandle sqlQuerier) error {
 	err := ValidateFolder(folder)
+	if err != nil {
+		return err
+	}
+	fsConfig, err := json.Marshal(folder.FsConfig)
 	if err != nil {
 		return err
 	}
@@ -671,12 +698,16 @@ func sqlCommonAddFolder(folder *vfs.BaseVirtualFolder, dbHandle sqlQuerier) erro
 	}
 	defer stmt.Close()
 	_, err = stmt.ExecContext(ctx, folder.MappedPath, folder.UsedQuotaSize, folder.UsedQuotaFiles,
-		folder.LastQuotaUpdate, folder.Name)
+		folder.LastQuotaUpdate, folder.Name, folder.Description, string(fsConfig))
 	return err
 }
 
-func sqlCommonUpdateFolder(folder *vfs.BaseVirtualFolder, dbHandle *sql.DB) error {
+func sqlCommonUpdateFolder(folder *vfs.BaseVirtualFolder, dbHandle sqlQuerier) error {
 	err := ValidateFolder(folder)
+	if err != nil {
+		return err
+	}
+	fsConfig, err := json.Marshal(folder.FsConfig)
 	if err != nil {
 		return err
 	}
@@ -689,7 +720,7 @@ func sqlCommonUpdateFolder(folder *vfs.BaseVirtualFolder, dbHandle *sql.DB) erro
 		return err
 	}
 	defer stmt.Close()
-	_, err = stmt.ExecContext(ctx, folder.MappedPath, folder.Name)
+	_, err = stmt.ExecContext(ctx, folder.MappedPath, folder.Description, string(fsConfig), folder.Name)
 	return err
 }
 
@@ -725,14 +756,24 @@ func sqlCommonDumpFolders(dbHandle sqlQuerier) ([]vfs.BaseVirtualFolder, error) 
 	defer rows.Close()
 	for rows.Next() {
 		var folder vfs.BaseVirtualFolder
-		var mappedPath sql.NullString
+		var mappedPath, description, fsConfig sql.NullString
 		err = rows.Scan(&folder.ID, &mappedPath, &folder.UsedQuotaSize, &folder.UsedQuotaFiles,
-			&folder.LastQuotaUpdate, &folder.Name)
+			&folder.LastQuotaUpdate, &folder.Name, &description, &fsConfig)
 		if err != nil {
 			return folders, err
 		}
 		if mappedPath.Valid {
 			folder.MappedPath = mappedPath.String
+		}
+		if description.Valid {
+			folder.Description = description.String
+		}
+		if fsConfig.Valid {
+			var fs vfs.Filesystem
+			err = json.Unmarshal([]byte(fsConfig.String), &fs)
+			if err == nil {
+				folder.FsConfig = fs
+			}
 		}
 		folders = append(folders, folder)
 	}
@@ -762,15 +803,26 @@ func sqlCommonGetFolders(limit, offset int, order string, dbHandle sqlQuerier) (
 	defer rows.Close()
 	for rows.Next() {
 		var folder vfs.BaseVirtualFolder
-		var mappedPath sql.NullString
+		var mappedPath, description, fsConfig sql.NullString
 		err = rows.Scan(&folder.ID, &mappedPath, &folder.UsedQuotaSize, &folder.UsedQuotaFiles,
-			&folder.LastQuotaUpdate, &folder.Name)
+			&folder.LastQuotaUpdate, &folder.Name, &description, &fsConfig)
 		if err != nil {
 			return folders, err
 		}
 		if mappedPath.Valid {
 			folder.MappedPath = mappedPath.String
 		}
+		if description.Valid {
+			folder.Description = description.String
+		}
+		if fsConfig.Valid {
+			var fs vfs.Filesystem
+			err = json.Unmarshal([]byte(fsConfig.String), &fs)
+			if err == nil {
+				folder.FsConfig = fs
+			}
+		}
+		folder.PrepareForRendering()
 		folders = append(folders, folder)
 	}
 
@@ -793,7 +845,7 @@ func sqlCommonClearFolderMapping(ctx context.Context, user *User, dbHandle sqlQu
 	return err
 }
 
-func sqlCommonAddFolderMapping(ctx context.Context, user *User, folder vfs.VirtualFolder, dbHandle sqlQuerier) error {
+func sqlCommonAddFolderMapping(ctx context.Context, user *User, folder *vfs.VirtualFolder, dbHandle sqlQuerier) error {
 	q := getAddFolderMappingQuery()
 	stmt, err := dbHandle.PrepareContext(ctx, q)
 	if err != nil {
@@ -810,8 +862,9 @@ func generateVirtualFoldersMapping(ctx context.Context, user *User, dbHandle sql
 	if err != nil {
 		return err
 	}
-	for _, vfolder := range user.VirtualFolders {
-		f, err := sqlCommonAddOrGetFolder(ctx, vfolder.BaseVirtualFolder, 0, 0, 0, dbHandle)
+	for idx := range user.VirtualFolders {
+		vfolder := &user.VirtualFolders[idx]
+		f, err := sqlCommonAddOrUpdateFolder(ctx, &vfolder.BaseVirtualFolder, 0, 0, 0, dbHandle)
 		if err != nil {
 			return err
 		}
@@ -824,8 +877,8 @@ func generateVirtualFoldersMapping(ctx context.Context, user *User, dbHandle sql
 	return err
 }
 
-func getUserWithVirtualFolders(user User, dbHandle sqlQuerier) (User, error) {
-	users, err := getUsersWithVirtualFolders([]User{user}, dbHandle)
+func getUserWithVirtualFolders(ctx context.Context, user User, dbHandle sqlQuerier) (User, error) {
+	users, err := getUsersWithVirtualFolders(ctx, []User{user}, dbHandle)
 	if err != nil {
 		return user, err
 	}
@@ -835,14 +888,12 @@ func getUserWithVirtualFolders(user User, dbHandle sqlQuerier) (User, error) {
 	return users[0], err
 }
 
-func getUsersWithVirtualFolders(users []User, dbHandle sqlQuerier) ([]User, error) {
+func getUsersWithVirtualFolders(ctx context.Context, users []User, dbHandle sqlQuerier) ([]User, error) {
 	var err error
 	usersVirtualFolders := make(map[int64][]vfs.VirtualFolder)
 	if len(users) == 0 {
 		return users, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
-	defer cancel()
 	q := getRelatedFoldersForUsersQuery(users)
 	stmt, err := dbHandle.PrepareContext(ctx, q)
 	if err != nil {
@@ -858,14 +909,25 @@ func getUsersWithVirtualFolders(users []User, dbHandle sqlQuerier) ([]User, erro
 	for rows.Next() {
 		var folder vfs.VirtualFolder
 		var userID int64
-		var mappedPath sql.NullString
+		var mappedPath, fsConfig, description sql.NullString
 		err = rows.Scan(&folder.ID, &folder.Name, &mappedPath, &folder.UsedQuotaSize, &folder.UsedQuotaFiles,
-			&folder.LastQuotaUpdate, &folder.VirtualPath, &folder.QuotaSize, &folder.QuotaFiles, &userID)
+			&folder.LastQuotaUpdate, &folder.VirtualPath, &folder.QuotaSize, &folder.QuotaFiles, &userID, &fsConfig,
+			&description)
 		if err != nil {
 			return users, err
 		}
 		if mappedPath.Valid {
 			folder.MappedPath = mappedPath.String
+		}
+		if description.Valid {
+			folder.Description = description.String
+		}
+		if fsConfig.Valid {
+			var fs vfs.Filesystem
+			err = json.Unmarshal([]byte(fsConfig.String), &fs)
+			if err == nil {
+				folder.FsConfig = fs
+			}
 		}
 		usersVirtualFolders[userID] = append(usersVirtualFolders[userID], folder)
 	}
@@ -998,298 +1060,39 @@ func sqlCommonUpdateDatabaseVersion(ctx context.Context, dbHandle sqlQuerier, ve
 	return err
 }
 
-func sqlCommonExecSQLAndUpdateDBVersion(dbHandle *sql.DB, sql []string, newVersion int) error {
+func sqlCommonExecSQLAndUpdateDBVersion(dbHandle *sql.DB, sqlQueries []string, newVersion int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), longSQLQueryTimeout)
 	defer cancel()
-	tx, err := dbHandle.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	for _, q := range sql {
-		if strings.TrimSpace(q) == "" {
-			continue
+
+	return sqlCommonExecuteTx(ctx, dbHandle, func(tx *sql.Tx) error {
+		for _, q := range sqlQueries {
+			if strings.TrimSpace(q) == "" {
+				continue
+			}
+			_, err := tx.ExecContext(ctx, q)
+			if err != nil {
+				return err
+			}
 		}
-		_, err = tx.ExecContext(ctx, q)
-		if err != nil {
-			return err
-		}
-	}
-	err = sqlCommonUpdateDatabaseVersion(ctx, tx, newVersion)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+		return sqlCommonUpdateDatabaseVersion(ctx, tx, newVersion)
+	})
 }
 
-/*func sqlCommonGetCompatVirtualFolders(dbHandle *sql.DB) ([]userCompactVFolders, error) {
-	users := []userCompactVFolders{}
-	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
-	defer cancel()
-	q := getCompatVirtualFoldersQuery()
-	stmt, err := dbHandle.PrepareContext(ctx, q)
-	if err != nil {
-		providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
-		return nil, err
+func sqlCommonExecuteTx(ctx context.Context, dbHandle *sql.DB, txFn func(*sql.Tx) error) error {
+	if config.Driver == CockroachDataProviderName {
+		return crdb.ExecuteTx(ctx, dbHandle, nil, txFn)
 	}
-	defer stmt.Close()
-	rows, err := stmt.QueryContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var user userCompactVFolders
-		var virtualFolders sql.NullString
-		err = rows.Scan(&user.ID, &user.Username, &virtualFolders)
-		if err != nil {
-			return nil, err
-		}
-		if virtualFolders.Valid {
-			var list []virtualFoldersCompact
-			err = json.Unmarshal([]byte(virtualFolders.String), &list)
-			if err == nil && len(list) > 0 {
-				user.VirtualFolders = list
-				users = append(users, user)
-			}
-		}
-	}
-	return users, rows.Err()
-}*/
-
-/*func sqlCommonRestoreCompatVirtualFolders(ctx context.Context, users []userCompactVFolders, dbHandle sqlQuerier) ([]string, error) {
-	foldersToScan := []string{}
-	for _, user := range users {
-		for _, vfolder := range user.VirtualFolders {
-			providerLog(logger.LevelInfo, "restoring virtual folder: %+v for user %#v", vfolder, user.Username)
-			// -1 means included in user quota, 0 means unlimited
-			quotaSize := int64(-1)
-			quotaFiles := -1
-			if vfolder.ExcludeFromQuota {
-				quotaFiles = 0
-				quotaSize = 0
-			}
-			b, err := sqlCommonAddOrGetFolder(ctx, vfolder.MappedPath, 0, 0, 0, dbHandle)
-			if err != nil {
-				providerLog(logger.LevelWarn, "error restoring virtual folder for user %#v: %v", user.Username, err)
-				return foldersToScan, err
-			}
-			u := User{
-				ID:       user.ID,
-				Username: user.Username,
-			}
-			f := vfs.VirtualFolder{
-				BaseVirtualFolder: b,
-				VirtualPath:       vfolder.VirtualPath,
-				QuotaSize:         quotaSize,
-				QuotaFiles:        quotaFiles,
-			}
-			err = sqlCommonAddFolderMapping(ctx, &u, f, dbHandle)
-			if err != nil {
-				providerLog(logger.LevelWarn, "error adding virtual folder mapping for user %#v: %v", user.Username, err)
-				return foldersToScan, err
-			}
-			if !utils.IsStringInSlice(vfolder.MappedPath, foldersToScan) {
-				foldersToScan = append(foldersToScan, vfolder.MappedPath)
-			}
-			providerLog(logger.LevelInfo, "virtual folder: %+v for user %#v successfully restored", vfolder, user.Username)
-		}
-	}
-	return foldersToScan, nil
-}*/
-
-func sqlCommonUpdateDatabaseFrom3To4(sqlV4 string, dbHandle *sql.DB) error {
-	logger.InfoToConsole("updating database version: 3 -> 4")
-	providerLog(logger.LevelInfo, "updating database version: 3 -> 4")
-	/*users, err := sqlCommonGetCompatVirtualFolders(dbHandle)
-	if err != nil {
-		return err
-	}*/
-	sql := strings.ReplaceAll(sqlV4, "{{users}}", sqlTableUsers)
-	sql = strings.ReplaceAll(sql, "{{folders}}", sqlTableFolders)
-	sql = strings.ReplaceAll(sql, "{{folders_mapping}}", sqlTableFoldersMapping)
-	ctx, cancel := context.WithTimeout(context.Background(), longSQLQueryTimeout)
-	defer cancel()
 
 	tx, err := dbHandle.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	for _, q := range strings.Split(sql, ";") {
-		if strings.TrimSpace(q) == "" {
-			continue
-		}
-		_, err = tx.ExecContext(ctx, q)
-		if err != nil {
-			return err
-		}
-	}
-	err = sqlCommonUpdateDatabaseVersion(ctx, tx, 4)
+
+	err = txFn(tx)
 	if err != nil {
+		// we don't change the returned error
+		tx.Rollback() //nolint:errcheck
 		return err
 	}
 	return tx.Commit()
-}
-
-//nolint:dupl
-func sqlCommonUpdateDatabaseFrom4To5(dbHandle *sql.DB) error {
-	logger.InfoToConsole("updating database version: 4 -> 5")
-	providerLog(logger.LevelInfo, "updating database version: 4 -> 5")
-	ctx, cancel := context.WithTimeout(context.Background(), longSQLQueryTimeout)
-	defer cancel()
-	q := getCompatV4FsConfigQuery()
-	stmt, err := dbHandle.PrepareContext(ctx, q)
-	if err != nil {
-		providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
-		return err
-	}
-	defer stmt.Close()
-	rows, err := stmt.QueryContext(ctx)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	users := []User{}
-	for rows.Next() {
-		var compatUser compatUserV4
-		var fsConfigString sql.NullString
-		err = rows.Scan(&compatUser.ID, &compatUser.Username, &fsConfigString)
-		if err != nil {
-			return err
-		}
-		if fsConfigString.Valid {
-			err = json.Unmarshal([]byte(fsConfigString.String), &compatUser.FsConfig)
-			if err != nil {
-				logger.WarnToConsole("failed to unmarshal v4 user %#v, is it already migrated?", compatUser.Username)
-				continue
-			}
-			fsConfig, err := convertFsConfigFromV4(compatUser.FsConfig, compatUser.Username)
-			if err != nil {
-				return err
-			}
-			users = append(users, createUserFromV4(compatUser, fsConfig))
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	for _, user := range users {
-		err = sqlCommonUpdateV4User(dbHandle, user)
-		if err != nil {
-			return err
-		}
-		providerLog(logger.LevelInfo, "filesystem config updated for user %#v", user.Username)
-	}
-
-	ctxVersion, cancelVersion := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
-	defer cancelVersion()
-
-	return sqlCommonUpdateDatabaseVersion(ctxVersion, dbHandle, 5)
-}
-
-func sqlCommonUpdateV4CompatUser(dbHandle *sql.DB, user compatUserV4) error {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
-	defer cancel()
-
-	q := updateCompatV4FsConfigQuery()
-	stmt, err := dbHandle.PrepareContext(ctx, q)
-	if err != nil {
-		providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
-		return err
-	}
-	defer stmt.Close()
-
-	fsConfig, err := json.Marshal(user.FsConfig)
-	if err != nil {
-		return err
-	}
-	_, err = stmt.ExecContext(ctx, string(fsConfig), user.ID)
-	return err
-}
-
-func sqlCommonUpdateV4User(dbHandle *sql.DB, user User) error {
-	err := validateFilesystemConfig(&user)
-	if err != nil {
-		return err
-	}
-	err = saveGCSCredentials(&user)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
-	defer cancel()
-
-	q := updateCompatV4FsConfigQuery()
-	stmt, err := dbHandle.PrepareContext(ctx, q)
-	if err != nil {
-		providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
-		return err
-	}
-	defer stmt.Close()
-
-	fsConfig, err := user.GetFsConfigAsJSON()
-	if err != nil {
-		return err
-	}
-	_, err = stmt.ExecContext(ctx, string(fsConfig), user.ID)
-	return err
-}
-
-//nolint:dupl
-func sqlCommonDowngradeDatabaseFrom5To4(dbHandle *sql.DB) error {
-	logger.InfoToConsole("downgrading database version: 5 -> 4")
-	providerLog(logger.LevelInfo, "downgrading database version: 5 -> 4")
-	ctx, cancel := context.WithTimeout(context.Background(), longSQLQueryTimeout)
-	defer cancel()
-	q := getCompatV4FsConfigQuery()
-	stmt, err := dbHandle.PrepareContext(ctx, q)
-	if err != nil {
-		providerLog(logger.LevelWarn, "error preparing database query %#v: %v", q, err)
-		return err
-	}
-	defer stmt.Close()
-	rows, err := stmt.QueryContext(ctx)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	users := []compatUserV4{}
-	for rows.Next() {
-		var user User
-		var fsConfigString sql.NullString
-		err = rows.Scan(&user.ID, &user.Username, &fsConfigString)
-		if err != nil {
-			return err
-		}
-		if fsConfigString.Valid {
-			err = json.Unmarshal([]byte(fsConfigString.String), &user.FsConfig)
-			if err != nil {
-				logger.WarnToConsole("failed to unmarshal user %#v to v4, is it already migrated?", user.Username)
-				continue
-			}
-			fsConfig, err := convertFsConfigToV4(user.FsConfig, user.Username)
-			if err != nil {
-				return err
-			}
-			users = append(users, convertUserToV4(user, fsConfig))
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	for _, user := range users {
-		err = sqlCommonUpdateV4CompatUser(dbHandle, user)
-		if err != nil {
-			return err
-		}
-		providerLog(logger.LevelInfo, "filesystem config downgraded for user %#v", user.Username)
-	}
-
-	ctxVersion, cancelVersion := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
-	defer cancelVersion()
-
-	return sqlCommonUpdateDatabaseVersion(ctxVersion, dbHandle, 4)
 }

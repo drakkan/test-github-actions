@@ -4,8 +4,9 @@ package kms
 import (
 	"encoding/json"
 	"errors"
-	"io/ioutil"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/drakkan/sftpgo/utils"
@@ -107,7 +108,7 @@ func GetSecretFromCompatString(secret string) (*Secret, error) {
 // Initialize configures the KMS support
 func (c *Configuration) Initialize() error {
 	if c.Secrets.MasterKeyPath != "" {
-		mKey, err := ioutil.ReadFile(c.Secrets.MasterKeyPath)
+		mKey, err := os.ReadFile(c.Secrets.MasterKeyPath)
 		if err != nil {
 			return err
 		}
@@ -144,11 +145,15 @@ func (c *Configuration) getSecretProvider(base baseSecret) SecretProvider {
 
 // Secret defines the struct used to store confidential data
 type Secret struct {
+	sync.RWMutex
 	provider SecretProvider
 }
 
 // MarshalJSON return the JSON encoding of the Secret object
 func (s *Secret) MarshalJSON() ([]byte, error) {
+	s.RLock()
+	defer s.RUnlock()
+
 	return json.Marshal(&baseSecret{
 		Status:         s.provider.GetStatus(),
 		Payload:        s.provider.GetPayload(),
@@ -161,6 +166,9 @@ func (s *Secret) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON parses the JSON-encoded data and stores the result
 // in the Secret object
 func (s *Secret) UnmarshalJSON(data []byte) error {
+	s.Lock()
+	defer s.Unlock()
+
 	baseSecret := baseSecret{}
 	err := json.Unmarshal(data, &baseSecret)
 	if err != nil {
@@ -189,8 +197,31 @@ func (s *Secret) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// IsEqual returns true if all the secrets fields are equal
+func (s *Secret) IsEqual(other *Secret) bool {
+	if s.GetStatus() != other.GetStatus() {
+		return false
+	}
+	if s.GetPayload() != other.GetPayload() {
+		return false
+	}
+	if s.GetKey() != other.GetKey() {
+		return false
+	}
+	if s.GetAdditionalData() != other.GetAdditionalData() {
+		return false
+	}
+	if s.GetMode() != other.GetMode() {
+		return false
+	}
+	return true
+}
+
 // Clone returns a copy of the secret object
 func (s *Secret) Clone() *Secret {
+	s.RLock()
+	defer s.RUnlock()
+
 	baseSecret := baseSecret{
 		Status:         s.provider.GetStatus(),
 		Payload:        s.provider.GetPayload(),
@@ -227,11 +258,17 @@ func (s *Secret) Clone() *Secret {
 // This isn't a pointer receiver because we don't want to pass
 // a pointer to html template
 func (s *Secret) IsEncrypted() bool {
+	s.RLock()
+	defer s.RUnlock()
+
 	return s.provider.IsEncrypted()
 }
 
 // IsPlain returns true if the secret is in plain text
 func (s *Secret) IsPlain() bool {
+	s.RLock()
+	defer s.RUnlock()
+
 	return s.provider.GetStatus() == SecretStatusPlain
 }
 
@@ -239,56 +276,89 @@ func (s *Secret) IsPlain() bool {
 // This is an utility method, we update the secret for an existing user
 // if it is empty or plain
 func (s *Secret) IsNotPlainAndNotEmpty() bool {
+	s.RLock()
+	defer s.RUnlock()
+
 	return !s.IsPlain() && !s.IsEmpty()
 }
 
 // IsRedacted returns true if the secret is redacted
 func (s *Secret) IsRedacted() bool {
+	s.RLock()
+	defer s.RUnlock()
+
 	return s.provider.GetStatus() == SecretStatusRedacted
 }
 
 // GetPayload returns the secret payload
 func (s *Secret) GetPayload() string {
+	s.RLock()
+	defer s.RUnlock()
+
 	return s.provider.GetPayload()
 }
 
 // GetAdditionalData returns the secret additional data
 func (s *Secret) GetAdditionalData() string {
+	s.RLock()
+	defer s.RUnlock()
+
 	return s.provider.GetAdditionalData()
 }
 
 // GetStatus returns the secret status
 func (s *Secret) GetStatus() SecretStatus {
+	s.RLock()
+	defer s.RUnlock()
+
 	return s.provider.GetStatus()
 }
 
 // GetKey returns the secret key
 func (s *Secret) GetKey() string {
+	s.RLock()
+	defer s.RUnlock()
+
 	return s.provider.GetKey()
 }
 
 // GetMode returns the secret mode
 func (s *Secret) GetMode() int {
+	s.RLock()
+	defer s.RUnlock()
+
 	return s.provider.GetMode()
 }
 
 // SetAdditionalData sets the given additional data
 func (s *Secret) SetAdditionalData(value string) {
+	s.Lock()
+	defer s.Unlock()
+
 	s.provider.SetAdditionalData(value)
 }
 
 // SetStatus sets the status for this secret
 func (s *Secret) SetStatus(value SecretStatus) {
+	s.Lock()
+	defer s.Unlock()
+
 	s.provider.SetStatus(value)
 }
 
 // SetKey sets the key for this secret
 func (s *Secret) SetKey(value string) {
+	s.Lock()
+	defer s.Unlock()
+
 	s.provider.SetKey(value)
 }
 
 // IsEmpty returns true if all fields are empty
 func (s *Secret) IsEmpty() bool {
+	s.RLock()
+	defer s.RUnlock()
+
 	if s.provider.GetStatus() != "" {
 		return false
 	}
@@ -306,6 +376,9 @@ func (s *Secret) IsEmpty() bool {
 
 // IsValid returns true if the secret is not empty and valid
 func (s *Secret) IsValid() bool {
+	s.RLock()
+	defer s.RUnlock()
+
 	if !s.IsValidInput() {
 		return false
 	}
@@ -325,6 +398,9 @@ func (s *Secret) IsValid() bool {
 
 // IsValidInput returns true if the secret is a valid user input
 func (s *Secret) IsValidInput() bool {
+	s.RLock()
+	defer s.RUnlock()
+
 	if !utils.IsStringInSlice(s.provider.GetStatus(), validSecretStatuses) {
 		return false
 	}
@@ -336,16 +412,37 @@ func (s *Secret) IsValidInput() bool {
 
 // Hide hides info to decrypt data
 func (s *Secret) Hide() {
+	s.Lock()
+	defer s.Unlock()
+
 	s.provider.SetKey("")
 	s.provider.SetAdditionalData("")
 }
 
 // Encrypt encrypts a plain text Secret object
 func (s *Secret) Encrypt() error {
+	s.Lock()
+	defer s.Unlock()
+
 	return s.provider.Encrypt()
 }
 
 // Decrypt decrypts a Secret object
 func (s *Secret) Decrypt() error {
+	s.Lock()
+	defer s.Unlock()
+
 	return s.provider.Decrypt()
+}
+
+// TryDecrypt decrypts a Secret object if encrypted.
+// It returns a nil error if the object is not encrypted
+func (s *Secret) TryDecrypt() error {
+	s.Lock()
+	defer s.Unlock()
+
+	if s.provider.IsEncrypted() {
+		return s.provider.Decrypt()
+	}
+	return nil
 }

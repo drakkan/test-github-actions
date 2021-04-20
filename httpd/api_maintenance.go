@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,13 +21,13 @@ import (
 
 func validateBackupFile(outputFile string) (string, error) {
 	if outputFile == "" {
-		return "", errors.New("Invalid or missing output-file")
+		return "", errors.New("invalid or missing output-file")
 	}
 	if filepath.IsAbs(outputFile) {
-		return "", fmt.Errorf("Invalid output-file %#v: it must be a relative path", outputFile)
+		return "", fmt.Errorf("invalid output-file %#v: it must be a relative path", outputFile)
 	}
 	if strings.Contains(outputFile, "..") {
-		return "", fmt.Errorf("Invalid output-file %#v", outputFile)
+		return "", fmt.Errorf("invalid output-file %#v", outputFile)
 	}
 	outputFile = filepath.Join(backupsPath, outputFile)
 	return outputFile, nil
@@ -82,7 +82,7 @@ func dumpData(w http.ResponseWriter, r *http.Request) {
 		dump, err = json.Marshal(backup)
 	}
 	if err == nil {
-		err = ioutil.WriteFile(outputFile, dump, 0600)
+		err = os.WriteFile(outputFile, dump, 0600)
 	}
 	if err != nil {
 		logger.Warn(logSender, "", "dumping data error: %v, output file: %#v", err, outputFile)
@@ -101,7 +101,7 @@ func loadDataFromRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := ioutil.ReadAll(r.Body)
+	content, err := io.ReadAll(r.Body)
 	if err != nil || len(content) == 0 {
 		if len(content) == 0 {
 			err = dataprovider.NewValidationError("request body is required")
@@ -122,7 +122,7 @@ func loadData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !filepath.IsAbs(inputFile) {
-		sendAPIResponse(w, r, fmt.Errorf("Invalid input_file %#v: it must be an absolute path", inputFile), "", http.StatusBadRequest)
+		sendAPIResponse(w, r, fmt.Errorf("invalid input_file %#v: it must be an absolute path", inputFile), "", http.StatusBadRequest)
 		return
 	}
 	fi, err := os.Stat(inputFile)
@@ -136,7 +136,7 @@ func loadData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := ioutil.ReadFile(inputFile)
+	content, err := os.ReadFile(inputFile)
 	if err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
@@ -207,7 +207,7 @@ func RestoreFolders(folders []vfs.BaseVirtualFolder, inputFile string, mode, sca
 				continue
 			}
 			folder.ID = f.ID
-			err = dataprovider.UpdateFolder(&folder)
+			err = dataprovider.UpdateFolder(&folder, f.Users)
 			logger.Debug(logSender, "", "restoring existing folder: %+v, dump file: %#v, error: %v", folder, inputFile, err)
 		} else {
 			folder.Users = nil

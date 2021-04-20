@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/go-chi/render"
+	"github.com/lestrrat-go/jwx/jwa"
 
 	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/dataprovider"
@@ -252,11 +253,14 @@ func (s *httpdServer) updateContextFromCookie(r *http.Request) *http.Request {
 }
 
 func (s *httpdServer) initializeRouter() {
-	s.tokenAuth = jwtauth.New("HS256", utils.GenerateRandomBytes(32), nil)
+	s.tokenAuth = jwtauth.New(jwa.HS256.String(), utils.GenerateRandomBytes(32), nil)
 	s.router = chi.NewRouter()
 
 	s.router.Use(saveConnectionAddress)
 	s.router.Use(middleware.GetHead)
+	s.router.Use(middleware.StripSlashes)
+	s.router.Use(middleware.RealIP)
+	s.router.Use(rateLimiter)
 
 	s.router.Group(func(r chi.Router) {
 		r.Get(healthzPath, func(w http.ResponseWriter, r *http.Request) {
@@ -266,7 +270,6 @@ func (s *httpdServer) initializeRouter() {
 
 	s.router.Group(func(router chi.Router) {
 		router.Use(middleware.RequestID)
-		router.Use(middleware.RealIP)
 		router.Use(logger.NewStructuredLogger(logger.GetLogger()))
 		router.Use(middleware.Recoverer)
 
@@ -334,7 +337,7 @@ func (s *httpdServer) initializeRouter() {
 		})
 
 		if s.enableWebAdmin {
-			router.Get("/", func(w http.ResponseWriter, r *http.Request) {
+			router.Get(webRootPath, func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, webLoginPath, http.StatusMovedPermanently)
 			})
 

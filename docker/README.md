@@ -4,10 +4,10 @@ SFTPGo provides an official Docker image, it is available on both [Docker Hub](h
 
 ## Supported tags and respective Dockerfile links
 
-- [v2.0.3, v2.0, v2, latest](https://github.com/drakkan/sftpgo/blob/v2.0.3/Dockerfile)
-- [v2.0.3-alpine, v2.0-alpine, v2-alpine, alpine](https://github.com/drakkan/sftpgo/blob/v2.0.3/Dockerfile.alpine)
-- [v2.0.3-slim, v2.0-slim, v2-slim, slim](https://github.com/drakkan/sftpgo/blob/v2.0.3/Dockerfile)
-- [v2.0.3-alpine-slim, v2.0-alpine-slim, v2-alpine-slim, alpine-slim](https://github.com/drakkan/sftpgo/blob/v2.0.3/Dockerfile.alpine)
+- [v2.0.4, v2.0, v2, latest](https://github.com/drakkan/sftpgo/blob/v2.0.4/Dockerfile)
+- [v2.0.4-alpine, v2.0-alpine, v2-alpine, alpine](https://github.com/drakkan/sftpgo/blob/v2.0.4/Dockerfile.alpine)
+- [v2.0.4-slim, v2.0-slim, v2-slim, slim](https://github.com/drakkan/sftpgo/blob/v2.0.4/Dockerfile)
+- [v2.0.4-alpine-slim, v2.0-alpine-slim, v2-alpine-slim, alpine-slim](https://github.com/drakkan/sftpgo/blob/v2.0.4/Dockerfile.alpine)
 - [edge](../Dockerfile)
 - [edge-alpine](../Dockerfile.alpine)
 - [edge-slim](../Dockerfile)
@@ -25,7 +25,13 @@ docker run --name some-sftpgo -p 127.0.0.1:8080:8080 -p 2022:2022 -d "drakkan/sf
 
 ... where `some-sftpgo` is the name you want to assign to your container, and `tag` is the tag specifying the SFTPGo version you want. See the list above for relevant tags.
 
-Now visit [http://localhost:8080/](http://localhost:8080/) and create a new SFTPGo user. The SFTP service is available on port 2022.
+Now visit [http://localhost:8080/](http://localhost:8080/), the default credentials are `admin/password`, and create a new SFTPGo user. The SFTP service is available on port 2022.
+
+If you don't want to persist any files, for example for testing purposes, you can run an SFTPGo instance like this:
+
+```shell
+docker run --rm --name some-sftpgo -p 8080:8080 -p 2022:2022 -d "drakkan/sftpgo:tag"
+```
 
 If you prefer GitHub Container Registry to Docker Hub replace `drakkan/sftpgo:tag` with `ghcr.io/drakkan/sftpgo:tag`.
 

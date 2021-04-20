@@ -5,9 +5,9 @@ package vfs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime"
 	"net/http"
 	"os"
@@ -35,8 +35,10 @@ var (
 
 // GCSFs is a Fs implementation for Google Cloud Storage.
 type GCSFs struct {
-	connectionID   string
-	localTempDir   string
+	connectionID string
+	localTempDir string
+	// if not empty this fs is mouted as virtual folder in the specified path
+	mountPath      string
 	config         *GCSFsConfig
 	svc            *storage.Client
 	ctxTimeout     time.Duration
@@ -48,11 +50,16 @@ func init() {
 }
 
 // NewGCSFs returns an GCSFs object that allows to interact with Google Cloud Storage
-func NewGCSFs(connectionID, localTempDir string, config GCSFsConfig) (Fs, error) {
+func NewGCSFs(connectionID, localTempDir, mountPath string, config GCSFsConfig) (Fs, error) {
+	if localTempDir == "" {
+		localTempDir = filepath.Clean(os.TempDir())
+	}
+
 	var err error
 	fs := &GCSFs{
 		connectionID:   connectionID,
 		localTempDir:   localTempDir,
+		mountPath:      mountPath,
 		config:         &config,
 		ctxTimeout:     30 * time.Second,
 		ctxLongTimeout: 300 * time.Second,
@@ -64,16 +71,14 @@ func NewGCSFs(connectionID, localTempDir string, config GCSFsConfig) (Fs, error)
 	if fs.config.AutomaticCredentials > 0 {
 		fs.svc, err = storage.NewClient(ctx)
 	} else if !fs.config.Credentials.IsEmpty() {
-		if fs.config.Credentials.IsEncrypted() {
-			err = fs.config.Credentials.Decrypt()
-			if err != nil {
-				return fs, err
-			}
+		err = fs.config.Credentials.TryDecrypt()
+		if err != nil {
+			return fs, err
 		}
 		fs.svc, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(fs.config.Credentials.GetPayload())))
 	} else {
 		var creds []byte
-		creds, err = ioutil.ReadFile(fs.config.CredentialFile)
+		creds, err = os.ReadFile(fs.config.CredentialFile)
 		if err != nil {
 			return fs, err
 		}
@@ -127,24 +132,13 @@ func (fs *GCSFs) Stat(name string) (os.FileInfo, error) {
 	}
 	// now check if this is a prefix (virtual directory)
 	hasContents, err := fs.hasContents(name)
-	if err == nil && hasContents {
-		return NewFileInfo(name, true, 0, time.Now(), false), nil
-	} else if err != nil {
+	if err != nil {
 		return nil, err
 	}
-	// search a dir ending with "/" for backward compatibility
-	return fs.getStatCompat(name)
-}
-
-func (fs *GCSFs) getStatCompat(name string) (os.FileInfo, error) {
-	var result *FileInfo
-	attrs, err := fs.headObject(name + "/")
-	if err != nil {
-		return result, err
+	if hasContents {
+		return NewFileInfo(name, true, 0, time.Now(), false), nil
 	}
-	objSize := attrs.Size
-	objectModTime := attrs.Updated
-	return NewFileInfo(name, true, objSize, objectModTime, false), nil
+	return nil, errors.New("404 no such file or directory")
 }
 
 // Lstat returns a FileInfo describing the named file
@@ -163,7 +157,7 @@ func (fs *GCSFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, fu
 	ctx, cancelFn := context.WithCancel(context.Background())
 	objectReader, err := obj.NewRangeReader(ctx, offset, -1)
 	if err == nil && offset > 0 && objectReader.Attrs.ContentEncoding == "gzip" {
-		err = fmt.Errorf("Range request is not possible for gzip content encoding, requested offset %v", offset)
+		err = fmt.Errorf("range request is not possible for gzip content encoding, requested offset %v", offset)
 		objectReader.Close()
 	}
 	if err != nil {
@@ -241,7 +235,7 @@ func (fs *GCSFs) Rename(source, target string) error {
 			return err
 		}
 		if hasContents {
-			return fmt.Errorf("Cannot rename non empty directory: %#v", source)
+			return fmt.Errorf("cannot rename non empty directory: %#v", source)
 		}
 	}
 	src := fs.svc.Bucket(fs.config.Bucket).Object(source)
@@ -277,7 +271,7 @@ func (fs *GCSFs) Remove(name string, isDir bool) error {
 			return err
 		}
 		if hasContents {
-			return fmt.Errorf("Cannot remove non empty directory: %#v", name)
+			return fmt.Errorf("cannot remove non empty directory: %#v", name)
 		}
 	}
 	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
@@ -285,11 +279,6 @@ func (fs *GCSFs) Remove(name string, isDir bool) error {
 
 	err := fs.svc.Bucket(fs.config.Bucket).Object(name).Delete(ctx)
 	metrics.GCSDeleteObjectCompleted(err)
-	if fs.IsNotExist(err) && isDir {
-		name = name + "/"
-		err = fs.svc.Bucket(fs.config.Bucket).Object(name).Delete(ctx)
-		metrics.GCSDeleteObjectCompleted(err)
-	}
 	return err
 }
 
@@ -304,6 +293,11 @@ func (fs *GCSFs) Mkdir(name string) error {
 		return err
 	}
 	return w.Close()
+}
+
+// MkdirAll does nothing, we don't have folder
+func (*GCSFs) MkdirAll(name string, uid int, gid int) error {
+	return nil
 }
 
 // Symlink creates source as a symbolic link to target.
@@ -402,8 +396,8 @@ func (fs *GCSFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 	return result, nil
 }
 
-// IsUploadResumeSupported returns true if upload resume is supported.
-// SFTP Resume is not supported on S3
+// IsUploadResumeSupported returns true if resuming uploads is supported.
+// Resuming uploads is not supported on GCS
 func (*GCSFs) IsUploadResumeSupported() bool {
 	return false
 }
@@ -457,7 +451,7 @@ func (*GCSFs) IsNotSupported(err error) bool {
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *GCSFs) CheckRootPath(username string, uid int, gid int) bool {
 	// we need a local directory for temporary files
-	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, nil)
+	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
 	return osFs.CheckRootPath(username, uid, gid)
 }
 
@@ -525,6 +519,9 @@ func (fs *GCSFs) GetRelativePath(name string) string {
 			rel = "/"
 		}
 		rel = path.Clean("/" + strings.TrimPrefix(rel, "/"+fs.config.KeyPrefix))
+	}
+	if fs.mountPath != "" {
+		rel = path.Join(fs.mountPath, rel)
 	}
 	return rel
 }
@@ -594,6 +591,9 @@ func (GCSFs) HasVirtualFolders() bool {
 
 // ResolvePath returns the matching filesystem path for the specified virtual path
 func (fs *GCSFs) ResolvePath(virtualPath string) (string, error) {
+	if fs.mountPath != "" {
+		virtualPath = strings.TrimPrefix(virtualPath, fs.mountPath)
+	}
 	if !path.IsAbs(virtualPath) {
 		virtualPath = path.Clean("/" + virtualPath)
 	}

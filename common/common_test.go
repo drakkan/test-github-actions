@@ -3,7 +3,6 @@ package common
 import (
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,15 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rs/zerolog"
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/drakkan/sftpgo/dataprovider"
-	"github.com/drakkan/sftpgo/httpclient"
 	"github.com/drakkan/sftpgo/kms"
-	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/utils"
 	"github.com/drakkan/sftpgo/vfs"
 )
@@ -29,16 +24,10 @@ import (
 const (
 	logSenderTest    = "common_test"
 	httpAddr         = "127.0.0.1:9999"
-	httpProxyAddr    = "127.0.0.1:7777"
 	configDir        = ".."
 	osWindows        = "windows"
 	userTestUsername = "common_test_username"
-	userTestPwd      = "common_test_pwd"
 )
-
-type providerConf struct {
-	Config dataprovider.Config `json:"data_provider" mapstructure:"data_provider"`
-}
 
 type fakeConnection struct {
 	*BaseConnection
@@ -46,12 +35,11 @@ type fakeConnection struct {
 }
 
 func (c *fakeConnection) AddUser(user dataprovider.User) error {
-	fs, err := user.GetFilesystem(c.GetID())
+	_, err := user.GetFilesystem(c.GetID())
 	if err != nil {
 		return err
 	}
 	c.BaseConnection.User = user
-	c.BaseConnection.Fs = fs
 	return nil
 }
 
@@ -82,110 +70,6 @@ func (c *customNetConn) Close() error {
 	Connections.RemoveSSHConnection(c.id)
 	c.isClosed = true
 	return c.Conn.Close()
-}
-
-func TestMain(m *testing.M) {
-	logfilePath := "common_test.log"
-	logger.InitLogger(logfilePath, 5, 1, 28, false, zerolog.DebugLevel)
-
-	viper.SetEnvPrefix("sftpgo")
-	replacer := strings.NewReplacer(".", "__")
-	viper.SetEnvKeyReplacer(replacer)
-	viper.SetConfigName("sftpgo")
-	viper.AutomaticEnv()
-	viper.AllowEmptyEnv(true)
-
-	driver, err := initializeDataprovider(-1)
-	if err != nil {
-		logger.WarnToConsole("error initializing data provider: %v", err)
-		os.Exit(1)
-	}
-	logger.InfoToConsole("Starting COMMON tests, provider: %v", driver)
-	err = Initialize(Configuration{})
-	if err != nil {
-		logger.WarnToConsole("error initializing common: %v", err)
-		os.Exit(1)
-	}
-	httpConfig := httpclient.Config{
-		Timeout: 5,
-	}
-	httpConfig.Initialize(configDir) //nolint:errcheck
-
-	go func() {
-		// start a test HTTP server to receive action notifications
-		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "OK\n")
-		})
-		http.HandleFunc("/404", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprintf(w, "Not found\n")
-		})
-		if err := http.ListenAndServe(httpAddr, nil); err != nil {
-			logger.ErrorToConsole("could not start HTTP notification server: %v", err)
-			os.Exit(1)
-		}
-	}()
-
-	go func() {
-		Config.ProxyProtocol = 2
-		listener, err := net.Listen("tcp", httpProxyAddr)
-		if err != nil {
-			logger.ErrorToConsole("error creating listener for proxy protocol server: %v", err)
-			os.Exit(1)
-		}
-		proxyListener, err := Config.GetProxyListener(listener)
-		if err != nil {
-			logger.ErrorToConsole("error creating proxy protocol listener: %v", err)
-			os.Exit(1)
-		}
-		Config.ProxyProtocol = 0
-
-		s := &http.Server{}
-		if err := s.Serve(proxyListener); err != nil {
-			logger.ErrorToConsole("could not start HTTP proxy protocol server: %v", err)
-			os.Exit(1)
-		}
-	}()
-
-	waitTCPListening(httpAddr)
-	waitTCPListening(httpProxyAddr)
-	exitCode := m.Run()
-	os.Remove(logfilePath) //nolint:errcheck
-	os.Exit(exitCode)
-}
-
-func waitTCPListening(address string) {
-	for {
-		conn, err := net.Dial("tcp", address)
-		if err != nil {
-			logger.WarnToConsole("tcp server %v not listening: %v", address, err)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		logger.InfoToConsole("tcp server %v now listening", address)
-		conn.Close()
-		break
-	}
-}
-
-func initializeDataprovider(trackQuota int) (string, error) {
-	configDir := ".."
-	viper.AddConfigPath(configDir)
-	if err := viper.ReadInConfig(); err != nil {
-		return "", err
-	}
-	var cfg providerConf
-	if err := viper.Unmarshal(&cfg); err != nil {
-		return "", err
-	}
-	if trackQuota >= 0 && trackQuota <= 2 {
-		cfg.Config.TrackQuota = trackQuota
-	}
-	return cfg.Config.Driver, dataprovider.Initialize(cfg.Config, configDir, true)
-}
-
-func closeDataprovider() error {
-	return dataprovider.Close()
 }
 
 func TestSSHConnections(t *testing.T) {
@@ -281,12 +165,71 @@ func TestDefenderIntegration(t *testing.T) {
 	Config = configCopy
 }
 
+func TestRateLimitersIntegration(t *testing.T) {
+	// by default defender is nil
+	configCopy := Config
+
+	Config.RateLimitersConfig = []RateLimiterConfig{
+		{
+			Average:   100,
+			Period:    10,
+			Burst:     5,
+			Type:      int(rateLimiterTypeGlobal),
+			Protocols: rateLimiterProtocolValues,
+		},
+		{
+			Average:                1,
+			Period:                 1000,
+			Burst:                  1,
+			Type:                   int(rateLimiterTypeSource),
+			Protocols:              []string{ProtocolWebDAV, ProtocolWebDAV, ProtocolFTP},
+			GenerateDefenderEvents: true,
+			EntriesSoftLimit:       100,
+			EntriesHardLimit:       150,
+		},
+	}
+	err := Initialize(Config)
+	assert.Error(t, err)
+	Config.RateLimitersConfig[0].Period = 1000
+	err = Initialize(Config)
+	assert.NoError(t, err)
+
+	assert.Len(t, rateLimiters, 4)
+	assert.Len(t, rateLimiters[ProtocolSSH], 1)
+	assert.Len(t, rateLimiters[ProtocolFTP], 2)
+	assert.Len(t, rateLimiters[ProtocolWebDAV], 2)
+	assert.Len(t, rateLimiters[ProtocolHTTP], 1)
+
+	source1 := "127.1.1.1"
+	source2 := "127.1.1.2"
+
+	_, err = LimitRate(ProtocolSSH, source1)
+	assert.NoError(t, err)
+	_, err = LimitRate(ProtocolFTP, source1)
+	assert.NoError(t, err)
+	// sleep to allow the add configured burst to the token.
+	// This sleep is not enough to add the per-source burst
+	time.Sleep(20 * time.Millisecond)
+	_, err = LimitRate(ProtocolWebDAV, source2)
+	assert.NoError(t, err)
+	_, err = LimitRate(ProtocolFTP, source1)
+	assert.Error(t, err)
+	_, err = LimitRate(ProtocolWebDAV, source2)
+	assert.Error(t, err)
+	_, err = LimitRate(ProtocolSSH, source1)
+	assert.NoError(t, err)
+	_, err = LimitRate(ProtocolSSH, source2)
+	assert.NoError(t, err)
+
+	Config = configCopy
+}
+
 func TestMaxConnections(t *testing.T) {
 	oldValue := Config.MaxTotalConnections
 	Config.MaxTotalConnections = 1
 
 	assert.True(t, Connections.IsNewConnectionAllowed())
-	c := NewBaseConnection("id", ProtocolSFTP, dataprovider.User{}, nil)
+	c := NewBaseConnection("id", ProtocolSFTP, dataprovider.User{})
 	fakeConn := &fakeConnection{
 		BaseConnection: c,
 	}
@@ -297,6 +240,14 @@ func TestMaxConnections(t *testing.T) {
 	res := Connections.Close(fakeConn.GetID())
 	assert.True(t, res)
 	assert.Eventually(t, func() bool { return len(Connections.GetStats()) == 0 }, 300*time.Millisecond, 50*time.Millisecond)
+
+	assert.True(t, Connections.IsNewConnectionAllowed())
+	Connections.AddNetworkConnection()
+	Connections.AddNetworkConnection()
+	assert.False(t, Connections.IsNewConnectionAllowed())
+	Connections.RemoveNetworkConnection()
+	assert.True(t, Connections.IsNewConnectionAllowed())
+	Connections.RemoveNetworkConnection()
 
 	Config.MaxTotalConnections = oldValue
 }
@@ -324,7 +275,7 @@ func TestIdleConnections(t *testing.T) {
 	user := dataprovider.User{
 		Username: username,
 	}
-	c := NewBaseConnection(sshConn1.id+"_1", ProtocolSFTP, user, nil)
+	c := NewBaseConnection(sshConn1.id+"_1", ProtocolSFTP, user)
 	c.lastActivity = time.Now().Add(-24 * time.Hour).UnixNano()
 	fakeConn := &fakeConnection{
 		BaseConnection: c,
@@ -336,7 +287,7 @@ func TestIdleConnections(t *testing.T) {
 	Connections.AddSSHConnection(sshConn1)
 	Connections.Add(fakeConn)
 	assert.Equal(t, Connections.GetActiveSessions(username), 1)
-	c = NewBaseConnection(sshConn2.id+"_1", ProtocolSSH, user, nil)
+	c = NewBaseConnection(sshConn2.id+"_1", ProtocolSSH, user)
 	fakeConn = &fakeConnection{
 		BaseConnection: c,
 	}
@@ -344,7 +295,7 @@ func TestIdleConnections(t *testing.T) {
 	Connections.Add(fakeConn)
 	assert.Equal(t, Connections.GetActiveSessions(username), 2)
 
-	cFTP := NewBaseConnection("id2", ProtocolFTP, dataprovider.User{}, nil)
+	cFTP := NewBaseConnection("id2", ProtocolFTP, dataprovider.User{})
 	cFTP.lastActivity = time.Now().UnixNano()
 	fakeConn = &fakeConnection{
 		BaseConnection: cFTP,
@@ -383,7 +334,7 @@ func TestIdleConnections(t *testing.T) {
 }
 
 func TestCloseConnection(t *testing.T) {
-	c := NewBaseConnection("id", ProtocolSFTP, dataprovider.User{}, nil)
+	c := NewBaseConnection("id", ProtocolSFTP, dataprovider.User{})
 	fakeConn := &fakeConnection{
 		BaseConnection: c,
 	}
@@ -399,7 +350,7 @@ func TestCloseConnection(t *testing.T) {
 }
 
 func TestSwapConnection(t *testing.T) {
-	c := NewBaseConnection("id", ProtocolFTP, dataprovider.User{}, nil)
+	c := NewBaseConnection("id", ProtocolFTP, dataprovider.User{})
 	fakeConn := &fakeConnection{
 		BaseConnection: c,
 	}
@@ -409,7 +360,7 @@ func TestSwapConnection(t *testing.T) {
 	}
 	c = NewBaseConnection("id", ProtocolFTP, dataprovider.User{
 		Username: userTestUsername,
-	}, nil)
+	})
 	fakeConn = &fakeConnection{
 		BaseConnection: c,
 	}
@@ -443,8 +394,8 @@ func TestConnectionStatus(t *testing.T) {
 	user := dataprovider.User{
 		Username: username,
 	}
-	fs := vfs.NewOsFs("", os.TempDir(), nil)
-	c1 := NewBaseConnection("id1", ProtocolSFTP, user, fs)
+	fs := vfs.NewOsFs("", os.TempDir(), "")
+	c1 := NewBaseConnection("id1", ProtocolSFTP, user)
 	fakeConn1 := &fakeConnection{
 		BaseConnection: c1,
 	}
@@ -452,12 +403,12 @@ func TestConnectionStatus(t *testing.T) {
 	t1.BytesReceived = 123
 	t2 := NewBaseTransfer(nil, c1, nil, "/p2", "/r2", TransferDownload, 0, 0, 0, true, fs)
 	t2.BytesSent = 456
-	c2 := NewBaseConnection("id2", ProtocolSSH, user, nil)
+	c2 := NewBaseConnection("id2", ProtocolSSH, user)
 	fakeConn2 := &fakeConnection{
 		BaseConnection: c2,
 		command:        "md5sum",
 	}
-	c3 := NewBaseConnection("id3", ProtocolWebDAV, user, nil)
+	c3 := NewBaseConnection("id3", ProtocolWebDAV, user)
 	fakeConn3 := &fakeConnection{
 		BaseConnection: c3,
 		command:        "PROPFIND",
@@ -565,13 +516,31 @@ func TestProxyProtocolVersion(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestProxyProtocol(t *testing.T) {
-	httpClient := httpclient.GetHTTPClient()
-	resp, err := httpClient.Get(fmt.Sprintf("http://%v", httpProxyAddr))
-	if assert.NoError(t, err) {
-		defer resp.Body.Close()
-		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+func TestStartupHook(t *testing.T) {
+	Config.StartupHook = ""
+
+	assert.NoError(t, Config.ExecuteStartupHook())
+
+	Config.StartupHook = "http://foo\x7f.com/startup"
+	assert.Error(t, Config.ExecuteStartupHook())
+
+	Config.StartupHook = "http://invalid:5678/"
+	assert.Error(t, Config.ExecuteStartupHook())
+
+	Config.StartupHook = fmt.Sprintf("http://%v", httpAddr)
+	assert.NoError(t, Config.ExecuteStartupHook())
+
+	Config.StartupHook = "invalidhook"
+	assert.Error(t, Config.ExecuteStartupHook())
+
+	if runtime.GOOS != osWindows {
+		hookCmd, err := exec.LookPath("true")
+		assert.NoError(t, err)
+		Config.StartupHook = hookCmd
+		assert.NoError(t, Config.ExecuteStartupHook())
 	}
+
+	Config.StartupHook = ""
 }
 
 func TestPostConnectHook(t *testing.T) {
@@ -614,7 +583,7 @@ func TestPostConnectHook(t *testing.T) {
 
 func TestCryptoConvertFileInfo(t *testing.T) {
 	name := "name"
-	fs, err := vfs.NewCryptFs("connID1", os.TempDir(), vfs.CryptFsConfig{Passphrase: kms.NewPlainSecret("secret")})
+	fs, err := vfs.NewCryptFs("connID1", os.TempDir(), "", vfs.CryptFsConfig{Passphrase: kms.NewPlainSecret("secret")})
 	require.NoError(t, err)
 	cryptFs := fs.(*vfs.CryptFs)
 	info := vfs.NewFileInfo(name, true, 48, time.Now(), false)
@@ -649,4 +618,50 @@ func TestFolderCopy(t *testing.T) {
 	require.Equal(t, folder.UsedQuotaSize, folderCopy.UsedQuotaSize)
 	require.Equal(t, folder.UsedQuotaFiles, folderCopy.UsedQuotaFiles)
 	require.Equal(t, folder.LastQuotaUpdate, folderCopy.LastQuotaUpdate)
+
+	folder.FsConfig = vfs.Filesystem{
+		CryptConfig: vfs.CryptFsConfig{
+			Passphrase: kms.NewPlainSecret("crypto secret"),
+		},
+	}
+	folderCopy = folder.GetACopy()
+	folder.FsConfig.CryptConfig.Passphrase = kms.NewEmptySecret()
+	require.Len(t, folderCopy.Users, 1)
+	require.True(t, utils.IsStringInSlice("user3", folderCopy.Users))
+	require.Equal(t, int64(2), folderCopy.ID)
+	require.Equal(t, folder.Name, folderCopy.Name)
+	require.Equal(t, folder.MappedPath, folderCopy.MappedPath)
+	require.Equal(t, folder.UsedQuotaSize, folderCopy.UsedQuotaSize)
+	require.Equal(t, folder.UsedQuotaFiles, folderCopy.UsedQuotaFiles)
+	require.Equal(t, folder.LastQuotaUpdate, folderCopy.LastQuotaUpdate)
+	require.Equal(t, "crypto secret", folderCopy.FsConfig.CryptConfig.Passphrase.GetPayload())
+}
+
+func TestCachedFs(t *testing.T) {
+	user := dataprovider.User{
+		HomeDir: filepath.Clean(os.TempDir()),
+	}
+	conn := NewBaseConnection("id", ProtocolSFTP, user)
+	// changing the user should not affect the connection
+	user.HomeDir = filepath.Join(os.TempDir(), "temp")
+	err := os.Mkdir(user.HomeDir, os.ModePerm)
+	assert.NoError(t, err)
+	fs, err := user.GetFilesystem("")
+	assert.NoError(t, err)
+	p, err := fs.ResolvePath("/")
+	assert.NoError(t, err)
+	assert.Equal(t, user.GetHomeDir(), p)
+
+	_, p, err = conn.GetFsAndResolvedPath("/")
+	assert.NoError(t, err)
+	assert.Equal(t, filepath.Clean(os.TempDir()), p)
+	user.FsConfig.Provider = vfs.S3FilesystemProvider
+	_, err = user.GetFilesystem("")
+	assert.Error(t, err)
+	conn.User.FsConfig.Provider = vfs.S3FilesystemProvider
+	_, p, err = conn.GetFsAndResolvedPath("/")
+	assert.NoError(t, err)
+	assert.Equal(t, filepath.Clean(os.TempDir()), p)
+	err = os.Remove(user.HomeDir)
+	assert.NoError(t, err)
 }

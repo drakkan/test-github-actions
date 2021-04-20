@@ -1,9 +1,9 @@
 package dataprovider
 
 import (
+	"crypto/x509"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -44,7 +44,6 @@ type MemoryProvider struct {
 }
 
 func initializeMemoryProvider(basePath string) {
-	logSender = fmt.Sprintf("dataprovider_%v", MemoryDataProviderName)
 	configFile := ""
 	if utils.IsFileInputValid(config.Name) {
 		configFile = config.Name
@@ -89,10 +88,23 @@ func (p *MemoryProvider) close() error {
 	return nil
 }
 
+func (p *MemoryProvider) validateUserAndTLSCert(username, protocol string, tlsCert *x509.Certificate) (User, error) {
+	var user User
+	if tlsCert == nil {
+		return user, errors.New("TLS certificate cannot be null or empty")
+	}
+	user, err := p.userExists(username)
+	if err != nil {
+		providerLog(logger.LevelWarn, "error authenticating user %#v: %v", username, err)
+		return user, err
+	}
+	return checkUserAndTLSCertificate(&user, protocol, tlsCert)
+}
+
 func (p *MemoryProvider) validateUserAndPass(username, password, ip, protocol string) (User, error) {
 	var user User
 	if password == "" {
-		return user, errors.New("Credentials cannot be null or empty")
+		return user, errors.New("credentials cannot be null or empty")
 	}
 	user, err := p.userExists(username)
 	if err != nil {
@@ -105,7 +117,7 @@ func (p *MemoryProvider) validateUserAndPass(username, password, ip, protocol st
 func (p *MemoryProvider) validateUserAndPubKey(username string, pubKey []byte) (User, string, error) {
 	var user User
 	if len(pubKey) == 0 {
-		return user, "", errors.New("Credentials cannot be null or empty")
+		return user, "", errors.New("credentials cannot be null or empty")
 	}
 	user, err := p.userExists(username)
 	if err != nil {
@@ -317,7 +329,7 @@ func (p *MemoryProvider) getUsers(limit int, offset int, order string) ([]User, 
 			}
 			u := p.dbHandle.users[username]
 			user := u.getACopy()
-			user.HideConfidentialData()
+			user.PrepareForRendering()
 			users = append(users, user)
 			if len(users) >= limit {
 				break
@@ -332,7 +344,7 @@ func (p *MemoryProvider) getUsers(limit int, offset int, order string) ([]User, 
 			username := p.dbHandle.usernames[i]
 			u := p.dbHandle.users[username]
 			user := u.getACopy()
-			user.HideConfidentialData()
+			user.PrepareForRendering()
 			users = append(users, user)
 			if len(users) >= limit {
 				break
@@ -535,15 +547,12 @@ func (p *MemoryProvider) getUsedFolderQuota(name string) (int, int64, error) {
 
 func (p *MemoryProvider) joinVirtualFoldersFields(user *User) []vfs.VirtualFolder {
 	var folders []vfs.VirtualFolder
-	for _, folder := range user.VirtualFolders {
-		f, err := p.addOrGetFolderInternal(folder.Name, folder.MappedPath, user.Username)
+	for idx := range user.VirtualFolders {
+		folder := &user.VirtualFolders[idx]
+		f, err := p.addOrUpdateFolderInternal(&folder.BaseVirtualFolder, user.Username, 0, 0, 0)
 		if err == nil {
-			folder.UsedQuotaFiles = f.UsedQuotaFiles
-			folder.UsedQuotaSize = f.UsedQuotaSize
-			folder.LastQuotaUpdate = f.LastQuotaUpdate
-			folder.ID = f.ID
-			folder.MappedPath = f.MappedPath
-			folders = append(folders, folder)
+			folder.BaseVirtualFolder = f
+			folders = append(folders, *folder)
 		}
 	}
 	return folders
@@ -571,24 +580,29 @@ func (p *MemoryProvider) updateFoldersMappingInternal(folder vfs.BaseVirtualFold
 	}
 }
 
-func (p *MemoryProvider) addOrGetFolderInternal(folderName, folderMappedPath, username string) (vfs.BaseVirtualFolder, error) {
-	folder, err := p.folderExistsInternal(folderName)
-	if _, ok := err.(*RecordNotFoundError); ok {
-		folder := vfs.BaseVirtualFolder{
-			ID:              p.getNextFolderID(),
-			Name:            folderName,
-			MappedPath:      folderMappedPath,
-			UsedQuotaSize:   0,
-			UsedQuotaFiles:  0,
-			LastQuotaUpdate: 0,
-			Users:           []string{username},
+func (p *MemoryProvider) addOrUpdateFolderInternal(baseFolder *vfs.BaseVirtualFolder, username string, usedQuotaSize int64,
+	usedQuotaFiles int, lastQuotaUpdate int64) (vfs.BaseVirtualFolder, error) {
+	folder, err := p.folderExistsInternal(baseFolder.Name)
+	if err == nil {
+		// exists
+		folder.MappedPath = baseFolder.MappedPath
+		folder.Description = baseFolder.Description
+		folder.FsConfig = baseFolder.FsConfig.GetACopy()
+		if !utils.IsStringInSlice(username, folder.Users) {
+			folder.Users = append(folder.Users, username)
 		}
 		p.updateFoldersMappingInternal(folder)
 		return folder, nil
 	}
-	if err == nil && !utils.IsStringInSlice(username, folder.Users) {
-		folder.Users = append(folder.Users, username)
+	if _, ok := err.(*RecordNotFoundError); ok {
+		folder = baseFolder.GetACopy()
+		folder.ID = p.getNextFolderID()
+		folder.UsedQuotaSize = usedQuotaSize
+		folder.UsedQuotaFiles = usedQuotaFiles
+		folder.LastQuotaUpdate = lastQuotaUpdate
+		folder.Users = []string{username}
 		p.updateFoldersMappingInternal(folder)
+		return folder, nil
 	}
 	return folder, err
 }
@@ -618,7 +632,9 @@ func (p *MemoryProvider) getFolders(limit, offset int, order string) ([]vfs.Base
 			if itNum <= offset {
 				continue
 			}
-			folder := p.dbHandle.vfolders[name]
+			f := p.dbHandle.vfolders[name]
+			folder := f.GetACopy()
+			folder.PrepareForRendering()
 			folders = append(folders, folder)
 			if len(folders) >= limit {
 				break
@@ -631,7 +647,9 @@ func (p *MemoryProvider) getFolders(limit, offset int, order string) ([]vfs.Base
 				continue
 			}
 			name := p.dbHandle.vfoldersNames[i]
-			folder := p.dbHandle.vfolders[name]
+			f := p.dbHandle.vfolders[name]
+			folder := f.GetACopy()
+			folder.PrepareForRendering()
 			folders = append(folders, folder)
 			if len(folders) >= limit {
 				break
@@ -647,7 +665,11 @@ func (p *MemoryProvider) getFolderByName(name string) (vfs.BaseVirtualFolder, er
 	if p.dbHandle.isClosed {
 		return vfs.BaseVirtualFolder{}, errMemoryProviderClosed
 	}
-	return p.folderExistsInternal(name)
+	folder, err := p.folderExistsInternal(name)
+	if err != nil {
+		return vfs.BaseVirtualFolder{}, err
+	}
+	return folder.GetACopy(), nil
 }
 
 func (p *MemoryProvider) addFolder(folder *vfs.BaseVirtualFolder) error {
@@ -695,6 +717,22 @@ func (p *MemoryProvider) updateFolder(folder *vfs.BaseVirtualFolder) error {
 	folder.UsedQuotaSize = f.UsedQuotaSize
 	folder.Users = f.Users
 	p.dbHandle.vfolders[folder.Name] = folder.GetACopy()
+	// now update the related users
+	for _, username := range folder.Users {
+		user, err := p.userExistsInternal(username)
+		if err == nil {
+			var folders []vfs.VirtualFolder
+			for idx := range user.VirtualFolders {
+				userFolder := &user.VirtualFolders[idx]
+				if folder.Name == userFolder.Name {
+					userFolder.BaseVirtualFolder = folder.GetACopy()
+				}
+				folders = append(folders, *userFolder)
+			}
+			user.VirtualFolders = folders
+			p.dbHandle.users[user.Username] = user
+		}
+	}
 	return nil
 }
 
@@ -713,9 +751,10 @@ func (p *MemoryProvider) deleteFolder(folder *vfs.BaseVirtualFolder) error {
 		user, err := p.userExistsInternal(username)
 		if err == nil {
 			var folders []vfs.VirtualFolder
-			for _, userFolder := range user.VirtualFolders {
+			for idx := range user.VirtualFolders {
+				userFolder := &user.VirtualFolders[idx]
 				if folder.Name != userFolder.Name {
-					folders = append(folders, userFolder)
+					folders = append(folders, *userFolder)
 				}
 			}
 			user.VirtualFolders = folders
@@ -793,7 +832,7 @@ func (p *MemoryProvider) reloadConfig() error {
 		providerLog(logger.LevelWarn, "error loading dump: %v", err)
 		return err
 	}
-	content, err := ioutil.ReadFile(p.dbHandle.configFile)
+	content, err := os.ReadFile(p.dbHandle.configFile)
 	if err != nil {
 		providerLog(logger.LevelWarn, "error loading dump: %v", err)
 		return err
