@@ -107,11 +107,11 @@ jobs:
           ./sftpgo gen man -d output/man/man1
           gzip output/man/man1/*
           cd output
-          tar cJvf sftpgo_${SFTPGO_VERSION}_${OS}_x86_64.tar.xz *
+          tar cJvf ../sftpgo_${SFTPGO_VERSION}_${OS}_x86_64.tar.xz *
           cd ..
           cp sftpgo_arm64 output/sftpgo
           cd output
-          tar cJvf sftpgo_${SFTPGO_VERSION}_${OS}_arm64.tar.xz *
+          tar cJvf ../sftpgo_${SFTPGO_VERSION}_${OS}_arm64.tar.xz *
           cd ..
         env:
           SFTPGO_VERSION: ${{ steps.get_version.outputs.VERSION }}
@@ -156,7 +156,7 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_x86_64.tar.xz
-          path: ./output/sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_x86_64.tar.xz
+          path: ./sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_x86_64.tar.xz
           retention-days: 1
 
       - name: Upload macOS arm64 artifact
@@ -164,7 +164,7 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_arm64.tar.xz
-          path: ./output/sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_arm64.tar.xz
+          path: ./sftpgo_${{ steps.get_version.outputs.VERSION }}_${{ steps.get_os_name.outputs.OS }}_arm64.tar.xz
           retention-days: 1
 
       - name: Upload Windows installer artifact
