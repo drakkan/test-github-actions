@@ -207,7 +207,7 @@ jobs:
             rpm-arch: ppc64le
             tar-arch: ppc64le
           - arch: s390x
-            distro: ubuntu18.04
+            distro: ubuntu20.04
             go-arch: s390x
             deb-arch: s390x
             rpm-arch: s390x
