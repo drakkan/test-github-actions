@@ -192,17 +192,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - arch: amd64
-            go: 1.16
-            go-arch: amd64
-          - arch: aarch64
-            distro: ubuntu18.04
-            go: latest
-            go-arch: arm64
-          - arch: ppc64le
-            distro: ubuntu18.04
-            go: latest
-            go-arch: ppc64le
           - arch: s390x
             distro: fedora_latest
             go: latest
@@ -245,8 +234,7 @@ jobs:
             --volume "${PWD}/output:/output"
           shell: /bin/bash
           install: |
-            apt-get update -q -y
-            apt-get install -q -y curl gcc git
+            dnf -y install curl
             if [ ${{ matrix.go }} == 'latest' ]
             then
               GO_VERSION=$(curl https://golang.org/VERSION?m=text)
@@ -257,17 +245,7 @@ jobs:
             tar -C /usr/local -xzf go.tar.gz
           run: |
             export PATH=$PATH:/usr/local/go/bin
-            go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
-            mkdir -p output/{init,bash_completion,zsh_completion}
-            cp sftpgo.json output/
-            cp -r templates output/
-            cp -r static output/
-            cp init/sftpgo.service output/init/
-            ./sftpgo gen completion bash > output/bash_completion/sftpgo
-            ./sftpgo gen completion zsh > output/zsh_completion/_sftpgo
-            ./sftpgo gen man -d output/man/man1
-            gzip output/man/man1/*
-            cp sftpgo output/
+            go version 
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v2
