@@ -204,7 +204,7 @@ jobs:
             go: latest
             go-arch: ppc64le
           - arch: s390x
-            distro: ubuntu20.04
+            distro: fedora_latest
             go: latest
             go-arch: s390x
     steps:
