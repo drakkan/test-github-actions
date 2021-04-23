@@ -203,6 +203,10 @@ jobs:
             distro: ubuntu18.04
             go: latest
             go-arch: ppc64le
+          - arch: s390x
+            distro: ubuntu18.04
+            go: latest
+            go-arch: s390x
     steps:
       - uses: actions/checkout@v2
         with:

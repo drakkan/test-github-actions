@@ -206,6 +206,12 @@ jobs:
             deb-arch: ppc64el
             rpm-arch: ppc64le
             tar-arch: ppc64le
+          - arch: s390x
+            distro: ubuntu18.04
+            go-arch: s390x
+            deb-arch: s390x
+            rpm-arch: s390x
+            tar-arch: s390x
 
     steps:
       - uses: actions/checkout@v2
@@ -349,16 +355,23 @@ jobs:
         with:
           name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_ppc64le.tar.xz
 
+      - name: Download s390x artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_s390x.tar.xz
+
       - name: Build bundle
         shell: bash
         run: |
-          mkdir -p bundle/{arm64,ppc64le}
+          mkdir -p bundle/{arm64,ppc64le,s390x}
           cd bundle
           tar xvf ../sftpgo_${SFTPGO_VERSION}_linux_x86_64.tar.xz
           cd arm64
           tar xvf ../../sftpgo_${SFTPGO_VERSION}_linux_arm64.tar.xz sftpgo
           cd ../ppc64le
           tar xvf ../../sftpgo_${SFTPGO_VERSION}_linux_ppc64le.tar.xz sftpgo
+          cd ../s390x
+          tar xvf ../../sftpgo_${SFTPGO_VERSION}_linux_s390x.tar.xz sftpgo
           cd ..
           tar cJvf sftpgo_${SFTPGO_VERSION}_linux_bundle.tar.xz *
           cd ..
@@ -403,6 +416,11 @@ jobs:
         with:
           name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_ppc64le.tar.xz
 
+      - name: Download s390x artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_s390x.tar.xz
+
       - name: Download Linux bundle artifact
         uses: actions/download-artifact@v2
         with:
@@ -423,6 +441,11 @@ jobs:
         with:
           name: sftpgo_${{ steps.get_version.outputs.PKG_VERSION }}-1_ppc64el.deb
 
+      - name: Download Deb s390x artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: sftpgo_${{ steps.get_version.outputs.PKG_VERSION }}-1_s390x.deb
+
       - name: Download RPM x86_64 artifact
         uses: actions/download-artifact@v2
         with:
@@ -437,6 +460,11 @@ jobs:
         uses: actions/download-artifact@v2
         with:
           name: sftpgo-${{ steps.get_version.outputs.PKG_VERSION }}-1.ppc64le.rpm
+
+      - name: Download RPM s390x artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: sftpgo-${{ steps.get_version.outputs.PKG_VERSION }}-1.s390x.rpm
 
       - name: Download macOS x86_64 artifact
         uses: actions/download-artifact@v2
