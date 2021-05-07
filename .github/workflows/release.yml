@@ -282,7 +282,6 @@ jobs:
             if [ ${{ matrix.arch}} == 'armv7' ]
             then
               export GOARM=7
-              echo goarm $GOARM
             fi
             go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
             mkdir -p output/{init,sqlite,bash_completion,zsh_completion}

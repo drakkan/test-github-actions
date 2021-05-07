@@ -195,18 +195,22 @@ jobs:
           - arch: amd64
             go: 1.16
             go-arch: amd64
+            nfpm-arch: amd64
           - arch: aarch64
             distro: ubuntu18.04
             go: latest
             go-arch: arm64
+            nfpm-arch: arm64
           - arch: ppc64le
             distro: ubuntu18.04
             go: latest
             go-arch: ppc64le
+            nfpm-arch: ppc64le
           - arch: armv7
             distro: ubuntu18.04
             go: latest
             go-arch: armv6l
+            nfpm-arch: arm
     steps:
       - uses: actions/checkout@v2
         with:
@@ -260,7 +264,6 @@ jobs:
             if [ ${{ matrix.arch}} == 'armv7' ]
             then
               export GOARM=7
-              echo goarm $GOARM
             fi
             go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
             mkdir -p output/{init,bash_completion,zsh_completion}
@@ -283,7 +286,7 @@ jobs:
       - name: Build Packages
         id: build_linux_pkgs
         run: |
-          export NFPM_ARCH=${{ matrix.go-arch }}
+          export NFPM_ARCH=${{ matrix.nfpm-arch }}
           cd pkgs
           ./build.sh
           PKG_VERSION=$(cat dist/version)
