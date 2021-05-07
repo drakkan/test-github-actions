@@ -65,6 +65,7 @@ var (
 		Address:         "127.0.0.1",
 		Port:            8080,
 		EnableWebAdmin:  true,
+		EnableWebClient: true,
 		EnableHTTPS:     false,
 		ClientAuthType:  0,
 		TLSCipherSuites: nil,
@@ -223,8 +224,8 @@ func Init() {
 				BcryptOptions: dataprovider.BcryptOptions{
 					Cost: 10,
 				},
+				Algo: dataprovider.HashingAlgoBcrypt,
 			},
-			PasswordHashingAlgo:       dataprovider.HashingAlgoArgon2ID,
 			PasswordCaching:           true,
 			UpdateMode:                0,
 			PreferDatabaseCredentials: false,
@@ -236,7 +237,7 @@ func Init() {
 			TemplatesPath:      "templates",
 			StaticFilesPath:    "static",
 			BackupsPath:        "backups",
-			WebAdminRoot:       "",
+			WebRoot:            "",
 			CertificateFile:    "",
 			CertificateKeyFile: "",
 			CACertificates:     nil,
@@ -807,6 +808,12 @@ func getHTTPDBindingFromEnv(idx int) {
 		isSet = true
 	}
 
+	enableWebClient, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__ENABLE_WEB_CLIENT", idx))
+	if ok {
+		binding.EnableWebClient = enableWebClient
+		isSet = true
+	}
+
 	enableHTTPS, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__ENABLE_HTTPS", idx))
 	if ok {
 		binding.EnableHTTPS = enableHTTPS
@@ -940,11 +947,11 @@ func setViperDefaults() {
 	viper.SetDefault("data_provider.post_login_scope", globalConf.ProviderConf.PostLoginScope)
 	viper.SetDefault("data_provider.check_password_hook", globalConf.ProviderConf.CheckPasswordHook)
 	viper.SetDefault("data_provider.check_password_scope", globalConf.ProviderConf.CheckPasswordScope)
+	viper.SetDefault("data_provider.password_hashing.bcrypt_options.cost", globalConf.ProviderConf.PasswordHashing.BcryptOptions.Cost)
 	viper.SetDefault("data_provider.password_hashing.argon2_options.memory", globalConf.ProviderConf.PasswordHashing.Argon2Options.Memory)
 	viper.SetDefault("data_provider.password_hashing.argon2_options.iterations", globalConf.ProviderConf.PasswordHashing.Argon2Options.Iterations)
 	viper.SetDefault("data_provider.password_hashing.argon2_options.parallelism", globalConf.ProviderConf.PasswordHashing.Argon2Options.Parallelism)
-	viper.SetDefault("data_provider.password_hashing.bcrypt_options.cost", globalConf.ProviderConf.PasswordHashing.BcryptOptions.Cost)
-	viper.SetDefault("data_provider.password_hashing_algo", globalConf.ProviderConf.PasswordHashingAlgo)
+	viper.SetDefault("data_provider.password_hashing.algo", globalConf.ProviderConf.PasswordHashing.Algo)
 	viper.SetDefault("data_provider.update_mode", globalConf.ProviderConf.UpdateMode)
 	viper.SetDefault("data_provider.skip_natural_keys_validation", globalConf.ProviderConf.SkipNaturalKeysValidation)
 	viper.SetDefault("data_provider.delayed_quota_update", globalConf.ProviderConf.DelayedQuotaUpdate)
@@ -952,7 +959,7 @@ func setViperDefaults() {
 	viper.SetDefault("httpd.templates_path", globalConf.HTTPDConfig.TemplatesPath)
 	viper.SetDefault("httpd.static_files_path", globalConf.HTTPDConfig.StaticFilesPath)
 	viper.SetDefault("httpd.backups_path", globalConf.HTTPDConfig.BackupsPath)
-	viper.SetDefault("httpd.web_admin_root", globalConf.HTTPDConfig.WebAdminRoot)
+	viper.SetDefault("httpd.web_root", globalConf.HTTPDConfig.WebRoot)
 	viper.SetDefault("httpd.certificate_file", globalConf.HTTPDConfig.CertificateFile)
 	viper.SetDefault("httpd.certificate_key_file", globalConf.HTTPDConfig.CertificateKeyFile)
 	viper.SetDefault("httpd.ca_certificates", globalConf.HTTPDConfig.CACertificates)

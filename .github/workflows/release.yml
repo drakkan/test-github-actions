@@ -5,7 +5,7 @@ on:
     tags: 'v*'
 
 env:
-  GO_VERSION: 1.16.3
+  GO_VERSION: 1.16.4
 
 jobs:
   prepare-sources-with-deps:
@@ -194,24 +194,28 @@ jobs:
             deb-arch: amd64
             rpm-arch: x86_64
             tar-arch: x86_64
+            nfpm-arch: amd64
           - arch: aarch64
             distro: ubuntu18.04
             go-arch: arm64
             deb-arch: arm64
             rpm-arch: aarch64
             tar-arch: arm64
+            nfpm-arch: arm64
           - arch: ppc64le
             distro: ubuntu18.04
             go-arch: ppc64le
             deb-arch: ppc64el
             rpm-arch: ppc64le
             tar-arch: ppc64le
-          - arch: s390x
-            distro: fedora_latest
-            go-arch: s390x
-            deb-arch: s390x
-            rpm-arch: s390x
-            tar-arch: s390x
+            nfpm-arch: ppc64le
+          - arch: armv7
+            distro: ubuntu18.04
+            go-arch: armv6l
+            deb-arch: armhf
+            rpm-arch: arm
+            tar-arch: armv7
+            nfpm-arch: arm
 
     steps:
       - uses: actions/checkout@v2
@@ -275,6 +279,11 @@ jobs:
             tar -C /usr/local -xzf go.tar.gz
           run: |
             export PATH=$PATH:/usr/local/go/bin
+            if [ ${{ matrix.arch}} == 'armv7' ]
+            then
+              export GOARM=7
+              echo goarm $GOARM
+            fi
             go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
             mkdir -p output/{init,sqlite,bash_completion,zsh_completion}
             echo "For documentation please take a look here:" > output/README.txt
@@ -306,7 +315,7 @@ jobs:
       - name: Build Packages
         id: build_linux_pkgs
         run: |
-          export NFPM_ARCH=${{ matrix.go-arch }}
+          export NFPM_ARCH=${{ matrix.nfpm-arch }}
           cd pkgs
           ./build.sh
           PKG_VERSION=${SFTPGO_VERSION:1}
@@ -355,23 +364,23 @@ jobs:
         with:
           name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_ppc64le.tar.xz
 
-      - name: Download s390x artifact
+      - name: Download armv7 artifact
         uses: actions/download-artifact@v2
         with:
-          name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_s390x.tar.xz
+          name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_armv7.tar.xz
 
       - name: Build bundle
         shell: bash
         run: |
-          mkdir -p bundle/{arm64,ppc64le,s390x}
+          mkdir -p bundle/{arm64,ppc64le,armv7}
           cd bundle
           tar xvf ../sftpgo_${SFTPGO_VERSION}_linux_x86_64.tar.xz
           cd arm64
           tar xvf ../../sftpgo_${SFTPGO_VERSION}_linux_arm64.tar.xz sftpgo
           cd ../ppc64le
           tar xvf ../../sftpgo_${SFTPGO_VERSION}_linux_ppc64le.tar.xz sftpgo
-          cd ../s390x
-          tar xvf ../../sftpgo_${SFTPGO_VERSION}_linux_s390x.tar.xz sftpgo
+          cd ../armv7
+          tar xvf ../../sftpgo_${SFTPGO_VERSION}_linux_armv7.tar.xz sftpgo
           cd ..
           tar cJvf sftpgo_${SFTPGO_VERSION}_linux_bundle.tar.xz *
           cd ..
@@ -416,10 +425,10 @@ jobs:
         with:
           name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_ppc64le.tar.xz
 
-      - name: Download s390x artifact
+      - name: Download armv7 artifact
         uses: actions/download-artifact@v2
         with:
-          name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_s390x.tar.xz
+          name: sftpgo_${{ steps.get_version.outputs.SFTPGO_VERSION }}_linux_armv7.tar.xz
 
       - name: Download Linux bundle artifact
         uses: actions/download-artifact@v2
@@ -441,10 +450,10 @@ jobs:
         with:
           name: sftpgo_${{ steps.get_version.outputs.PKG_VERSION }}-1_ppc64el.deb
 
-      - name: Download Deb s390x artifact
+      - name: Download Deb armv7 artifact
         uses: actions/download-artifact@v2
         with:
-          name: sftpgo_${{ steps.get_version.outputs.PKG_VERSION }}-1_s390x.deb
+          name: sftpgo_${{ steps.get_version.outputs.PKG_VERSION }}-1_armhf.deb
 
       - name: Download RPM x86_64 artifact
         uses: actions/download-artifact@v2
@@ -461,10 +470,10 @@ jobs:
         with:
           name: sftpgo-${{ steps.get_version.outputs.PKG_VERSION }}-1.ppc64le.rpm
 
-      - name: Download RPM s390x artifact
+      - name: Download RPM armv7 artifact
         uses: actions/download-artifact@v2
         with:
-          name: sftpgo-${{ steps.get_version.outputs.PKG_VERSION }}-1.s390x.rpm
+          name: sftpgo-${{ steps.get_version.outputs.PKG_VERSION }}-1.arm.rpm
 
       - name: Download macOS x86_64 artifact
         uses: actions/download-artifact@v2

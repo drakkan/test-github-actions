@@ -64,6 +64,16 @@ func (fs *OsFs) Lstat(name string) (os.FileInfo, error) {
 // Open opens the named file for reading
 func (*OsFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error) {
 	f, err := os.Open(name)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if offset > 0 {
+		_, err = f.Seek(offset, io.SeekStart)
+		if err != nil {
+			f.Close()
+			return nil, nil, nil, err
+		}
+	}
 	return f, nil, nil, err
 }
 
@@ -359,7 +369,13 @@ func (fs *OsFs) isSubDir(sub string) error {
 		err = fmt.Errorf("path %#v is not inside %#v", sub, parent)
 		return err
 	}
-	if !strings.HasPrefix(sub, parent+string(os.PathSeparator)) {
+	separator := string(os.PathSeparator)
+	if parent == filepath.Dir(parent) {
+		// parent is the root dir, on Windows we can have C:\, D:\ and so on here
+		// so we still need the prefix check
+		separator = ""
+	}
+	if !strings.HasPrefix(sub, parent+separator) {
 		err = fmt.Errorf("path %#v is not inside %#v", sub, parent)
 		return err
 	}

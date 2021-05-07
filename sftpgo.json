@@ -161,16 +161,16 @@
     "check_password_hook": "",
     "check_password_scope": 0,
     "password_hashing": {
+      "bcrypt_options": {
+        "cost": 10
+      },
       "argon2_options": {
         "memory": 65536,
         "iterations": 1,
         "parallelism": 2
       },
-      "bcrypt_options": {
-        "cost": 10
-      }
+      "algo": "bcrypt"
     },
-    "password_hashing_algo": "argon2id",
     "password_caching": true,
     "update_mode": 0,
     "skip_natural_keys_validation": false
@@ -181,6 +181,7 @@
         "port": 8080,
         "address": "127.0.0.1",
         "enable_web_admin": true,
+        "enable_web_client": true,
         "enable_https": false,
         "client_auth_type": 0,
         "tls_cipher_suites": []
@@ -189,7 +190,7 @@
     "templates_path": "templates",
     "static_files_path": "static",
     "backups_path": "backups",
-    "web_admin_root": "",
+    "web_root": "",
     "certificate_file": "",
     "certificate_key_file": "",
     "ca_certificates": [],

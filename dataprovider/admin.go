@@ -66,7 +66,7 @@ type Admin struct {
 
 func (a *Admin) checkPassword() error {
 	if a.Password != "" && !strings.HasPrefix(a.Password, argonPwdPrefix) {
-		if config.PasswordHashingAlgo == HashingAlgoBcrypt {
+		if config.PasswordHashing.Algo == HashingAlgoBcrypt {
 			pwd, err := bcrypt.GenerateFromPassword([]byte(a.Password), config.PasswordHashing.BcryptOptions.Cost)
 			if err != nil {
 				return err
@@ -125,7 +125,7 @@ func (a *Admin) validate() error {
 func (a *Admin) CheckPassword(password string) (bool, error) {
 	if strings.HasPrefix(a.Password, bcryptPwdPrefix) {
 		if err := bcrypt.CompareHashAndPassword([]byte(a.Password), []byte(password)); err != nil {
-			return false, err
+			return false, ErrInvalidCredentials
 		}
 		return true, nil
 	}

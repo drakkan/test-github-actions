@@ -131,7 +131,7 @@ func (p *MemoryProvider) validateAdminAndPass(username, password, ip string) (Ad
 	admin, err := p.adminExists(username)
 	if err != nil {
 		providerLog(logger.LevelWarn, "error authenticating admin %#v: %v", username, err)
-		return admin, err
+		return admin, ErrInvalidCredentials
 	}
 	err = admin.checkUserAndPass(password, ip)
 	return admin, err

@@ -40,9 +40,10 @@ type webDavServer struct {
 func (s *webDavServer) listenAndServe(compressor *middleware.Compressor) error {
 	handler := compressor.Handler(s)
 	httpServer := &http.Server{
-		Addr:              s.binding.GetAddress(),
 		ReadHeaderTimeout: 30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 16, // 64KB
 		ErrorLog:          log.New(&logger.StdLoggerWrapper{Sender: logSender}, "", 0),
 	}
@@ -79,15 +80,11 @@ func (s *webDavServer) listenAndServe(compressor *middleware.Compressor) error {
 				httpServer.TLSConfig.ClientAuth = tls.VerifyClientCertIfGiven
 			}
 		}
-		logger.Info(logSender, "", "starting HTTPS serving, binding: %v", s.binding.GetAddress())
-		utils.CheckTCP4Port(s.binding.Port)
-		return httpServer.ListenAndServeTLS("", "")
+		return utils.HTTPListenAndServe(httpServer, s.binding.Address, s.binding.Port, true, logSender)
 	}
 	s.binding.EnableHTTPS = false
 	serviceStatus.Bindings = append(serviceStatus.Bindings, s.binding)
-	logger.Info(logSender, "", "starting HTTP serving, binding: %v", s.binding.GetAddress())
-	utils.CheckTCP4Port(s.binding.Port)
-	return httpServer.ListenAndServe()
+	return utils.HTTPListenAndServe(httpServer, s.binding.Address, s.binding.Port, false, logSender)
 }
 
 func (s *webDavServer) verifyTLSConnection(state tls.ConnectionState) error {
@@ -151,7 +148,7 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer common.Connections.RemoveNetworkConnection()
 
 	if !common.Connections.IsNewConnectionAllowed() {
-		logger.Log(logger.LevelDebug, common.ProtocolFTP, "", "connection refused, configured limit reached")
+		logger.Log(logger.LevelDebug, common.ProtocolWebDAV, "", "connection refused, configured limit reached")
 		http.Error(w, common.ErrConnectionDenied.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -281,7 +278,7 @@ func (s *webDavServer) authenticate(r *http.Request, ip string) (dataprovider.Us
 	if err != nil {
 		user.Username = username
 		updateLoginMetrics(&user, ip, loginMethod, err)
-		return user, false, nil, loginMethod, err
+		return user, false, nil, loginMethod, dataprovider.ErrInvalidCredentials
 	}
 	lockSystem := webdav.NewMemLS()
 	cachedUser = &dataprovider.CachedUser{

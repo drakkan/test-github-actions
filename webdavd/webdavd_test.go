@@ -1979,7 +1979,7 @@ func TestWrongClientCertificate(t *testing.T) {
 		body, err := io.ReadAll(resp.Body)
 		assert.NoError(t, err)
 		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, string(body))
-		assert.Contains(t, string(body), "CN \"client1\" does not match username \"client2\"")
+		assert.Contains(t, string(body), "invalid credentials")
 	}
 
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
@@ -2348,6 +2348,17 @@ func checkBasicFunc(client *gowebdav.Client) error {
 	return err
 }
 
+func checkFileSize(remoteDestPath string, expectedSize int64, client *gowebdav.Client) error {
+	info, err := client.Stat(remoteDestPath)
+	if err != nil {
+		return err
+	}
+	if info.Size() != expectedSize {
+		return fmt.Errorf("uploaded file size does not match, actual: %v, expected: %v", info.Size(), expectedSize)
+	}
+	return nil
+}
+
 func uploadFile(localSourcePath string, remoteDestPath string, expectedSize int64, client *gowebdav.Client) error {
 	srcFile, err := os.Open(localSourcePath)
 	if err != nil {
@@ -2359,12 +2370,10 @@ func uploadFile(localSourcePath string, remoteDestPath string, expectedSize int6
 		return err
 	}
 	if expectedSize > 0 {
-		info, err := client.Stat(remoteDestPath)
+		err = checkFileSize(remoteDestPath, expectedSize, client)
 		if err != nil {
-			return err
-		}
-		if info.Size() != expectedSize {
-			return fmt.Errorf("uploaded file size does not match, actual: %v, expected: %v", info.Size(), expectedSize)
+			time.Sleep(1 * time.Second)
+			return checkFileSize(remoteDestPath, expectedSize, client)
 		}
 	}
 	return nil

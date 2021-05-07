@@ -112,7 +112,7 @@ var (
 	// ErrNoAuthTryed defines the error for connection closed before authentication
 	ErrNoAuthTryed = errors.New("no auth tryed")
 	// ValidProtocols defines all the valid protcols
-	ValidProtocols = []string{"SSH", "FTP", "DAV"}
+	ValidProtocols = []string{"SSH", "FTP", "DAV", "HTTP"}
 	// ErrNoInitRequired defines the error returned by InitProvider if no inizialization/update is required
 	ErrNoInitRequired = errors.New("the data provider is up to date")
 	// ErrInvalidCredentials defines the error to return if the supplied credentials are invalid
@@ -158,8 +158,10 @@ type Argon2Options struct {
 
 // PasswordHashing defines the configuration for password hashing
 type PasswordHashing struct {
-	Argon2Options Argon2Options `json:"argon2_options" mapstructure:"argon2_options"`
 	BcryptOptions BcryptOptions `json:"bcrypt_options" mapstructure:"bcrypt_options"`
+	Argon2Options Argon2Options `json:"argon2_options" mapstructure:"argon2_options"`
+	// Algorithm to use for hashing passwords. Available algorithms: argon2id, bcrypt. Default: bcrypt
+	Algo string `json:"algo" mapstructure:"algo"`
 }
 
 // UserActions defines the action to execute on user create, update, delete.
@@ -287,8 +289,7 @@ type Config struct {
 	// PreferDatabaseCredentials indicates whether credential files (currently used for Google
 	// Cloud Storage) should be stored in the database instead of in the directory specified by
 	// CredentialsPath.
-	PasswordHashingAlgo       string `json:"password_hashing_algo" mapstructure:"password_hashing_algo"`
-	PreferDatabaseCredentials bool   `json:"prefer_database_credentials" mapstructure:"prefer_database_credentials"`
+	PreferDatabaseCredentials bool `json:"prefer_database_credentials" mapstructure:"prefer_database_credentials"`
 	// SkipNaturalKeysValidation allows to use any UTF-8 character for natural keys as username, admin name,
 	// folder name. These keys are used in URIs for REST API and Web admin. By default only unreserved URI
 	// characters are allowed: ALPHA / DIGIT / "-" / "." / "_" / "~".
@@ -461,7 +462,7 @@ func Initialize(cnf Config, basePath string, checkAdmins bool) error {
 		KeyLength:   32,
 	}
 
-	if config.PasswordHashingAlgo == HashingAlgoBcrypt {
+	if config.PasswordHashing.Algo == HashingAlgoBcrypt {
 		if config.PasswordHashing.BcryptOptions.Cost > bcrypt.MaxCost {
 			err = fmt.Errorf("invalid bcrypt cost %v, max allowed %v", config.PasswordHashing.BcryptOptions.Cost, bcrypt.MaxCost)
 			logger.WarnToConsole("Unable to initialize data provider: %v", err)
@@ -1386,6 +1387,11 @@ func validateFilters(user *User) error {
 			return &ValidationError{err: fmt.Sprintf("invalid TLS username: %#v", user.Filters.TLSUsername)}
 		}
 	}
+	for _, opts := range user.Filters.WebClient {
+		if !utils.IsStringInSlice(opts, WebClientOptions) {
+			return &ValidationError{err: fmt.Sprintf("invalid web client options %#v", opts)}
+		}
+	}
 	return validateFileFilters(user)
 }
 
@@ -1520,7 +1526,7 @@ func validateBaseParams(user *User) error {
 
 func createUserPasswordHash(user *User) error {
 	if user.Password != "" && !user.IsPasswordHashed() {
-		if config.PasswordHashingAlgo == HashingAlgoBcrypt {
+		if config.PasswordHashing.Algo == HashingAlgoBcrypt {
 			pwd, err := bcrypt.GenerateFromPassword([]byte(user.Password), config.PasswordHashing.BcryptOptions.Cost)
 			if err != nil {
 				return err
@@ -1635,7 +1641,7 @@ func isPasswordOK(user *User, password string) (bool, error) {
 	} else if strings.HasPrefix(user.Password, bcryptPwdPrefix) {
 		if err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
 			providerLog(logger.LevelWarn, "error comparing password with bcrypt hash: %v", err)
-			return match, err
+			return match, ErrInvalidCredentials
 		}
 		match = true
 	} else if utils.IsStringPrefixInSlice(user.Password, pbkdfPwdPrefixes) {

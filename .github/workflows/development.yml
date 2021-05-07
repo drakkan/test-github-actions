@@ -57,11 +57,11 @@ jobs:
       - name: Run test cases using bolt provider
         run: |
           go test -v -p 1 -timeout 2m ./config -covermode=atomic
-          go test -v -p 1 -timeout 2m ./common -covermode=atomic
-          go test -v -p 1 -timeout 3m ./httpd -covermode=atomic
+          go test -v -p 1 -timeout 5m ./common -covermode=atomic
+          go test -v -p 1 -timeout 5m ./httpd -covermode=atomic
           go test -v -p 1 -timeout 8m ./sftpd -covermode=atomic
-          go test -v -p 1 -timeout 2m ./ftpd -covermode=atomic
-          go test -v -p 1 -timeout 2m ./webdavd -covermode=atomic
+          go test -v -p 1 -timeout 5m ./ftpd -covermode=atomic
+          go test -v -p 1 -timeout 5m ./webdavd -covermode=atomic
           go test -v -p 1 -timeout 2m ./telemetry -covermode=atomic
         env:
           SFTPGO_DATA_PROVIDER__DRIVER: bolt
@@ -192,10 +192,21 @@ jobs:
     strategy:
       matrix:
         include:
-          - arch: s390x
-            distro: fedora_latest
+          - arch: amd64
+            go: 1.16
+            go-arch: amd64
+          - arch: aarch64
+            distro: ubuntu18.04
             go: latest
-            go-arch: s390x
+            go-arch: arm64
+          - arch: ppc64le
+            distro: ubuntu18.04
+            go: latest
+            go-arch: ppc64le
+          - arch: armv7
+            distro: ubuntu18.04
+            go: latest
+            go-arch: armv6l
     steps:
       - uses: actions/checkout@v2
         with:
@@ -234,7 +245,8 @@ jobs:
             --volume "${PWD}/output:/output"
           shell: /bin/bash
           install: |
-            dnf -y install curl
+            apt-get update -q -y
+            apt-get install -q -y curl gcc git
             if [ ${{ matrix.go }} == 'latest' ]
             then
               GO_VERSION=$(curl https://golang.org/VERSION?m=text)
@@ -245,7 +257,22 @@ jobs:
             tar -C /usr/local -xzf go.tar.gz
           run: |
             export PATH=$PATH:/usr/local/go/bin
-            go version 
+            if [ ${{ matrix.arch}} == 'armv7' ]
+            then
+              export GOARM=7
+              echo goarm $GOARM
+            fi
+            go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
+            mkdir -p output/{init,bash_completion,zsh_completion}
+            cp sftpgo.json output/
+            cp -r templates output/
+            cp -r static output/
+            cp init/sftpgo.service output/init/
+            ./sftpgo gen completion bash > output/bash_completion/sftpgo
+            ./sftpgo gen completion zsh > output/zsh_completion/_sftpgo
+            ./sftpgo gen man -d output/man/man1
+            gzip output/man/man1/*
+            cp sftpgo output/
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v2

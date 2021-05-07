@@ -40,8 +40,8 @@ const (
 
 // IsStringInSlice searches a string in a slice and returns true if the string is found
 func IsStringInSlice(obj string, list []string) bool {
-	for _, v := range list {
-		if v == obj {
+	for i := 0; i < len(list); i++ {
+		if list[i] == obj {
 			return true
 		}
 	}
@@ -51,8 +51,8 @@ func IsStringInSlice(obj string, list []string) bool {
 // IsStringPrefixInSlice searches a string prefix in a slice and returns true
 // if a matching prefix is found
 func IsStringPrefixInSlice(obj string, list []string) bool {
-	for _, v := range list {
-		if strings.HasPrefix(obj, v) {
+	for i := 0; i < len(list); i++ {
+		if strings.HasPrefix(obj, list[i]) {
 			return true
 		}
 	}
@@ -426,11 +426,10 @@ func HTTPListenAndServe(srv *http.Server, address string, port int, isTLS bool, 
 			logger.Error(logSender, "", "error creating Unix-domain socket parent dir: %v", err)
 		}
 		os.Remove(address)
-
-		listener, err = net.Listen("unix", address)
+		listener, err = newListener("unix", address, srv.ReadTimeout, srv.WriteTimeout)
 	} else {
 		CheckTCP4Port(port)
-		listener, err = net.Listen("tcp", fmt.Sprintf("%s:%d", address, port))
+		listener, err = newListener("tcp", fmt.Sprintf("%s:%d", address, port), srv.ReadTimeout, srv.WriteTimeout)
 	}
 	if err != nil {
 		return err
